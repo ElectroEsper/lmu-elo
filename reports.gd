@@ -472,3 +472,275 @@ func head_to_head(cls: String, sess: String, a: String, b: String) -> Array:
 	if rows.is_empty():
 		note = "These two have not been rated in the same %s %s session yet." % [cls, sess]
 	return [_table("%s vs %s" % [a, b], ["Event", "%s pos" % a, "%s pos" % b, "Ahead"], rows, note)]
+
+# ---------- 11. Driver profile ----------
+# Every rated session of one driver, in date order, with that session's stored stats.
+func _driver_rows(driver_name: String) -> Array:
+	var out := []
+	for i in Elo.history.size():
+		var ev: Dictionary = Elo.history[i]
+		for c in ev["changes"]:
+			if c["driver"] == driver_name:
+				out.append({
+					"idx": i, "event": ev["file"], "cls": c["cls"], "sess": c["sess"],
+					"pos": int(c["pos"]), "of": int(c["of"]),
+					"before": c["before"], "after": c["after"],
+					"stats": _stats_for(ev, c["sess"], c["cls"]).get(driver_name, {}),
+				})
+	return out
+
+
+func _int_or_blank(s: Dictionary, key: String) -> Variant:
+	if s.is_empty():
+		return ""
+	return int(s.get(key, 0))
+
+
+# Returns tables: Overview, Ratings, Race record, Quali record, Results, Rating history.
+# Tables without rows are left out.
+func driver_profile(driver_name: String) -> Array:
+	var rows := _driver_rows(driver_name)
+	if rows.is_empty():
+		return [_table("Profile", ["Stat", "Value"], [], "No results found for this driver.")]
+	var tables := [
+		_profile_overview(driver_name, rows),
+		_profile_ratings(driver_name, rows),
+		_profile_race(rows),
+		_profile_quali(rows),
+		_profile_results(rows),
+		_profile_chart(rows),
+	]
+	var out := []
+	for t in tables:
+		if not t["rows"].is_empty():
+			out.append(t)
+	return out
+
+
+func _profile_overview(driver_name: String, rows: Array) -> Dictionary:
+	var events := {}
+	var classes := {}
+	var laps := 0
+	var led := 0
+	for r in rows:
+		events[r["idx"]] = true
+		classes[r["cls"]] = true
+		if r["sess"] == "race" and not r["stats"].is_empty():
+			laps += int(r["stats"]["laps"])
+			led += int(r["stats"]["led"])
+	var cls_list := classes.keys()
+	cls_list.sort()
+	var akas := []
+	for alias in Elo.aliases:
+		if Elo.aliases[alias] == driver_name:
+			akas.append(alias)
+	var duels := 0
+	for k in Elo.ratings:
+		if k.rsplit("|", true, 2)[0] == driver_name:
+			duels += int(Elo.ratings[k]["d"])
+	var out := [
+		["Events", events.size()],
+		["Sessions rated", rows.size()],
+		["Classes", ", ".join(PackedStringArray(cls_list))],
+		["First event", rows[0]["event"]],
+		["Latest event", rows[rows.size() - 1]["event"]],
+		["Race laps completed", laps],
+		["Race laps led", led],
+		["Duels fought (all ratings)", duels],
+		["Also known as", ", ".join(PackedStringArray(akas)) if not akas.is_empty() else "-"],
+	]
+	return _table("Overview", ["Stat", "Value"], out,
+		"Laps figures only count events that have stored stats.")
+
+
+func _profile_ratings(driver_name: String, rows: Array) -> Dictionary:
+	var out := []
+	for board in Elo.boards():
+		var key := "%s|%s|%s" % [driver_name, board[0], board[1]]
+		if not Elo.ratings.has(key):
+			continue
+		var e: Dictionary = Elo.ratings[key]
+		var lb := Elo.leaderboard(board[0], board[1])
+		var rank := 0
+		for i in lb.size():
+			if lb[i]["name"] == driver_name:
+				rank = i + 1
+		var peak := -1.0e9
+		var debut: float = Elo.START
+		var seen := false
+		for r in rows:
+			if r["cls"] == board[0] and r["sess"] == board[1]:
+				peak = maxf(peak, r["after"])
+				if not seen:
+					debut = r["before"]
+					seen = true
+		if peak < 0.0:
+			peak = e["r"]
+		out.append([board[0], board[1], roundi(e["r"]), rank, lb.size(), roundi(peak),
+			roundi(e["r"] - debut), int(e["d"]),
+			"settling" if e["d"] < Elo.K_RAMP_DUELS else "settled"])
+	return _table("Ratings",
+		["Class", "Session", "Rating", "Rank", "Of", "Peak", "Since debut", "Duels", "Status"],
+		out, "Rank is within the class and session.")
+
+
+func _profile_race(rows: Array) -> Dictionary:
+	var by_class := {}
+	for r in rows:
+		if r["sess"] == "race":
+			if not by_class.has(r["cls"]):
+				by_class[r["cls"]] = []
+			by_class[r["cls"]].append(r)
+	var out := []
+	var classes := by_class.keys()
+	classes.sort()
+	for cls in classes:
+		var rs: Array = by_class[cls]
+		var n := rs.size()
+		var total := 0.0
+		var wins := 0
+		var podiums := 0
+		var points := 0
+		var best := 1000
+		var worst := 0
+		for r in rs:
+			var p: int = r["pos"]
+			total += p
+			if p == 1:
+				wins += 1
+			if p <= 3:
+				podiums += 1
+			if p <= POINTS.size():
+				points += POINTS[p - 1]
+			best = mini(best, p)
+			worst = maxi(worst, p)
+		var mean := total / n
+		var sq := 0.0
+		for r in rs:
+			sq += (r["pos"] - mean) * (r["pos"] - mean)
+
+		# figures that need the stored stats
+		var dnfs := 0
+		var laps := 0
+		var led := 0
+		var pits := 0
+		var inc := 0
+		var env := 0
+		var pens := 0
+		var grid_total := 0.0
+		var gain_total := 0.0
+		var grid_n := 0
+		var best_lap := 0.0
+		for r in rs:
+			var s: Dictionary = r["stats"]
+			if s.is_empty():
+				continue
+			if s["status"] != "Finished Normally":
+				dnfs += 1
+			laps += int(s["laps"])
+			led += int(s["led"])
+			pits += int(s["pits"])
+			inc += int(s["inc"])
+			env += int(s["env"])
+			pens += int(s["pens"])
+			if int(s["grid"]) > 0:
+				grid_total += int(s["grid"])
+				gain_total += int(s["grid"]) - r["pos"]
+				grid_n += 1
+			if s["best"] > 0.0 and (best_lap == 0.0 or s["best"] < best_lap):
+				best_lap = s["best"]
+		var avg_grid: Variant = ""
+		var avg_gain: Variant = ""
+		if grid_n > 0:
+			avg_grid = snappedf(grid_total / grid_n, 0.1)
+			avg_gain = snappedf(gain_total / grid_n, 0.1)
+		out.append([cls, n, wins, podiums, snappedf(mean, 0.1), snappedf(sqrt(sq / n), 0.1),
+			best, worst, points, dnfs, laps, led, pits, inc, env, pens,
+			avg_grid, avg_gain, _lap(best_lap)])
+	return _table("Race record",
+		["Class", "Races", "Wins", "Podiums", "Avg finish", "Std dev", "Best", "Worst", "Points",
+			"DNFs", "Laps", "Led", "Pits", "Contacts", "Env", "Pens", "Avg grid", "Avg gained", "Best lap"],
+		out, "Laps, laps led, pits, contacts, penalties, grid and best lap only count events with stored stats.")
+
+
+func _profile_quali(rows: Array) -> Dictionary:
+	var by_class := {}
+	for r in rows:
+		if r["sess"] == "quali":
+			if not by_class.has(r["cls"]):
+				by_class[r["cls"]] = []
+			by_class[r["cls"]].append(r)
+	var out := []
+	var classes := by_class.keys()
+	classes.sort()
+	for cls in classes:
+		var rs: Array = by_class[cls]
+		var total := 0.0
+		var poles := 0
+		var top3 := 0
+		var best := 1000
+		var best_lap := 0.0
+		for r in rs:
+			var p: int = r["pos"]
+			total += p
+			if p == 1:
+				poles += 1
+			if p <= 3:
+				top3 += 1
+			best = mini(best, p)
+			var s: Dictionary = r["stats"]
+			if not s.is_empty() and s["best"] > 0.0 and (best_lap == 0.0 or s["best"] < best_lap):
+				best_lap = s["best"]
+		out.append([cls, rs.size(), poles, top3, snappedf(total / rs.size(), 0.1), best, _lap(best_lap)])
+	return _table("Quali record",
+		["Class", "Sessions", "Poles", "Top 3", "Avg pos", "Best pos", "Best lap"], out)
+
+
+func _profile_results(rows: Array) -> Dictionary:
+	var out := []
+	for r in rows:
+		var s: Dictionary = r["stats"]
+		var is_race: bool = r["sess"] == "race"
+		var status := ""
+		if not s.is_empty() and s["status"] != "Finished Normally":
+			status = s["status"]
+		out.append([
+			r["event"], r["cls"], r["sess"], r["pos"], r["of"],
+			_int_or_blank(s, "grid") if is_race else "",
+			_lap(s.get("best", 0.0)) if not s.is_empty() else "",
+			_int_or_blank(s, "laps"),
+			_int_or_blank(s, "pits") if is_race else "",
+			_int_or_blank(s, "led") if is_race else "",
+			roundi(r["after"]), roundi(r["after"] - r["before"]), status])
+	return _table("Results",
+		["Event", "Class", "Session", "Pos", "Of", "Grid", "Best lap", "Laps", "Pits", "Led",
+			"Rating", "Change", "Status"],
+		out, "One row per rated session, oldest first. Blank cells mean no stats were stored.")
+
+
+func _profile_chart(rows: Array) -> Dictionary:
+	var by_board := {}   # "GT3 race" -> [[event index, rating after], ...]
+	for r in rows:
+		var label := "%s %s" % [r["cls"], r["sess"]]
+		if not by_board.has(label):
+			by_board[label] = []
+		by_board[label].append([r["idx"], r["after"]])
+	var labels := by_board.keys()
+	labels.sort()
+	var series := []
+	var out := []
+	for k in labels.size():
+		var pts: Array = by_board[labels[k]]
+		series.append({
+			"name": labels[k],
+			"color": chart_colors[k % chart_colors.size()],
+			"points": pts,
+		})
+		var peak := -1.0e9
+		for pt in pts:
+			peak = maxf(peak, pt[1])
+		out.append([labels[k], pts.size(), roundi(pts[0][1]), roundi(pts.back()[1]), roundi(peak)])
+	var t := _table("Rating history", ["Rating", "Events", "After first", "Latest", "Peak"], out,
+		"Horizontal axis = event number across all events.")
+	t["chart"] = {"series": series, "x_max": float(maxi(Elo.history.size() - 1, 1))}
+	return t
