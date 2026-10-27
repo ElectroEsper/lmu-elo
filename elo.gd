@@ -249,6 +249,7 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 	var parsed := parse_results(path)
 	var draft := {
 		"file": path.get_file(),
+		"path": path,
 		"hash": FileAccess.get_sha256(path),
 		"orders": {},   # orders[session][class] = [names]
 		"stats": {},    # stats[session][class][name] = {...}
@@ -263,6 +264,7 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 		var g := _orders(parsed["Race"], "Race", "ClassGridPos")
 		if not g.is_empty():
 			draft["orders"]["quali"] = g
+	draft["track"] = _read_track(path)
 	draft["duplicate"] = processed.has(draft["hash"])
 	draft["new_drivers"] = _find_suspects(draft)
 	return draft
@@ -289,9 +291,11 @@ func confirm_draft(draft: Dictionary) -> void:
 	if processed.has(draft["hash"]):
 		return
 	_apply(draft)
+	archive_xml(draft)
 	var saved := draft.duplicate(true)
 	saved.erase("duplicate")
 	saved.erase("new_drivers")
+	saved.erase("path")
 	DirAccess.make_dir_recursive_absolute("user://events")
 	var f := FileAccess.open("user://events/%s.json" % draft["file"], FileAccess.WRITE)
 	f.store_string(JSON.stringify(saved))
@@ -306,7 +310,7 @@ func event_lacks_stats(draft: Dictionary) -> bool:
 	var original: String = processed[draft["hash"]]
 	for h in history:
 		if h["file"] == original:
-			return h.get("stats", {}).is_empty()
+			return h.get("stats", {}).is_empty() or stored_xml_path(original) == ""
 	return false
 
 
@@ -316,6 +320,7 @@ func attach_stats(draft: Dictionary) -> bool:
 	if not processed.has(draft["hash"]):
 		return false
 	var original: String = processed[draft["hash"]]
+	archive_xml(draft, original)
 	var path := "user://events/%s.json" % original
 	if not FileAccess.file_exists(path):
 		return false
@@ -323,6 +328,7 @@ func attach_stats(draft: Dictionary) -> bool:
 	if not (saved is Dictionary):
 		return false
 	saved["stats"] = draft["stats"]
+	saved["track"] = draft.get("track", {})
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_string(JSON.stringify(saved))
 	f.close()
@@ -628,3 +634,55 @@ func load_ratings() -> void:
 		processed = data.get("processed", {})
 		aliases = data.get("aliases", {})
 		history = data.get("history", [])
+
+# ---------- XML archive ----------
+# Every confirmed result file is copied here so it can be re-read later (new stats, tracks, etc.).
+const XML_DIR := "user://xml"
+
+# Copies the original XML into user://xml/<file name>. Returns true if the copy exists afterwards.
+func archive_xml(draft: Dictionary, as_name := "") -> bool:
+	var src: String = draft.get("path", "")
+	if src == "" or not FileAccess.file_exists(src):
+		return false
+	var dst := "%s/%s" % [XML_DIR, as_name if as_name != "" else draft["file"]]
+	if FileAccess.file_exists(dst):
+		return true
+	DirAccess.make_dir_recursive_absolute(XML_DIR)
+	return DirAccess.copy_absolute(src, dst) == OK
+
+# Path of the archived copy of a result file, or "" if it was never archived.
+func stored_xml_path(file_name: String) -> String:
+	var p := "%s/%s" % [XML_DIR, file_name]
+	return p if FileAccess.file_exists(p) else ""
+
+# Re-reads every archived XML and refreshes stats + track info of the saved events.
+# Nothing is rated again. Returns how many events were updated.
+func refresh_from_archive() -> int:
+	var n := 0
+	for f in DirAccess.get_files_at(XML_DIR):
+		if f.ends_with(".xml") and attach_stats(build_draft("%s/%s" % [XML_DIR, f])):
+			n += 1
+	return n
+
+# Track header fields from a result file: {"TrackVenue", "TrackCourse", "TrackLength", "RaceTime"}.
+func _read_track(path: String) -> Dictionary:
+	var out := {}
+	var p := XMLParser.new()
+	if p.open(path) != OK:
+		return out
+	var wanted := ["TrackVenue", "TrackCourse", "TrackLength", "RaceTime"]
+	var tag := ""
+	while p.read() == OK:
+		match p.get_node_type():
+			XMLParser.NODE_ELEMENT:
+				var n := p.get_node_name()
+				if n == "Race" or n == "Qualify":
+					break # header is over
+				tag = n if n in wanted else ""
+			XMLParser.NODE_TEXT:
+				if tag != "":
+					out[tag] = p.get_node_data().strip_edges()
+					tag = ""
+			XMLParser.NODE_ELEMENT_END:
+				tag = ""
+	return out

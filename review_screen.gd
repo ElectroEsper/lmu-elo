@@ -23,6 +23,7 @@ var ratings_view := TabContainer.new()
 
 # reports view
 var reports_view := ReportsView.new()
+var predict_view := PredictView.new()
 
 
 func _ready() -> void:
@@ -37,8 +38,10 @@ func _ready() -> void:
 	top_bar.add_child(_btn("Review", _show_view.bind("review")))
 	top_bar.add_child(_btn("Ratings", _show_view.bind("ratings")))
 	top_bar.add_child(_btn("Reports", _show_view.bind("reports")))
+	top_bar.add_child(_btn("Predict", _show_view.bind("predict")))
 	top_bar.add_child(_btn("Recompute all", confirm_dialog.popup_centered))
 	top_bar.add_child(_btn("Export to Excel", _export))
+	top_bar.add_child(_btn("Re-read archived XML", func(): status.text = "Refreshed %d events." % Elo.refresh_from_archive()))
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(status)
 
@@ -63,6 +66,11 @@ func _ready() -> void:
 	reports_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	reports_view.notice.connect(_on_notice)
 	root.add_child(reports_view)
+	
+	# predict view
+	predict_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	predict_view.notice.connect(_on_notice)
+	root.add_child(predict_view)
 
 	# recompute confirmation
 	confirm_dialog.dialog_text = "Rebuild every rating from the saved events, oldest to newest?\nThe current ratings are backed up first."
@@ -78,10 +86,13 @@ func _show_view(view: String) -> void:
 	review_box.visible = view == "review"
 	ratings_view.visible = view == "ratings"
 	reports_view.visible = view == "reports"
+	predict_view.visible = view == "predict"
 	if view == "ratings":
 		_draw_ratings()
 	elif view == "reports":
 		reports_view.refresh()
+	elif view == "predict":                
+		predict_view.refresh()
 
 
 func _on_notice(text: String) -> void:
