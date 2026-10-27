@@ -30,7 +30,7 @@ func _ready() -> void:
 
 func _setup(tree: Tree, title: String, cols: Array, wide: int, wide2: int) -> void:
 	tree.columns = cols.size()
-	tree.column_titles_in_header = true
+	tree.column_titles_visible = true
 	tree.hide_root = true
 	for i in cols.size():
 		tree.set_column_title(i, cols[i])

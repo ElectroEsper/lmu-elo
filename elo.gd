@@ -265,6 +265,7 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 		if not g.is_empty():
 			draft["orders"]["quali"] = g
 	draft["track"] = _read_track(path)
+	draft["fp"] = Fingerprint.extract(path)   # lap-data fingerprint, saved with the event for Profiles / Predict
 	draft["duplicate"] = processed.has(draft["hash"])
 	draft["new_drivers"] = _find_suspects(draft)
 	return draft
@@ -310,7 +311,7 @@ func event_lacks_stats(draft: Dictionary) -> bool:
 	var original: String = processed[draft["hash"]]
 	for h in history:
 		if h["file"] == original:
-			return h.get("stats", {}).is_empty() or stored_xml_path(original) == ""
+			return h.get("stats", {}).is_empty() or stored_xml_path(original) == "" or not _saved_has_fp(original)
 	return false
 
 
@@ -329,6 +330,7 @@ func attach_stats(draft: Dictionary) -> bool:
 		return false
 	saved["stats"] = draft["stats"]
 	saved["track"] = draft.get("track", {})
+	saved["fp"] = draft.get("fp", {})
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_string(JSON.stringify(saved))
 	f.close()
@@ -685,4 +687,50 @@ func _read_track(path: String) -> Dictionary:
 					tag = ""
 			XMLParser.NODE_ELEMENT_END:
 				tag = ""
+	return out
+
+
+# True if the saved event file already holds a lap-data fingerprint.
+func _saved_has_fp(file_name: String) -> bool:
+	var path := "user://events/%s.json" % file_name
+	if not FileAccess.file_exists(path):
+		return false
+	var saved = JSON.parse_string(FileAccess.get_file_as_string(path))
+	return saved is Dictionary and saved.has("fp") and not saved["fp"].is_empty()
+
+
+# Expands dropped files / folders into a flat list of .xml paths (folders are searched recursively).
+func collect_xml(paths: PackedStringArray) -> Array:
+	var out := []
+	for p in paths:
+		if DirAccess.dir_exists_absolute(p):
+			for f in DirAccess.get_files_at(p):
+				if f.to_lower().ends_with(".xml"):
+					out.append(p.path_join(f))
+			for sub in DirAccess.get_directories_at(p):
+				out.append_array(collect_xml(PackedStringArray([p.path_join(sub)])))
+		elif p.to_lower().ends_with(".xml"):
+			out.append(p)
+	return out
+
+
+# Backfill for events that were confirmed before stats / fingerprints existed.
+# Every file that was already rated gets its stats, track info and fingerprint attached (nothing is
+# rated again). Files that were never imported are only counted: drop them one at a time to review them.
+# Use as: var r = await Elo.backfill(paths). on_progress is called with (done, total).
+# Returns {"updated": int, "complete": int, "new": Array of file names}
+func backfill(paths: Array, on_progress := Callable()) -> Dictionary:
+	var out := {"updated": 0, "complete": 0, "new": []}
+	for i in paths.size():
+		var d := build_draft(paths[i])
+		if not processed.has(d["hash"]):
+			out["new"].append(str(paths[i]).get_file())
+		elif event_lacks_stats(d):
+			if attach_stats(d):
+				out["updated"] += 1
+		else:
+			out["complete"] += 1
+		if on_progress.is_valid():
+			on_progress.call(i + 1, paths.size())
+		await get_tree().process_frame
 	return out

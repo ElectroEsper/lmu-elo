@@ -1,0 +1,195 @@
+diff --git a/elo.gd b/elo.gd
+index db5a501..495ebb0 100644
+--- a/elo.gd
++++ b/elo.gd
+@@ -265,6 +265,7 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
+ 		if not g.is_empty():
+ 			draft["orders"]["quali"] = g
+ 	draft["track"] = _read_track(path)
++	draft["fp"] = Fingerprint.extract(path)   # lap-data fingerprint, saved with the event for Profiles / Predict
+ 	draft["duplicate"] = processed.has(draft["hash"])
+ 	draft["new_drivers"] = _find_suspects(draft)
+ 	return draft
+@@ -310,7 +311,7 @@ func event_lacks_stats(draft: Dictionary) -> bool:
+ 	var original: String = processed[draft["hash"]]
+ 	for h in history:
+ 		if h["file"] == original:
+-			return h.get("stats", {}).is_empty() or stored_xml_path(original) == ""
++			return h.get("stats", {}).is_empty() or stored_xml_path(original) == "" or not _saved_has_fp(original)
+ 	return false
+ 
+ 
+@@ -329,6 +330,7 @@ func attach_stats(draft: Dictionary) -> bool:
+ 		return false
+ 	saved["stats"] = draft["stats"]
+ 	saved["track"] = draft.get("track", {})
++	saved["fp"] = draft.get("fp", {})
+ 	var f := FileAccess.open(path, FileAccess.WRITE)
+ 	f.store_string(JSON.stringify(saved))
+ 	f.close()
+@@ -686,3 +688,49 @@ func _read_track(path: String) -> Dictionary:
+ 			XMLParser.NODE_ELEMENT_END:
+ 				tag = ""
+ 	return out
++
++
++# True if the saved event file already holds a lap-data fingerprint.
++func _saved_has_fp(file_name: String) -> bool:
++	var path := "user://events/%s.json" % file_name
++	if not FileAccess.file_exists(path):
++		return false
++	var saved = JSON.parse_string(FileAccess.get_file_as_string(path))
++	return saved is Dictionary and saved.has("fp") and not saved["fp"].is_empty()
++
++
++# Expands dropped files / folders into a flat list of .xml paths (folders are searched recursively).
++func collect_xml(paths: PackedStringArray) -> Array:
++	var out := []
++	for p in paths:
++		if DirAccess.dir_exists_absolute(p):
++			for f in DirAccess.get_files_at(p):
++				if f.to_lower().ends_with(".xml"):
++					out.append(p.path_join(f))
++			for sub in DirAccess.get_directories_at(p):
++				out.append_array(collect_xml(PackedStringArray([p.path_join(sub)])))
++		elif p.to_lower().ends_with(".xml"):
++			out.append(p)
++	return out
++
++
++# Backfill for events that were confirmed before stats / fingerprints existed.
++# Every file that was already rated gets its stats, track info and fingerprint attached (nothing is
++# rated again). Files that were never imported are only counted: drop them one at a time to review them.
++# Use as: var r = await Elo.backfill(paths). on_progress is called with (done, total).
++# Returns {"updated": int, "complete": int, "new": Array of file names}
++func backfill(paths: Array, on_progress := Callable()) -> Dictionary:
++	var out := {"updated": 0, "complete": 0, "new": []}
++	for i in paths.size():
++		var d := build_draft(paths[i])
++		if not processed.has(d["hash"]):
++			out["new"].append(str(paths[i]).get_file())
++		elif event_lacks_stats(d):
++			if attach_stats(d):
++				out["updated"] += 1
++		else:
++			out["complete"] += 1
++		if on_progress.is_valid():
++			on_progress.call(i + 1, paths.size())
++		await get_tree().process_frame
++	return out
+diff --git a/predict_view.gd b/predict_view.gd
+index d674b26..9922271 100644
+--- a/predict_view.gd
++++ b/predict_view.gd
+@@ -97,7 +97,7 @@ func _ready() -> void:
+ 	add_child(grid_line)
+ 
+ 	tree.columns = 10
+-	#tree.set_column_titles_visible = true
++	tree.column_titles_visible = true
+ 	tree.hide_root = true
+ 	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+ 	var titles := ["Grid", "Driver", "Pole %", "Front row %", "Exp. grid", "Win %", "Podium %", "Top 10 %", "Exp. finish", "Race pace %"]
+diff --git a/profiles_view.gd b/profiles_view.gd
+index f18ca02..8cc3f23 100644
+--- a/profiles_view.gd
++++ b/profiles_view.gd
+@@ -30,7 +30,7 @@ func _ready() -> void:
+ 
+ func _setup(tree: Tree, title: String, cols: Array, wide: int, wide2: int) -> void:
+ 	tree.columns = cols.size()
+-	tree.column_titles_in_header = true
++	tree.column_titles_visible = true
+ 	tree.hide_root = true
+ 	for i in cols.size():
+ 		tree.set_column_title(i, cols[i])
+diff --git a/review_screen.gd b/review_screen.gd
+index a3ab251..e4775b7 100644
+--- a/review_screen.gd
++++ b/review_screen.gd
+@@ -24,6 +24,7 @@ var ratings_view := TabContainer.new()
+ # reports view
+ var reports_view := ReportsView.new()
+ var predict_view := PredictView.new()
++var profiles_view := ProfilesView.new()
+ 
+ 
+ func _ready() -> void:
+@@ -38,6 +39,7 @@ func _ready() -> void:
+ 	top_bar.add_child(_btn("Review", _show_view.bind("review")))
+ 	top_bar.add_child(_btn("Ratings", _show_view.bind("ratings")))
+ 	top_bar.add_child(_btn("Reports", _show_view.bind("reports")))
++	top_bar.add_child(_btn("Profiles", _show_view.bind("profiles")))
+ 	top_bar.add_child(_btn("Predict", _show_view.bind("predict")))
+ 	top_bar.add_child(_btn("Recompute all", confirm_dialog.popup_centered))
+ 	top_bar.add_child(_btn("Export to Excel", _export))
+@@ -67,6 +69,11 @@ func _ready() -> void:
+ 	reports_view.notice.connect(_on_notice)
+ 	root.add_child(reports_view)
+ 	
++	# profiles view
++	profiles_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
++	profiles_view.notice.connect(_on_notice)
++	root.add_child(profiles_view)
++
+ 	# predict view
+ 	predict_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+ 	predict_view.notice.connect(_on_notice)
+@@ -86,11 +93,14 @@ func _show_view(view: String) -> void:
+ 	review_box.visible = view == "review"
+ 	ratings_view.visible = view == "ratings"
+ 	reports_view.visible = view == "reports"
++	profiles_view.visible = view == "profiles"
+ 	predict_view.visible = view == "predict"
+ 	if view == "ratings":
+ 		_draw_ratings()
+ 	elif view == "reports":
+ 		reports_view.refresh()
++	elif view == "profiles":
++		profiles_view.refresh()
+ 	elif view == "predict":                
+ 		predict_view.refresh()
+ 
+@@ -114,16 +124,31 @@ func _btn(text: String, action: Callable) -> Button:
+ 
+ # ---------- Loading and confirming ----------
+ func _on_files_dropped(files: PackedStringArray) -> void:
++	# a folder (or several files) backfills events that were confirmed earlier; one file opens the review
++	if files.size() > 1 or DirAccess.dir_exists_absolute(files[0]):
++		_backfill(Elo.collect_xml(files))
++		return
+ 	draft = Elo.build_draft(files[0], grid_check.button_pressed)
+ 	_show_view("review")
+-	Fingerprint.extract(files[0])
+ 	_rebuild()
+ 
+ 
++func _backfill(paths: Array) -> void:
++	if paths.is_empty():
++		status.text = "No .xml files found in what you dropped."
++		return
++	status.text = "Reading %d files..." % paths.size()
++	var r: Dictionary = await Elo.backfill(paths, func(done: int, total: int): status.text = "Reading %d of %d..." % [done, total])
++	status.text = "Backfill done: %d event(s) updated, %d already complete, %d not imported yet (drop those one at a time to review and rate them)." % [r["updated"], r["complete"], r["new"].size()]
++	if profiles_view.visible:
++		profiles_view.refresh()
++	if predict_view.visible:
++		predict_view.refresh()
++
++
+ func _on_confirm() -> void:
+ 	var done: String = draft["file"]
+ 	Elo.confirm_draft(draft)
+-	Fingerprint.extract(draft["path"])
+ 	draft = {}
+ 	_rebuild()
+ 	var l := Label.new()
+@@ -263,6 +288,8 @@ func _recompute() -> void:
+ 		_draw_ratings()
+ 	if reports_view.visible:
+ 		reports_view.refresh()
++	if profiles_view.visible:
++		profiles_view.refresh()
+ 
+ 
+ # ---------- Excel export (current ratings) ----------

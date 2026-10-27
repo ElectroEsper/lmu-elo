@@ -97,7 +97,7 @@ func _ready() -> void:
 	add_child(grid_line)
 
 	tree.columns = 10
-	#tree.set_column_titles_visible = true
+	tree.column_titles_visible = true
 	tree.hide_root = true
 	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	var titles := ["Grid", "Driver", "Pole %", "Front row %", "Exp. grid", "Win %", "Podium %", "Top 10 %", "Exp. finish", "Race pace %"]

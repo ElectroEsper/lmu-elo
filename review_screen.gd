@@ -24,6 +24,7 @@ var ratings_view := TabContainer.new()
 # reports view
 var reports_view := ReportsView.new()
 var predict_view := PredictView.new()
+var profiles_view := ProfilesView.new()
 
 
 func _ready() -> void:
@@ -38,6 +39,7 @@ func _ready() -> void:
 	top_bar.add_child(_btn("Review", _show_view.bind("review")))
 	top_bar.add_child(_btn("Ratings", _show_view.bind("ratings")))
 	top_bar.add_child(_btn("Reports", _show_view.bind("reports")))
+	top_bar.add_child(_btn("Profiles", _show_view.bind("profiles")))
 	top_bar.add_child(_btn("Predict", _show_view.bind("predict")))
 	top_bar.add_child(_btn("Recompute all", confirm_dialog.popup_centered))
 	top_bar.add_child(_btn("Export to Excel", _export))
@@ -67,6 +69,11 @@ func _ready() -> void:
 	reports_view.notice.connect(_on_notice)
 	root.add_child(reports_view)
 	
+	# profiles view
+	profiles_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	profiles_view.notice.connect(_on_notice)
+	root.add_child(profiles_view)
+
 	# predict view
 	predict_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	predict_view.notice.connect(_on_notice)
@@ -86,11 +93,14 @@ func _show_view(view: String) -> void:
 	review_box.visible = view == "review"
 	ratings_view.visible = view == "ratings"
 	reports_view.visible = view == "reports"
+	profiles_view.visible = view == "profiles"
 	predict_view.visible = view == "predict"
 	if view == "ratings":
 		_draw_ratings()
 	elif view == "reports":
 		reports_view.refresh()
+	elif view == "profiles":
+		profiles_view.refresh()
 	elif view == "predict":                
 		predict_view.refresh()
 
@@ -114,16 +124,31 @@ func _btn(text: String, action: Callable) -> Button:
 
 # ---------- Loading and confirming ----------
 func _on_files_dropped(files: PackedStringArray) -> void:
+	# a folder (or several files) backfills events that were confirmed earlier; one file opens the review
+	if files.size() > 1 or DirAccess.dir_exists_absolute(files[0]):
+		_backfill(Elo.collect_xml(files))
+		return
 	draft = Elo.build_draft(files[0], grid_check.button_pressed)
 	_show_view("review")
-	Fingerprint.extract(files[0])
 	_rebuild()
+
+
+func _backfill(paths: Array) -> void:
+	if paths.is_empty():
+		status.text = "No .xml files found in what you dropped."
+		return
+	status.text = "Reading %d files..." % paths.size()
+	var r: Dictionary = await Elo.backfill(paths, func(done: int, total: int): status.text = "Reading %d of %d..." % [done, total])
+	status.text = "Backfill done: %d event(s) updated, %d already complete, %d not imported yet (drop those one at a time to review and rate them)." % [r["updated"], r["complete"], r["new"].size()]
+	if profiles_view.visible:
+		profiles_view.refresh()
+	if predict_view.visible:
+		predict_view.refresh()
 
 
 func _on_confirm() -> void:
 	var done: String = draft["file"]
 	Elo.confirm_draft(draft)
-	Fingerprint.extract(draft["path"])
 	draft = {}
 	_rebuild()
 	var l := Label.new()
@@ -263,6 +288,8 @@ func _recompute() -> void:
 		_draw_ratings()
 	if reports_view.visible:
 		reports_view.refresh()
+	if profiles_view.visible:
+		profiles_view.refresh()
 
 
 # ---------- Excel export (current ratings) ----------
