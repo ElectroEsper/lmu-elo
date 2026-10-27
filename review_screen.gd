@@ -116,12 +116,14 @@ func _btn(text: String, action: Callable) -> Button:
 func _on_files_dropped(files: PackedStringArray) -> void:
 	draft = Elo.build_draft(files[0], grid_check.button_pressed)
 	_show_view("review")
+	Fingerprint.extract(files[0])
 	_rebuild()
 
 
 func _on_confirm() -> void:
 	var done: String = draft["file"]
 	Elo.confirm_draft(draft)
+	Fingerprint.extract(draft["path"])
 	draft = {}
 	_rebuild()
 	var l := Label.new()

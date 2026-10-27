@@ -20,6 +20,7 @@ config/icon="res://icon.svg"
 Elo="*uid://bvghuvb7nikxe"
 Reports="*uid://yrx3whynujyu"
 Predict="*uid://6feqnlofdv27"
+Profiles="*uid://oquud1sfax1j"
 
 [display]
 
