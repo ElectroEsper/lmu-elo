@@ -26,6 +26,15 @@ var reports_view := ReportsView.new()
 var predict_view := PredictView.new()
 var profiles_view := ProfilesView.new()
 
+# batch import
+var type_dialog := AcceptDialog.new()
+var skip_btn := Button.new()
+var auto_btn := Button.new()
+var pending: Array = []        # dropped files waiting for the league / training answer
+var queue: Array = []          # league files still to review in this batch
+var batch_active := false
+var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0}
+
 
 func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -55,10 +64,20 @@ func _ready() -> void:
 	review_box.add_child(warnings)
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	review_box.add_child(tabs)
+	var confirm_row := HFlowContainer.new()
+	review_box.add_child(confirm_row)
 	confirm_btn.text = "Confirm and rate"
 	confirm_btn.disabled = true
 	confirm_btn.pressed.connect(_on_confirm)
-	review_box.add_child(confirm_btn)
+	confirm_row.add_child(confirm_btn)
+	skip_btn.text = "Skip this file"
+	skip_btn.visible = false
+	skip_btn.pressed.connect(_skip_current)
+	confirm_row.add_child(skip_btn)
+	auto_btn.text = "Confirm this and all remaining without review"
+	auto_btn.visible = false
+	auto_btn.pressed.connect(_auto_confirm_rest)
+	confirm_row.add_child(auto_btn)
 
 	# ratings view
 	ratings_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -83,6 +102,16 @@ func _ready() -> void:
 	confirm_dialog.dialog_text = "Rebuild every rating from the saved events, oldest to newest?\nThe current ratings are backed up first."
 	confirm_dialog.confirmed.connect(_recompute)
 	add_child(confirm_dialog)
+
+	# league or training? asked every time files are dropped
+	type_dialog.title = "What are these files?"
+	type_dialog.ok_button_text = "League results"
+	type_dialog.add_button("Training data", false, "training")
+	type_dialog.add_cancel_button("Cancel")
+	type_dialog.confirmed.connect(_start_batch.bind("league"))
+	type_dialog.custom_action.connect(_on_type_action)
+	type_dialog.canceled.connect(func(): pending.clear())
+	add_child(type_dialog)
 
 	_show_view("review")
 	get_window().files_dropped.connect(_on_files_dropped)
@@ -123,23 +152,131 @@ func _btn(text: String, action: Callable) -> Button:
 
 
 # ---------- Loading and confirming ----------
+# One file, several files or whole folders can be dropped. Files are handled oldest first
+# (their names start with a timestamp), after asking whether they are league or training data.
 func _on_files_dropped(files: PackedStringArray) -> void:
-	# a folder (or several files) backfills events that were confirmed earlier; one file opens the review
-	if files.size() > 1 or DirAccess.dir_exists_absolute(files[0]):
-		_backfill(Elo.collect_xml(files))
-		return
-	draft = Elo.build_draft(files[0], grid_check.button_pressed)
-	_show_view("review")
-	_rebuild()
-
-
-func _backfill(paths: Array) -> void:
+	var paths := Elo.collect_xml(files)
 	if paths.is_empty():
 		status.text = "No .xml files found in what you dropped."
 		return
-	status.text = "Reading %d files..." % paths.size()
-	var r: Dictionary = await Elo.backfill(paths, func(done: int, total: int): status.text = "Reading %d of %d..." % [done, total])
-	status.text = "Backfill done: %d event(s) updated, %d already complete, %d not imported yet (drop those one at a time to review and rate them)." % [r["updated"], r["complete"], r["new"].size()]
+	paths.sort_custom(func(a, b): return str(a).get_file() < str(b).get_file())
+	pending = paths
+	type_dialog.dialog_text = "%d file(s) dropped (%s to %s).\n\nLeague results are rated: their drivers feed ratings, profiles and predictions.\nTraining data only feeds track and car-model data: no driver is rated or stored." % [
+		paths.size(), str(paths[0]).get_file(), str(paths[paths.size() - 1]).get_file()]
+	type_dialog.popup_centered()
+
+
+func _on_type_action(action: StringName) -> void:
+	if action == "training":
+		type_dialog.hide()
+		_start_batch("training")
+
+
+func _start_batch(kind: String) -> void:
+	var paths := pending.duplicate()
+	pending.clear()
+	if paths.is_empty():
+		return
+	if kind == "training":
+		_import_training(paths)
+		return
+	queue = paths
+	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0}
+	batch_active = true
+	_next_in_queue()
+
+
+# Training files: track and car-model data only, saved without any driver information.
+func _import_training(paths: Array) -> void:
+	var added := 0
+	var known := 0
+	var unusable := PackedStringArray()
+	for i in paths.size():
+		status.text = "Reading training file %d of %d..." % [i + 1, paths.size()]
+		await get_tree().process_frame
+		match Elo.import_training(paths[i]):
+			"added":
+				added += 1
+			"duplicate":
+				known += 1
+			_:
+				unusable.append(str(paths[i]).get_file())
+	var text := "Training data: %d added, %d already imported." % [added, known]
+	if not unusable.is_empty():
+		text += " No usable lap data in: " + ", ".join(unusable)
+	status.text = text
+	if profiles_view.visible:
+		profiles_view.refresh()
+	if predict_view.visible:
+		predict_view.refresh()
+
+
+# League files: each new file opens in the review screen. Files that were already rated are
+# not rated again; they only get their stats and lap data completed if those are missing.
+func _next_in_queue() -> void:
+	while not queue.is_empty():
+		var path: String = queue.pop_front()
+		var d := Elo.build_draft(path, grid_check.button_pressed)
+		if d["duplicate"]:
+			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
+				batch["updated"] += 1
+			else:
+				batch["skipped"] += 1
+			status.text = "Checking files... %d left." % queue.size()
+			await get_tree().process_frame
+			continue
+		draft = d
+		_show_view("review")
+		_rebuild()
+		skip_btn.visible = true
+		auto_btn.visible = not queue.is_empty()
+		status.text = "File %d of %d: %s" % [batch["total"] - queue.size(), batch["total"], d["file"]]
+		return
+	_finish_batch()
+
+
+func _skip_current() -> void:
+	batch["skipped"] += 1
+	draft = {}
+	_next_in_queue()
+
+
+# Confirms the file on screen as it is (similar names stay separate drivers), then rates the rest
+# of the batch without stopping for review.
+func _auto_confirm_rest() -> void:
+	if not draft.is_empty():
+		draft["new_drivers"].clear()
+		Elo.confirm_draft(draft)
+		batch["rated"] += 1
+		draft = {}
+	skip_btn.visible = false
+	auto_btn.visible = false
+	confirm_btn.disabled = true
+	while not queue.is_empty():
+		var path: String = queue.pop_front()
+		status.text = "Rating %s (%d left)..." % [path.get_file(), queue.size()]
+		await get_tree().process_frame
+		var d := Elo.build_draft(path, grid_check.button_pressed)
+		if d["duplicate"]:
+			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
+				batch["updated"] += 1
+			else:
+				batch["skipped"] += 1
+			continue
+		d["new_drivers"].clear()
+		Elo.confirm_draft(d)
+		batch["rated"] += 1
+	_finish_batch()
+
+
+func _finish_batch() -> void:
+	batch_active = false
+	skip_btn.visible = false
+	auto_btn.visible = false
+	draft = {}
+	_rebuild()
+	status.text = "Batch done: %d rated, %d old event(s) completed with stats and lap data, %d skipped or already complete. If any file was older than events you had already rated, press Recompute all." % [
+		batch["rated"], batch["updated"], batch["skipped"]]
 	if profiles_view.visible:
 		profiles_view.refresh()
 	if predict_view.visible:
@@ -150,6 +287,10 @@ func _on_confirm() -> void:
 	var done: String = draft["file"]
 	Elo.confirm_draft(draft)
 	draft = {}
+	if batch_active:
+		batch["rated"] += 1
+		_next_in_queue()
+		return
 	_rebuild()
 	var l := Label.new()
 	l.text = "Rated and saved: " + done

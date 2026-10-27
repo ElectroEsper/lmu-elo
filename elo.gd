@@ -274,6 +274,9 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 func _apply(draft: Dictionary) -> void:
 	if processed.has(draft["hash"]):
 		return
+	if draft.get("kind", "league") == "training":
+		processed[draft["hash"]] = draft["file"]   # remembered so it is not imported twice, but never rated
+		return
 	var changes := []
 	for sess in draft["orders"]:
 		for cls in draft["orders"][sess]:
@@ -328,9 +331,14 @@ func attach_stats(draft: Dictionary) -> bool:
 	var saved = JSON.parse_string(FileAccess.get_file_as_string(path))
 	if not (saved is Dictionary):
 		return false
-	saved["stats"] = draft["stats"]
-	saved["track"] = draft.get("track", {})
-	saved["fp"] = draft.get("fp", {})
+	if saved.get("kind", "league") == "training":
+		# training files keep no driver data: only the anonymous track / car fingerprint
+		saved["fp"] = Fingerprint.extract(draft["path"], true)
+		saved["track"] = draft.get("track", {})
+	else:
+		saved["stats"] = draft["stats"]
+		saved["track"] = draft.get("track", {})
+		saved["fp"] = draft.get("fp", {})
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_string(JSON.stringify(saved))
 	f.close()
@@ -367,7 +375,7 @@ func rebuild_all() -> Dictionary:
 			continue
 		var path := "user://events/" + f
 		var draft = JSON.parse_string(FileAccess.get_file_as_string(path))
-		if not (draft is Dictionary) or not draft.has("orders") or not draft.has("file"):
+		if not (draft is Dictionary) or not draft.has("file") or not (draft.has("orders") or draft.get("kind", "") == "training"):
 			continue
 		var t := _name_time(draft["file"])
 		if t < 0:
@@ -678,7 +686,7 @@ func _read_track(path: String) -> Dictionary:
 		match p.get_node_type():
 			XMLParser.NODE_ELEMENT:
 				var n := p.get_node_name()
-				if n == "Race" or n == "Qualify":
+				if n == "Race" or n == "Qualify" or n.begins_with("Practice") or n == "Warmup":
 					break # header is over
 				tag = n if n in wanted else ""
 			XMLParser.NODE_TEXT:
@@ -714,23 +722,27 @@ func collect_xml(paths: PackedStringArray) -> Array:
 	return out
 
 
-# Backfill for events that were confirmed before stats / fingerprints existed.
-# Every file that was already rated gets its stats, track info and fingerprint attached (nothing is
-# rated again). Files that were never imported are only counted: drop them one at a time to review them.
-# Use as: var r = await Elo.backfill(paths). on_progress is called with (done, total).
-# Returns {"updated": int, "complete": int, "new": Array of file names}
-func backfill(paths: Array, on_progress := Callable()) -> Dictionary:
-	var out := {"updated": 0, "complete": 0, "new": []}
-	for i in paths.size():
-		var d := build_draft(paths[i])
-		if not processed.has(d["hash"]):
-			out["new"].append(str(paths[i]).get_file())
-		elif event_lacks_stats(d):
-			if attach_stats(d):
-				out["updated"] += 1
-		else:
-			out["complete"] += 1
-		if on_progress.is_valid():
-			on_progress.call(i + 1, paths.size())
-		await get_tree().process_frame
-	return out
+# Stores a TRAINING file: track and car-model data only. Nothing is rated, no driver names are
+# kept (the fingerprint is anonymous) and it does not count as a league event.
+# Returns "added", "duplicate" or "no data".
+func import_training(path: String) -> String:
+	var file_hash := FileAccess.get_sha256(path)
+	if processed.has(file_hash):
+		return "duplicate"
+	var fp := Fingerprint.extract(path, true)
+	if not fp.has("race") and not fp.has("quali"):
+		return "no data"
+	var draft := {
+		"file": path.get_file(), "path": path, "hash": file_hash,
+		"kind": "training", "track": _read_track(path), "fp": fp,
+	}
+	archive_xml(draft)
+	processed[file_hash] = draft["file"]
+	var saved := draft.duplicate(true)
+	saved.erase("path")
+	DirAccess.make_dir_recursive_absolute("user://events")
+	var f := FileAccess.open("user://events/%s.json" % draft["file"], FileAccess.WRITE)
+	f.store_string(JSON.stringify(saved))
+	f.close()
+	save_ratings()
+	return "added"

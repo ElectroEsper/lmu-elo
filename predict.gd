@@ -239,7 +239,7 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 func backtest_races() -> Array:
 	var races := []
 	for day in Profiles.days:
-		if day["race"].is_empty():
+		if day["race"].is_empty() or day.get("training", false):
 			continue
 		for cls in day["race"]["classes"]:
 			var rows := []

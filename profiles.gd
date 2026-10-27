@@ -40,9 +40,12 @@ func rebuild() -> void:
 		if fp.is_empty() or not fp.has("track"):
 			continue
 		var date: String = str(draft["file"]).left(10)
-		if not by_date.has(date):
-			by_date[date] = {"date": date, "course": "", "track": {}, "race": {}, "quali": {}}
-		var day: Dictionary = by_date[date]
+		var training: bool = draft.get("kind", "league") == "training"
+		# a league weekend merges its quali and race files by date; each training file stays on its own
+		var day_key: String = ("%s|T|%s" % [date, draft["file"]]) if training else date
+		if not by_date.has(day_key):
+			by_date[day_key] = {"date": date, "course": "", "track": {}, "race": {}, "quali": {}, "training": training}
+		var day: Dictionary = by_date[day_key]
 		day["track"] = fp["track"]
 		day["course"] = fp["track"].get("course", "")
 		if fp.has("race"):
@@ -54,6 +57,8 @@ func rebuild() -> void:
 	for d in dates:
 		days.append(by_date[d])
 	for day in days:
+		if day.get("training", false):
+			continue   # training data never creates driver history
 		var recs := {}
 		for nm in day["race"].get("drivers", {}):
 			var e: Dictionary = day["race"]["drivers"][nm]
@@ -145,7 +150,7 @@ func class_means(cls: String, before := "") -> Dictionary:
 	var cons := 0.0
 	var n := 0
 	for day in days:
-		if before != "" and day["date"] >= before:
+		if day.get("training", false) or (before != "" and day["date"] >= before):
 			continue
 		for nm in day["race"].get("drivers", {}):
 			var r: Dictionary = day["race"]["drivers"][nm]
@@ -227,6 +232,10 @@ func classes() -> Array:
 	var seen := {}
 	for key in hist:
 		seen[key.get_slice("|", 0)] = true
+	for day in days:   # classes that only appear in training data still get car and track tables
+		for sec in ["race", "quali"]:
+			for c in day[sec].get("classes", {}):
+				seen[c] = true
 	var out := seen.keys()
 	out.sort()
 	return out

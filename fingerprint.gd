@@ -23,9 +23,12 @@ const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
 const MIN_LAPS := 5
+const SESSION_TAGS := ["Race", "Qualify", "Practice1", "Practice2", "Practice3", "Practice4", "Warmup"]
 
 
-static func extract(path: String) -> Dictionary:
+# training = true: the file is training data. Practice / warmup sessions are accepted too, and the
+# driver names are dropped (entries become "#1", "#2", ...), so only track and car-model data remain.
+static func extract(path: String, training := false) -> Dictionary:
 	var p := XMLParser.new()
 	if p.open(path) != OK:
 		return {}
@@ -53,7 +56,7 @@ static func extract(path: String) -> Dictionary:
 					continue
 				var tag := p.get_node_name()
 				depth += 1
-				if session == "" and (tag == "Race" or tag == "Qualify"):
+				if session == "" and tag in SESSION_TAGS:
 					session = tag
 					session_depth = depth
 					cur = {"drivers": [], "minutes": 0, "tl": {}, "con": {}, "pens": {}}
@@ -145,14 +148,54 @@ static func extract(path: String) -> Dictionary:
 			"length": length,
 		},
 	}
-	if sessions.has("Race") and not sessions["Race"]["drivers"].is_empty():
-		var r := _race(sessions["Race"], length)
+	var race_src: Dictionary = sessions.get("Race", {})
+	var quali_src: Dictionary = sessions.get("Qualify", {})
+	if training:
+		# a practice or warmup session stands in for whatever is missing
+		var practice := _best_practice(sessions)
+		if race_src.is_empty() or race_src["drivers"].is_empty():
+			race_src = practice
+		if quali_src.is_empty() or quali_src["drivers"].is_empty():
+			quali_src = practice
+	if not race_src.is_empty() and not race_src["drivers"].is_empty():
+		var r := _race(race_src, length)
 		if not r["drivers"].is_empty():
 			out["race"] = r
-	if sessions.has("Qualify") and not sessions["Qualify"]["drivers"].is_empty():
-		var q := _quali(sessions["Qualify"], length)
+	if not quali_src.is_empty() and not quali_src["drivers"].is_empty():
+		var q := _quali(quali_src, length)
 		if not q["drivers"].is_empty():
 			out["quali"] = q
+	if training:
+		out["kind"] = "training"
+		for k in ["race", "quali"]:
+			if out.has(k):
+				out[k]["drivers"] = _anonymous(out[k]["drivers"])
+	return out
+
+
+# The practice / warmup session with the most laps driven (empty if the file has none).
+static func _best_practice(sessions: Dictionary) -> Dictionary:
+	var best := {}
+	var best_laps := 0
+	for tag in sessions:
+		if tag == "Race" or tag == "Qualify":
+			continue
+		var total := 0
+		for d in sessions[tag]["drivers"]:
+			total += d["laps"].size()
+		if total > best_laps:
+			best_laps = total
+			best = sessions[tag]
+	return best
+
+
+# Same rows without driver names.
+static func _anonymous(rows: Dictionary) -> Dictionary:
+	var out := {}
+	var i := 1
+	for driver_name in rows:
+		out["#%d" % i] = rows[driver_name]
+		i += 1
 	return out
 
 
@@ -168,6 +211,8 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		if nm == "" or cls == "" or d.get("FinishStatus", "") == "DQ":
 			continue
 		var n := int(d.get("Laps", "0"))
+		if n == 0:
+			n = d["laps"].size()   # practice files may not carry a Laps field
 		if n < MIN_LAPS:
 			continue
 		var times := []
@@ -260,8 +305,10 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		var top5 := names.filter(func(nm): return rows[nm]["pos"] > 0)
 		top5.sort_custom(func(a, b): return rows[a]["pos"] < rows[b]["pos"])
 		top5 = top5.slice(0, 5)
-		if top5.is_empty():
-			top5 = names.slice(0, 5)
+		if top5.is_empty():   # no finishing positions (practice): use the five quickest instead
+			top5 = names.duplicate()
+			top5.sort_custom(func(a, b): return rows[a]["pace"] < rows[b]["pace"])
+			top5 = top5.slice(0, 5)
 		var t5_pace := []
 		var t5_top := []
 		for nm in top5:
