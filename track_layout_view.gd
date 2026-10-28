@@ -1,11 +1,13 @@
 class_name TrackLayoutView
 extends VBoxContainer
 ## The "Layout" tab of the Profiles screen: pick a stored track profile (built from MoTeC
-## exports) and see its map, corners, straights and lap summary. Needs table_view.gd.
+## exports) and see its map, grades, corners, straights and lap summary.
+## Needs table_view.gd and track_grades.gd.
 
 var picker := OptionButton.new()
 var tabs := TabContainer.new()
 var profiles: Array = []
+var last_tab := 0
 
 
 func _ready() -> void:
@@ -52,6 +54,9 @@ func _lap_text(t: float) -> String:
 
 
 func _show() -> void:
+	# remember the open tab so switching profiles keeps the same view (Map, Grades, Corners...)
+	if tabs.get_tab_count() > 1:
+		last_tab = tabs.current_tab
 	_clear()
 	if profiles.is_empty() or picker.selected < 0:
 		var l := Label.new()
@@ -78,7 +83,7 @@ func _show() -> void:
 	box.add_child(map)
 	var legend := Label.new()
 	var m: Dictionary = p["map"]
-	legend.text = "Colour = speed (blue slow, red fast). Numbers = corners in lap order, S/F = start/finish. Shape rebuilt from lateral G (%s lap, closed to within %.0f m)." % [
+	legend.text = "Colour = speed (blue slow, red fast). Numbers = corners in lap order, S/F = start/finish, magenta B1, B2... = rough spots on the straights, roughest first (see Grades, Bumpiness). Shape rebuilt from lateral G (%s lap, closed to within %.0f m)." % [
 		m["direction"], float(m["closure_m"])]
 	if not m["closed"]:
 		legend.text += " The lap did not close cleanly, so the shape is approximate."
@@ -88,12 +93,71 @@ func _show() -> void:
 	tabs.add_child(box)
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Map")
 
+	tabs.add_child(_grades_panel(p))
+	tabs.set_tab_title(tabs.get_tab_count() - 1, "Grades")
 	tabs.add_child(TableView.build(_corner_table(p)))
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Corners")
 	tabs.add_child(TableView.build(_straight_table(p)))
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Straights")
 	tabs.add_child(TableView.build(_summary_table(p)))
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Summary")
+	tabs.current_tab = clampi(last_tab, 0, tabs.get_tab_count() - 1)
+
+
+# Grades 1 to 5 against the other tracks of the same class. Hover a name for what it measures.
+func _grades_panel(p: Dictionary) -> Control:
+	var scroll := ScrollContainer.new()
+	var box := VBoxContainer.new()
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(box)
+	var note := Label.new()
+	note.text = "Each grade compares %s with the other tracks known for %s: 5 = the most (most time at full throttle, hardest braking, thirstiest...). Tracks with nearly equal values share a grade (Basis shows which). With fewer than %d tracks for the class, a fixed scale is used instead. Hover a characteristic for what it measures." % [
+		p["course"], p["class"], TrackGrades.MIN_RANKED]
+	if not p.has("traits"):
+		note.text += " This profile was built by an older version: drop its CSV again to get the telemetry grades."
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.custom_minimum_size = Vector2(480, 0)
+	box.add_child(note)
+	var grid := GridContainer.new()
+	grid.columns = 5
+	grid.add_theme_constant_override("h_separation", 16)
+	for h in ["Characteristic", "Grade", "Value", "Details", "Basis"]:
+		var hl := Label.new()
+		hl.text = h
+		hl.add_theme_color_override("font_color", Color(0.6, 0.8, 1.0))
+		grid.add_child(hl)
+	for r in TrackGrades.grade(str(p["course"]), str(p["class"])):
+		var name_l := Label.new()
+		name_l.text = r["name"]
+		name_l.tooltip_text = r["tip"]
+		name_l.mouse_filter = Control.MOUSE_FILTER_PASS
+		grid.add_child(name_l)
+		var g: int = r["grade"]
+		var grade_l := Label.new()
+		grade_l.text = "-" if g == 0 else "%d / 5" % g
+		grade_l.add_theme_color_override("font_color", _grade_colour(g))
+		grid.add_child(grade_l)
+		for txt in [r["value"], r["detail"] if r["detail"] != "" else "-", r["basis"]]:
+			var l := Label.new()
+			l.text = txt
+			grid.add_child(l)
+	box.add_child(grid)
+	return scroll
+
+
+func _grade_colour(g: int) -> Color:
+	match g:
+		1:
+			return Color(0.45, 0.65, 1.0)
+		2:
+			return Color(0.45, 0.85, 0.85)
+		3:
+			return Color(0.6, 0.9, 0.5)
+		4:
+			return Color(1.0, 0.8, 0.35)
+		5:
+			return Color(1.0, 0.45, 0.4)
+	return Color(0.6, 0.6, 0.6)
 
 
 func _corner_table(p: Dictionary) -> Dictionary:

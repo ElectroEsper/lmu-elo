@@ -19,7 +19,17 @@ const STRAIGHT_G := 0.35
 const STRAIGHT_GAP := 40
 const STRAIGHT_MIN := 200
 const FLAT_WINDOW := 30   # metres either side of the apex that must stay at full throttle
-const VERSION := 2        # bump when the analysis changes, so stored profiles get rebuilt
+const FLAT_MIN_RATIO := 0.53   # ... and the apex must be at least this share of the lap's top speed
+const HS_SPEED := 0.6     # high-speed cornering: above 60% of the lap's top speed ...
+const HS_G := 1.0         # ... with at least 1 G of lateral load
+const FLIP_GAP := 150     # left-right (or right-left) within this many metres = direction change
+const BUMP_WINDOW := 15   # metres: slower vertical motion (downforce squat, roll) is not a bump
+const KERB_G := 0.8        # lateral G above which ride-height differences count as kerb strikes
+const ROUGH_MIN_G := 0.15   # a rough spot shakes at least this much (vertical G, RMS) ...
+const ROUGH_FACTOR := 1.5   # ... and at least this many times the track's typical section
+const ROUGH_MAX := 5        # rough spots kept per lap
+const ROUGH_SEG := 50     # metres per section when looking for the roughest spots
+const VERSION := 5        # bump when the analysis changes, so stored profiles get rebuilt
 const TRACE_STEP := 10         # metres between stored map / trace points
 const WHEELS := ["FL", "FR", "RL", "RR"]
 
@@ -143,6 +153,22 @@ static func analyze(path: String) -> Dictionary:
 		if z["peak"] >= 80.0 or z["decel"] >= 2.0:
 			heavy += 1
 
+	var traits := _traits(corners, zones, v, gl, gx, dt, total_t, t_full, t_brake, vtop, longest, n)
+	var res := _resources(ch, a, b)
+	if res.has("fuel_used_l") and float(res["fuel_used_l"]) > 0.0:
+		traits["fuel_l_lap"] = res["fuel_used_l"]
+		traits["fuel_l_min"] = snappedf(float(res["fuel_used_l"]) / total_t * 60.0, 0.01)
+		traits["fuel_l_km"] = snappedf(float(res["fuel_used_l"]) / ((n - 1) / 1000.0), 0.001)
+	var wear_sum := 0.0
+	var wear_n := 0
+	for k in res.get("tyre_wear_pct", {}):
+		wear_sum += float(res["tyre_wear_pct"][k])
+		wear_n += 1
+	if wear_n > 0:
+		traits["tyre_wear_lap"] = snappedf(wear_sum / wear_n, 0.001)
+		traits["tyre_wear_km"] = snappedf(wear_sum / wear_n / ((n - 1) / 1000.0), 0.0001)
+	traits.merge(_bumps(ch, a, b, gl, v))
+
 	# reduced map and trace (one point every TRACE_STEP metres)
 	var pts := []
 	var speed_trace := []
@@ -183,7 +209,8 @@ static func analyze(path: String) -> Dictionary:
 			"max_brake_g": snappedf(_max_abs(gx), 0.01),
 			"max_rpm": roundi(_max_abs(r["Engine RPM"])),
 		},
-		"resources": _resources(ch, a, b),
+		"resources": res,
+		"traits": traits,
 		"trace": {"step_m": TRACE_STEP, "speed": speed_trace, "throttle": throttle_trace, "brake": brake_trace},
 	}
 
@@ -455,10 +482,11 @@ static func _corner_details(corners: Array, zones: Array, v: Array, vs: Array, g
 			if thr[q] >= 90.0:
 				c["pickup"] = q - ap
 				break
-		# flat-out kink: throttle never drops near the apex (no lift, no braking)
-		var flat := true
+		# flat-out kink: throttle never drops near the apex (no lift, no braking), and the bend is
+		# fast. A slow bend taken at full throttle is the exit of the corner before, not a kink.
+		var flat: bool = vs[ap] >= FLAT_MIN_RATIO * vtop
 		for q in range(maxi(0, ap - FLAT_WINDOW), mini(n - 1, ap + FLAT_WINDOW) + 1):
-			if thr[q] < STRAIGHT_THROTTLE:
+			if not flat or thr[q] < STRAIGHT_THROTTLE:
 				flat = false
 				break
 		c["flat"] = flat
@@ -554,6 +582,155 @@ static func _find_straights(thr: Array, gl: Array, v: Array, corners: Array, kin
 			"vstart": roundi(v[s0]), "vend": roundi(vend), "after": after, "before": before,
 			"kinks": inside,
 		})
+	return out
+
+
+# Raw numbers behind the track grades (TrackGrades). Everything is per km or a share of
+# the lap, so long and short tracks compare fairly.
+static func _traits(corners: Array, zones: Array, v: Array, gl: Array, gx: Array, dt: Array,
+		total_t: float, t_full: float, t_brake: float, vtop: float, longest: int, n: int) -> Dictionary:
+	var km := (n - 1) / 1000.0
+	# braking: speed scrubbed in all braking zones
+	var scrub := 0.0
+	var heavy := 0
+	var decel := 0.0
+	for z in zones:
+		scrub += maxf(0.0, v[z["start"]] - v[z["end"]])
+		decel += z["decel"]
+		if z["peak"] >= 80.0 or z["decel"] >= 2.0:
+			heavy += 1
+	# high-speed cornering, and the combined load the tyres carry
+	var hs_t := 0.0
+	var load := 0.0
+	for i in n:
+		if v[i] >= HS_SPEED * vtop and absf(gl[i]) >= HS_G:
+			hs_t += dt[i]
+		load += sqrt(gl[i] * gl[i] + gx[i] * gx[i])
+	# slow corners, exits, direction changes
+	var slow := 0
+	var pickup_sum := 0.0
+	var pickup_n := 0
+	var flips := 0
+	for k in corners.size():
+		var c: Dictionary = corners[k]
+		if c["type"] == "hairpin" or c["type"] == "slow":
+			slow += 1
+			if c["pickup"] >= 0:
+				pickup_sum += c["pickup"]
+				pickup_n += 1
+		if k > 0 and c["dir"] != corners[k - 1]["dir"] and c["start"] - corners[k - 1]["end"] < FLIP_GAP:
+			flips += 1
+	return {
+		"full_throttle_pct": snappedf(t_full / total_t * 100.0, 0.1),
+		"longest_straight_m": longest,
+		"top_kmh": roundi(vtop),
+		"scrub_kmh_km": snappedf(scrub / km, 0.1),
+		"heavy_zones_km": snappedf(heavy / km, 0.01),
+		"braking_pct": snappedf(t_brake / total_t * 100.0, 0.1),
+		"decel_avg_g": snappedf(decel / maxf(zones.size(), 1), 0.01),
+		"hs_corner_pct": snappedf(hs_t / total_t * 100.0, 0.1),
+		"slow_corners_km": snappedf(slow / km, 0.01),
+		"pickup_avg_m": roundi(pickup_sum / pickup_n) if pickup_n > 0 else -1,
+		"corners_km": snappedf(corners.size() / km, 0.01),
+		"direction_changes": flips,
+		"combined_g_avg": snappedf(load / n, 0.01),
+	}
+
+
+# Bumpiness and kerbs from the vertical channels (if the export has them).
+# Bumps: fast vertical motion where the car is (nearly) straight, so kerbs do not count.
+# Kerbs: left and right ride heights moving differently in corners (one side on the kerb).
+static func _bumps(ch: Dictionary, a: int, b: int, gl: Array, v: Array) -> Dictionary:
+	var out := {}
+	var names := []
+	if ch.has("G Force Vert"):
+		names.append("G Force Vert")
+	var rh := ["Ride Height FL", "Ride Height FR", "Ride Height RL", "Ride Height RR"]
+	var has_rh := true
+	for k in rh:
+		if not ch.has(k):
+			has_rh = false
+	if has_rh:
+		names.append_array(rh)
+	if names.is_empty():
+		return out
+	var r := _resample(ch, a, b, names)
+	if r.is_empty():
+		return out
+	var n := mini(int(r["len"]) + 1, gl.size())
+	if r.has("G Force Vert"):
+		var gv := _highpass(r["G Force Vert"])
+		var sum := 0.0
+		var cnt := 0
+		var spots := []
+		var seg_sum := 0.0
+		var seg_cnt := 0
+		for i in n:
+			if absf(gl[i]) < STRAIGHT_G:
+				sum += gv[i] * gv[i]
+				cnt += 1
+				seg_sum += gv[i] * gv[i]
+				seg_cnt += 1
+			if (i + 1) % ROUGH_SEG == 0:
+				# a section counts when it is mostly straight
+				if seg_cnt >= ROUGH_SEG * 0.7:
+					spots.append({"at": i + 1 - ROUGH_SEG, "g": sqrt(seg_sum / seg_cnt), "kmh": roundi(v[i + 1 - ROUGH_SEG])})
+				seg_sum = 0.0
+				seg_cnt = 0
+		if cnt > 0:
+			out["bump_rms_g"] = snappedf(sqrt(sum / cnt), 0.001)
+			spots.sort_custom(func(x, y): return x["g"] > y["g"])
+			# the graded value is the typical (median) section, so one big hit does not decide it
+			if not spots.is_empty():
+				out["bump_g"] = snappedf(spots[int(spots.size() / 2.0)]["g"], 0.001)
+			# rough spots: sections clearly rougher than the track's norm (and rough in absolute terms)
+			var limit := ROUGH_MIN_G
+			if out.has("bump_g"):
+				limit = maxf(limit, ROUGH_FACTOR * float(out["bump_g"]))
+			var rough := []
+			for s in spots:
+				if s["g"] >= limit:
+					rough.append(s)
+			# touching sections are one rough patch: merge them (roughest section gives g and speed)
+			rough.sort_custom(func(x, y): return x["at"] < y["at"])
+			var merged := []
+			for s in rough:
+				var last: Dictionary = merged.back() if not merged.is_empty() else {}
+				if not last.is_empty() and int(s["at"]) == int(last["at"]) + int(last["len"]):
+					last["len"] = int(last["len"]) + ROUGH_SEG
+					if s["g"] > last["g"]:
+						last["g"] = s["g"]
+						last["kmh"] = s["kmh"]
+				else:
+					merged.append({"at": s["at"], "len": ROUGH_SEG, "g": s["g"], "kmh": s["kmh"]})
+			merged.sort_custom(func(x, y): return x["g"] > y["g"])
+			var top := []
+			for s in merged.slice(0, ROUGH_MAX):
+				top.append({"at": s["at"], "len": s["len"], "g": snappedf(s["g"], 0.001), "kmh": s["kmh"]})
+			out["rough_spots"] = top
+	if has_rh:
+		var fl := _highpass(r["Ride Height FL"])
+		var fr := _highpass(r["Ride Height FR"])
+		var rl := _highpass(r["Ride Height RL"])
+		var rr := _highpass(r["Ride Height RR"])
+		var ksum := 0.0
+		var kcnt := 0
+		for i in n:
+			if absf(gl[i]) >= KERB_G:
+				var diff: float = ((fl[i] + rl[i]) - (fr[i] + rr[i])) / 2.0
+				ksum += diff * diff
+				kcnt += 1
+		if kcnt > 0:
+			out["kerb_mm"] = snappedf(sqrt(ksum / kcnt), 0.01)
+	return out
+
+
+static func _highpass(x: Array) -> Array:
+	var slow := _sm(x, BUMP_WINDOW)
+	var out := []
+	out.resize(x.size())
+	for i in x.size():
+		out[i] = x[i] - slow[i]
 	return out
 
 

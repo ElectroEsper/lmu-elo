@@ -1,7 +1,10 @@
 class_name TrackMap
 extends Control
 ## Draws a stored track profile: the circuit coloured by speed (blue = slow, red = fast),
-## numbered corners and the start/finish point. North is up as reconstructed from the telemetry.
+## numbered corners, rough spots (magenta band, labelled B1, B2... from the roughest) and the
+## start/finish point. North is up as reconstructed from the telemetry.
+
+const ROUGH_COLOR := Color(1.0, 0.25, 0.9, 0.85)
 
 var profile: Dictionary = {}
 
@@ -48,10 +51,22 @@ func _draw() -> void:
 	for p in pts:
 		poly.append(origin + Vector2((p[0] - minx) * k, (maxy - p[1]) * k))   # screen y points down
 		colors.append(_speed_color(p[2], vmin, vmax))
-	draw_polyline_colors(poly, colors, 4.0, true)
-
 	var font := ThemeDB.fallback_font
 	var step: int = int(profile["map"].get("step", 10))
+
+	# rough spots: a wide band under the racing line
+	var spots: Array = profile.get("traits", {}).get("rough_spots", [])
+	for s in spots:
+		var i0 := clampi(int(int(s["at"]) / float(step)), 0, poly.size() - 1)
+		var i1 := clampi(int((int(s["at"]) + int(s.get("len", 50))) / float(step)), i0, poly.size() - 1)
+		if i1 > i0:
+			draw_polyline(poly.slice(i0, i1 + 1), ROUGH_COLOR, 12.0, true)
+	draw_polyline_colors(poly, colors, 4.0, true)
+	for j in spots.size():
+		var s: Dictionary = spots[j]
+		var mid := clampi(int((int(s["at"]) + int(s.get("len", 50)) / 2.0) / float(step)), 0, poly.size() - 1)
+		draw_string(font, poly[mid] + Vector2(10.0, 14.0), "B%d" % (j + 1), HORIZONTAL_ALIGNMENT_LEFT, -1.0, 11, ROUGH_COLOR)
+
 	for c in profile.get("corners", []):
 		var at := clampi(int(int(c["apex"]) / float(step)), 0, poly.size() - 1)
 		draw_circle(poly[at], 10.0, Color(0, 0, 0, 0.75))
