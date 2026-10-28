@@ -709,15 +709,20 @@ func _saved_has_fp(file_name: String) -> bool:
 
 # Expands dropped files / folders into a flat list of .xml paths (folders are searched recursively).
 func collect_xml(paths: PackedStringArray) -> Array:
+	return collect_files(paths, ".xml")
+
+
+# Same for any extension (".csv" for MoTeC exports).
+func collect_files(paths: PackedStringArray, extension: String) -> Array:
 	var out := []
 	for p in paths:
 		if DirAccess.dir_exists_absolute(p):
 			for f in DirAccess.get_files_at(p):
-				if f.to_lower().ends_with(".xml"):
+				if f.to_lower().ends_with(extension):
 					out.append(p.path_join(f))
 			for sub in DirAccess.get_directories_at(p):
-				out.append_array(collect_xml(PackedStringArray([p.path_join(sub)])))
-		elif p.to_lower().ends_with(".xml"):
+				out.append_array(collect_files(PackedStringArray([p.path_join(sub)]), extension))
+		elif p.to_lower().ends_with(extension):
 			out.append(p)
 	return out
 

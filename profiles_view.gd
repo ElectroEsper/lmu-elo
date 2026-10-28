@@ -63,6 +63,7 @@ var tabs := TabContainer.new()
 var drivers := Tree.new()
 var cars := Tree.new()
 var tracks := Tree.new()
+var layout_view := TrackLayoutView.new()   # track profiles built from MoTeC exports
 var legend := Label.new()
 
 var _titles := {}      # tree -> column titles
@@ -93,6 +94,8 @@ func _ready() -> void:
 	for pair in [[drivers, driver_tips], [cars, CAR_TIPS], [tracks, TRACK_TIPS]]:
 		for i in pair[1].size():
 			pair[0].set_column_title_tooltip_text(i, pair[1][i])
+	tabs.add_child(layout_view)
+	tabs.set_tab_title(tabs.get_tab_count() - 1, "Layout")
 
 
 func _setup(tree: Tree, title: String, cols: Array, wide: int, wide2: int, first_asc: Array, right_cols: Array) -> void:
@@ -192,6 +195,7 @@ func _render(tree: Tree) -> void:
 # ---------- Filling ----------
 
 func refresh() -> void:
+	layout_view.refresh()
 	if get_node_or_null("/root/Profiles") == null:
 		legend.text = "The Profiles autoload is not running. Check Project Settings > Globals > Autoload (name 'Profiles', below 'Elo')."
 		return
