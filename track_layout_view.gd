@@ -14,7 +14,7 @@ func _ready() -> void:
 	picker.item_selected.connect(_on_pick)
 	bar.add_child(picker)
 	var hint := Label.new()
-	hint.text = "Drop MoTeC CSV exports on the window to add profiles (named trackname_class.csv, e.g. Brno_LMP3.csv; one profile per track and class, the fastest lap is kept)."
+	hint.text = "Drop MoTeC CSV exports on the window to add profiles. You pick the track (from the tracks in your result files) and the class for each file; one profile is kept per track and class, the fastest lap wins."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.custom_minimum_size = Vector2(480, 0)
 	add_child(hint)
@@ -108,7 +108,7 @@ func _corner_table(p: Dictionary) -> Dictionary:
 			int(c["brake_from"]), int(c["brake_len"]), int(c["brake_peak"]), float(c["decel"]), pickup])
 	return {
 		"title": "Corners",
-		"note": "Corners are detected from lateral G, so a left and a right are separate corners. Dist = apex position on the lap. Type compares the apex speed with the top speed of the lap. Brake columns describe the braking zone leading into the corner (blank = none): metres before the apex, length, peak pedal and peak deceleration. Pickup = metres after the apex until the throttle is back above 90%.",
+		"note": "Corners are detected from lateral G, so a left and a right are separate corners. Dist = apex position on the lap. Type compares the apex speed with the top speed of the lap. Bends taken flat out (no lift near the apex) are not corners: they are listed with the straights. Brake columns describe the braking zone leading into the corner (blank = none): metres before the apex, length, peak pedal and peak deceleration. Pickup = metres after the apex until the throttle is back above 90%.",
 		"headers": ["T", "Dir", "Type", "Dist m", "Apex km/h", "Entry km/h", "Exit km/h", "Angle", "Radius m",
 			"Max lat G", "Gear", "Brake from m", "Brake len m", "Brake peak %", "Max decel G", "Pickup m"],
 		"rows": rows,
@@ -118,12 +118,18 @@ func _corner_table(p: Dictionary) -> Dictionary:
 func _straight_table(p: Dictionary) -> Dictionary:
 	var rows := []
 	for s in p["straights"]:
+		var kinks := PackedStringArray()
+		for k in s.get("kinks", []):
+			if k is Dictionary:
+				kinks.append("%s %d km/h" % [k.get("dir", "?"), int(k.get("vmin", 0))])
+			else:   # profile saved by an older version: re-import the CSV to refresh it
+				kinks.append("T%d" % int(k))
 		rows.append([int(s["start"]), int(s["end"]), int(s["length"]), int(s["vstart"]), int(s["vend"]),
-			"T%d" % int(s["after"]), "T%d" % int(s["before"])])
+			"T%d" % int(s["after"]), "T%d" % int(s["before"]), "-" if kinks.is_empty() else ", ".join(kinks)])
 	return {
 		"title": "Straights",
-		"note": "Stretches of at least 200 m at (nearly) full throttle without cornering. The start/finish straight is joined across the lap boundary.",
-		"headers": ["From m", "To m", "Length m", "Start km/h", "End km/h", "Out of", "Into"],
+		"note": "Stretches at full throttle: at least 200 m long, or any length when they include a flat-out kink (a bend taken without lifting). Kinks lists those bends as direction and minimum speed. The start/finish straight is joined across the lap boundary.",
+		"headers": ["From m", "To m", "Length m", "Start km/h", "End km/h", "Out of", "Into", "Kinks"],
 		"rows": rows,
 	}
 
@@ -143,6 +149,7 @@ func _summary_table(p: Dictionary) -> Dictionary:
 	rows.append(["Top speed", "%d km/h at %d m" % [int(lap["top_kmh"]), int(lap["top_at_m"])]])
 	rows.append(["Slowest point", "%d km/h" % int(lap["min_kmh"])])
 	rows.append(["Corners", "%d" % p["corners"].size()])
+	rows.append(["Flat-out kinks", "%d" % int(st.get("flat_kinks", 0))])
 	rows.append(["Braking zones", "%d (%d heavy)" % [int(st["braking_zones"]), int(st["heavy_braking_zones"])]])
 	rows.append(["Longest straight", "%d m" % int(st["longest_straight_m"])])
 	rows.append(["Full throttle", "%.1f %% of the lap time" % float(st["full_throttle_pct"])])

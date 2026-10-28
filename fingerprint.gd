@@ -23,11 +23,13 @@ const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
 const MIN_LAPS := 5
-const SESSION_TAGS := ["Race", "Qualify", "Practice1", "Practice2", "Practice3", "Practice4", "Warmup"]
+# Only race and qualifying sessions are read: practice and warmup laps are too far from a
+# representative pace (fuel loads, setup runs, out-laps) to be useful.
+const SESSION_TAGS := ["Race", "Qualify"]
 
 
-# training = true: the file is training data. Practice / warmup sessions are accepted too, and the
-# driver names are dropped (entries become "#1", "#2", ...), so only track and car-model data remain.
+# training = true: the file is training data. Driver names are dropped (entries become "#1", "#2", ...),
+# so only track and car-model data remain.
 static func extract(path: String, training := false) -> Dictionary:
 	var p := XMLParser.new()
 	if p.open(path) != OK:
@@ -150,13 +152,6 @@ static func extract(path: String, training := false) -> Dictionary:
 	}
 	var race_src: Dictionary = sessions.get("Race", {})
 	var quali_src: Dictionary = sessions.get("Qualify", {})
-	if training:
-		# a practice or warmup session stands in for whatever is missing
-		var practice := _best_practice(sessions)
-		if race_src.is_empty() or race_src["drivers"].is_empty():
-			race_src = practice
-		if quali_src.is_empty() or quali_src["drivers"].is_empty():
-			quali_src = practice
 	if not race_src.is_empty() and not race_src["drivers"].is_empty():
 		var r := _race(race_src, length)
 		if not r["drivers"].is_empty():
@@ -171,22 +166,6 @@ static func extract(path: String, training := false) -> Dictionary:
 			if out.has(k):
 				out[k]["drivers"] = _anonymous(out[k]["drivers"])
 	return out
-
-
-# The practice / warmup session with the most laps driven (empty if the file has none).
-static func _best_practice(sessions: Dictionary) -> Dictionary:
-	var best := {}
-	var best_laps := 0
-	for tag in sessions:
-		if tag == "Race" or tag == "Qualify":
-			continue
-		var total := 0
-		for d in sessions[tag]["drivers"]:
-			total += d["laps"].size()
-		if total > best_laps:
-			best_laps = total
-			best = sessions[tag]
-	return best
 
 
 # Same rows without driver names.
@@ -212,7 +191,7 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			continue
 		var n := int(d.get("Laps", "0"))
 		if n == 0:
-			n = d["laps"].size()   # practice files may not carry a Laps field
+			n = d["laps"].size()   # some files carry no Laps field
 		if n < MIN_LAPS:
 			continue
 		var times := []

@@ -18,6 +18,8 @@ const STRAIGHT_THROTTLE := 95.0
 const STRAIGHT_G := 0.35
 const STRAIGHT_GAP := 40
 const STRAIGHT_MIN := 200
+const FLAT_WINDOW := 30   # metres either side of the apex that must stay at full throttle
+const VERSION := 2        # bump when the analysis changes, so stored profiles get rebuilt
 const TRACE_STEP := 10         # metres between stored map / trace points
 const WHEELS := ["FL", "FR", "RL", "RR"]
 
@@ -113,8 +115,8 @@ static func analyze(path: String) -> Dictionary:
 
 	var zones := _find_zones(brk, gx, n)
 	var corners := _find_corners(gl, th, n)
-	_corner_details(corners, zones, v, vs, gl, thr, gear, th, vtop, n)
-	var straights := _find_straights(thr, gl, v, corners, n)
+	var kinks := _corner_details(corners, zones, v, vs, gl, thr, gear, th, vtop, n)
+	var straights := _find_straights(thr, gl, v, corners, kinks, n)
 
 	# shares of the lap
 	var t_full := 0.0
@@ -155,7 +157,7 @@ static func analyze(path: String) -> Dictionary:
 		pts.append(pts[0].duplicate())
 
 	return {
-		"version": 1,
+		"version": VERSION,
 		"source": path.get_file(),
 		"date": str(data["meta"].get("Log Date", "")),
 		"lap": {
@@ -176,7 +178,7 @@ static func analyze(path: String) -> Dictionary:
 			"coasting_pct": snappedf(t_coast / total_t * 100.0, 0.1),
 			"gear_pct": gear_pct,
 			"braking_zones": zones.size(), "heavy_braking_zones": heavy,
-			"longest_straight_m": longest,
+			"longest_straight_m": longest, "flat_kinks": kinks.size(),
 			"max_lat_g": snappedf(_max_abs(gl), 0.01),
 			"max_brake_g": snappedf(_max_abs(gx), 0.01),
 			"max_rpm": roundi(_max_abs(r["Engine RPM"])),
@@ -410,8 +412,10 @@ static func _corner_type(ratio: float) -> String:
 	return "fast"   # ratio = apex speed / top speed of the lap
 
 
+# Fills in each corner. Bends taken flat out (no lift near the apex) are removed from
+# the corner list and returned separately: they count as part of a straight.
 static func _corner_details(corners: Array, zones: Array, v: Array, vs: Array, gl: Array,
-		thr: Array, gear: Array, th: Array, vtop: float, n: int) -> void:
+		thr: Array, gear: Array, th: Array, vtop: float, n: int) -> Array:
 	for k in corners.size():
 		var c: Dictionary = corners[k]
 		var s: int = c["start"]
@@ -451,6 +455,25 @@ static func _corner_details(corners: Array, zones: Array, v: Array, vs: Array, g
 			if thr[q] >= 90.0:
 				c["pickup"] = q - ap
 				break
+		# flat-out kink: throttle never drops near the apex (no lift, no braking)
+		var flat := true
+		for q in range(maxi(0, ap - FLAT_WINDOW), mini(n - 1, ap + FLAT_WINDOW) + 1):
+			if thr[q] < STRAIGHT_THROTTLE:
+				flat = false
+				break
+		c["flat"] = flat
+	var kinks := []
+	var kept := []
+	for c in corners:
+		if c["flat"]:
+			kinks.append({"start": c["start"], "end": c["end"], "apex": c["apex"], "dir": c["dir"],
+				"vmin": c["vmin"], "gmax": c["gmax"], "angle": c["angle"]})
+		else:
+			c.erase("flat")
+			kept.append(c)
+	corners.assign(kept)
+	for k in corners.size():
+		corners[k]["n"] = k + 1
 	# a braking zone belongs to the first corner that ends after it
 	for z in zones:
 		for c in corners:
@@ -464,23 +487,35 @@ static func _corner_details(corners: Array, zones: Array, v: Array, vs: Array, g
 						c["brake_peak"] = roundi(z["peak"])
 						c["decel"] = snappedf(z["decel"], 0.01)
 				break
+	return kinks
 
 
-# Full-throttle stretches that are also (nearly) straight, at least STRAIGHT_MIN long
-static func _find_straights(thr: Array, gl: Array, v: Array, corners: Array, n: int) -> Array:
+# Full-throttle stretches that are (nearly) straight or only bend through flat-out kinks.
+# At least STRAIGHT_MIN long, unless they contain a kink (a flat-out bend is always a straight).
+static func _find_straights(thr: Array, gl: Array, v: Array, corners: Array, kinks: Array, n: int) -> Array:
+	# samples inside a flat-out kink count as straight: the driver never lifts there
+	var kink := PackedByteArray()
+	kink.resize(n)
+	for c in kinks:
+		for q in range(c["start"], mini(n - 1, c["end"]) + 1):
+			kink[q] = 1
 	var runs := []
 	var pos := 0
 	while pos < n:
-		if thr[pos] >= STRAIGHT_THROTTLE and absf(gl[pos]) < STRAIGHT_G:
+		if thr[pos] >= STRAIGHT_THROTTLE and (absf(gl[pos]) < STRAIGHT_G or kink[pos] == 1):
 			var last := pos
 			var j := pos
 			while j < n - 1:
 				j += 1
-				if thr[j] >= STRAIGHT_THROTTLE and absf(gl[j]) < STRAIGHT_G:
+				if thr[j] >= STRAIGHT_THROTTLE and (absf(gl[j]) < STRAIGHT_G or kink[j] == 1):
 					last = j
 				elif j - last > STRAIGHT_GAP:
 					break
-			if last - pos >= STRAIGHT_MIN:
+			var has_kink := false
+			for c in kinks:
+				if c["apex"] >= pos and c["apex"] <= last:
+					has_kink = true
+			if last - pos >= STRAIGHT_MIN or has_kink:
 				runs.append([pos, last])
 			pos = last + 1
 		else:
@@ -510,9 +545,14 @@ static func _find_straights(thr: Array, gl: Array, v: Array, corners: Array, n: 
 					after = c["n"]
 				else:
 					break
+		var inside := []   # flat-out kinks taken inside this straight
+		for c in kinks:
+			if c["apex"] >= run[0] and c["apex"] <= e:
+				inside.append(c)
 		out.append({
 			"start": s0, "end": e, "length": e - run[0],
 			"vstart": roundi(v[s0]), "vend": roundi(vend), "after": after, "before": before,
+			"kinks": inside,
 		})
 	return out
 

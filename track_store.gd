@@ -21,7 +21,9 @@ static func save(profile: Dictionary) -> String:
 	var verdict := "saved"
 	if FileAccess.file_exists(path):
 		var old = JSON.parse_string(FileAccess.get_file_as_string(path))
-		if old is Dictionary and old.has("lap") and float(old["lap"]["time_s"]) <= float(profile["lap"]["time_s"]):
+		# a profile from an older version of the analysis is always rebuilt
+		if old is Dictionary and old.has("lap") and int(old.get("version", 1)) >= MotecProfile.VERSION \
+				and float(old["lap"]["time_s"]) <= float(profile["lap"]["time_s"]):
 			return "kept"
 		verdict = "replaced"
 	var f := FileAccess.open(path, FileAccess.WRITE)

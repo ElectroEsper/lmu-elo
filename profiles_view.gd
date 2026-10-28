@@ -63,7 +63,7 @@ var tabs := TabContainer.new()
 var drivers := Tree.new()
 var cars := Tree.new()
 var tracks := Tree.new()
-var layout_view := TrackLayoutView.new()   # track profiles built from MoTeC exports
+var layout_view := TrackLayoutView.new()
 var legend := Label.new()
 
 var _titles := {}      # tree -> column titles
