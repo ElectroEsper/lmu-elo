@@ -33,8 +33,8 @@ const TRAITS := [
 		"tip": "Litres per minute of driving, which is what decides pit stops in a timed race."},
 	{"id": "bumps", "unit": "G (typical 50 m)", "name": "Bumpiness", "src": "tel", "key": "bump_g", "cuts": [0.065, 0.085, 0.105, 0.13],
 		"tip": "Fast up-and-down motion (vertical G) where the car is going straight, so kerbs do not count: the typical 50 m section, so one big hit does not decide it. High = bumpy surface."},
-	{"id": "overtake", "unit": "% of the field", "name": "Overtaking", "src": "res", "key": "changes_pct", "cuts": [8.0, 14.0, 20.0, 27.0],
-		"tip": "From league races: average places gained or lost per driver, as % of the class field. High = positions change a lot."},
+	{"id": "overtake", "unit": "passes per car per 10 laps", "name": "Overtaking", "src": "res", "key": "passes_10", "cuts": [0.6, 1.0, 1.5, 2.2],
+		"tip": "From league races: on-track passes, i.e. two cars of the class swapping places between the end of one lap and the next. Passes on the opening lap and swaps caused by pit stops are not counted. Per car, per 10 laps. High = lots of overtaking."},
 	{"id": "incidents", "unit": "per driver per 10 laps", "name": "Incident risk", "src": "res", "key": "incidents_10", "cuts": [0.5, 1.0, 2.0, 3.5],
 		"tip": "From league races: contacts plus track-limit warnings per driver per 10 laps."},
 ]
@@ -103,7 +103,7 @@ static func collect(cls: String) -> Dictionary:
 
 # Overtaking, incidents and fuel per tank from the league races of this class
 static func _results(cls: String) -> Dictionary:
-	var acc := {}   # course -> {"changes": [], "incidents": [], "tank_lap": [], "length": m}
+	var acc := {}   # course -> lists of per-race values (passes, incidents, fuel...)
 	for day in Profiles.days:
 		if day.get("training", false) or day["race"].is_empty():
 			continue
@@ -112,7 +112,7 @@ static func _results(cls: String) -> Dictionary:
 			continue
 		var course: String = day["course"]
 		if not acc.has(course):
-			acc[course] = {"changes": [], "incidents": [], "contacts": [], "limits": [], "tank_lap": []}
+			acc[course] = {"passes_10": [], "passes": [], "lap1": [], "incidents": [], "contacts": [], "limits": [], "tank_lap": []}
 		var a: Dictionary = acc[course]
 		var c: Dictionary = race["classes"][cls]
 		a["incidents"].append((float(c.get("con", 0.0)) + float(c.get("tl", 0.0))) * 10.0)
@@ -121,26 +121,19 @@ static func _results(cls: String) -> Dictionary:
 		var length := float(day["track"].get("length", 0.0))
 		if float(c.get("fuel_km", 0.0)) > 0.0 and length > 0.0:
 			a["tank_lap"].append(float(c["fuel_km"]) * length / 1000.0)   # % of the tank per lap
-		var moved := 0.0
-		var counted := 0
-		var field := 0
-		for nm in race.get("drivers", {}):
-			var d: Dictionary = race["drivers"][nm]
-			if d.get("cls", "") != cls:
-				continue
-			field += 1
-			if int(d.get("grid", 0)) > 0 and int(d.get("pos", 0)) > 0:
-				moved += absi(int(d["grid"]) - int(d["pos"]))
-				counted += 1
-		if counted > 0 and field > 1:
-			a["changes"].append(moved / counted / float(field - 1) * 100.0)
+		if c.has("passes_10"):   # events read before passes were counted lack these: re-read the XML
+			a["passes_10"].append(float(c["passes_10"]))
+			a["passes"].append(float(c["passes"]))
+			a["lap1"].append(float(c["lap1_moves"]))
 	var out := {}
 	for course in acc:
 		var a: Dictionary = acc[course]
 		var r := {}
-		if not a["changes"].is_empty():
-			r["changes_pct"] = _mean(a["changes"])
-			r["races"] = a["changes"].size()
+		if not a["passes_10"].is_empty():
+			r["passes_10"] = _mean(a["passes_10"])
+			r["passes_race"] = _mean(a["passes"])
+			r["lap1_race"] = _mean(a["lap1"])
+			r["races"] = a["passes_10"].size()
 		if not a["incidents"].is_empty():
 			r["incidents_10"] = _mean(a["incidents"])
 			r["contacts_10"] = _mean(a["contacts"])
@@ -261,6 +254,9 @@ static func _detail(id: String, t: Dictionary) -> String:
 			if t.has("kerb_mm"):
 				parts.append("kerb strikes %.1f mm, not graded (one-sided ride-height motion in corners)" % float(t["kerb_mm"]))
 		"overtake":
+			if t.has("passes_race"):
+				parts.append("%.0f passes per race in the class, plus %.0f places changed on the opening lap (not counted)" % [
+					float(t["passes_race"]), float(t["lap1_race"])])
 			if t.has("races"):
 				parts.append("average of %d race%s" % [int(t["races"]), "" if int(t["races"]) == 1 else "s"])
 		"incidents":

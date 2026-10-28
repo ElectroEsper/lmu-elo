@@ -8,7 +8,8 @@ extends RefCounted
 ##   "v": 1,
 ##   "track": {"TrackVenue", "TrackCourse", "TrackLength"},
 ##   "race":  {"minutes": int,
-##             "classes": {cls: {"ref_s", "kmh", "top", "wear_km", "fuel_km", "tl", "con", "n"}},
+##             "classes": {cls: {"ref_s", "kmh", "top", "wear_km", "fuel_km", "tl", "con", "n",
+##                               "passes", "passes_10", "lap1_moves", "pit_swaps"}},
 ##             "drivers": {name: {"cls", "car", "laps", "grid", "pos", "pace", "pace_rel", "cons",
 ##                                "top_rel", "wear_rel", "fuel_rel", "tl", "con", "pen"}}},
 ##   "quali": {"classes": {cls: {"best_s", "kmh", "top", "s1", "s2", "s3"}},
@@ -18,7 +19,7 @@ extends RefCounted
 ## tl = track-limit events per lap, con = contacts with other cars per lap,
 ## cons = lap-time spread in % of the median clean lap, wear_km / fuel_km are % per km.
 
-const VERSION := 1
+const VERSION := 2
 const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5 median are not "clean"
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
@@ -81,6 +82,8 @@ static func extract(path: String, training := false) -> Dictionary:
 							"fu": _attr(p, "fuelUsed"),
 							"tw": tw / 4.0,
 							"s1": _attr(p, "s1"), "s2": _attr(p, "s2"), "s3": _attr(p, "s3"),
+							"p": int(_attr(p, "p")),   # race position at the end of the lap
+							"pit": p.get_named_attribute_value_safe("pit") == "1",
 						})
 						in_lap = true
 					else:
@@ -305,7 +308,52 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			"con": _r(cons / names.size()),
 			"n": names.size(),
 		}
+		classes[c].merge(_passes(cur["drivers"], c))
 	return {"minutes": cur["minutes"], "classes": classes, "drivers": rows}
+
+
+# On-track passes in one class, from the running order at the end of every lap (the lap's
+# "p" = race position, which already accounts for laps done, so being lapped is not a pass).
+# A pass = two cars of the class swapping order between the end of one lap and the next,
+# with neither of them pitting on those laps. Lap 1 (start) and pit swaps are counted apart.
+# {"passes": n, "passes_10": per car per 10 laps, "lap1_moves": swaps vs the grid, "pit_swaps": n}
+static func _passes(drivers: Array, cls: String) -> Dictionary:
+	var cars := []   # [{"grid": int, "laps": {num: [pos, pit]}}]
+	for d in drivers:
+		if d.get("CarClass", "") != cls:
+			continue
+		var laps := {}
+		for l in d["laps"]:
+			if int(l.get("p", 0)) > 0:
+				laps[int(l["n"])] = [int(l["p"]), bool(l.get("pit", false))]
+		if not laps.is_empty():
+			cars.append({"grid": int(d.get("GridPos", "0")), "laps": laps})
+	var passes := 0
+	var lap1 := 0
+	var pit := 0
+	var car_laps := 0
+	for i in cars.size():
+		var a: Dictionary = cars[i]["laps"]
+		car_laps += maxi(0, a.size() - 1)
+		for j in range(i + 1, cars.size()):
+			var b: Dictionary = cars[j]["laps"]
+			var ga: int = cars[i]["grid"]
+			var gb: int = cars[j]["grid"]
+			if ga > 0 and gb > 0 and a.has(1) and b.has(1) and (ga < gb) != (a[1][0] < b[1][0]):
+				lap1 += 1
+			for k in a:
+				if k < 2 or not b.has(k) or not a.has(k - 1) or not b.has(k - 1):
+					continue
+				if (a[k - 1][0] < b[k - 1][0]) == (a[k][0] < b[k][0]):
+					continue
+				if a[k][1] or b[k][1] or a[k - 1][1] or b[k - 1][1]:
+					pit += 1
+				else:
+					passes += 1
+	var out := {"passes": passes, "lap1_moves": lap1, "pit_swaps": pit}
+	if car_laps > 0:
+		out["passes_10"] = _r(passes / float(car_laps) * 10.0)
+	return out
 
 
 # ---------- Quali ----------
