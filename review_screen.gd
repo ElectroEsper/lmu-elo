@@ -19,7 +19,16 @@ var tabs := TabContainer.new()
 var confirm_btn := Button.new()
 
 # ratings view
+var ratings_box := VBoxContainer.new()
 var ratings_view := TabContainer.new()
+var merge_dialog := ConfirmationDialog.new()   # makes two driver names one driver
+var merge_from := OptionButton.new()
+var merge_into := OptionButton.new()
+var merge_new := LineEdit.new()
+var merge_list := VBoxContainer.new()          # merges made so far, each with an Undo button
+
+# drivers view: pick any driver and see their profile (incl. track fit)
+var driver_view := ProfileView.new()
 
 # reports view
 var reports_view := ReportsView.new()
@@ -43,7 +52,7 @@ var auto_btn := Button.new()
 var pending: Array = []        # dropped files waiting for the league / training answer
 var queue: Array = []          # league files still to review in this batch
 var batch_active := false
-var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0}
+var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}}
 
 
 func _ready() -> void:
@@ -57,12 +66,13 @@ func _ready() -> void:
 	root.add_child(top_bar)
 	top_bar.add_child(_btn("Review", _show_view.bind("review")))
 	top_bar.add_child(_btn("Ratings", _show_view.bind("ratings")))
+	top_bar.add_child(_btn("Drivers", _show_view.bind("drivers")))
 	top_bar.add_child(_btn("Reports", _show_view.bind("reports")))
 	top_bar.add_child(_btn("Profiles", _show_view.bind("profiles")))
 	top_bar.add_child(_btn("Predict", _show_view.bind("predict")))
 	top_bar.add_child(_btn("Recompute all", confirm_dialog.popup_centered))
 	top_bar.add_child(_btn("Export to Excel", _export))
-	top_bar.add_child(_btn("Re-read archived XML", func(): status.text = "Refreshed %d events." % Elo.refresh_from_archive()))
+	top_bar.add_child(_btn("Re-read archived XML", _reread))
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(status)
 
@@ -89,9 +99,20 @@ func _ready() -> void:
 	auto_btn.pressed.connect(_auto_confirm_rest)
 	confirm_row.add_child(auto_btn)
 
-	# ratings view
+	# ratings view, with the driver merge tool above the tables
+	ratings_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root.add_child(ratings_box)
+	var ratings_bar := HFlowContainer.new()
+	ratings_bar.add_child(_btn("Merge drivers...", _open_merge))
+	ratings_box.add_child(ratings_bar)
 	ratings_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_child(ratings_view)
+	ratings_box.add_child(ratings_view)
+	_build_merge_dialog()
+
+	# drivers view
+	driver_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	driver_view.notice.connect(_on_notice)
+	root.add_child(driver_view)
 
 	# reports view
 	reports_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -151,12 +172,15 @@ func _ready() -> void:
 # ---------- Views ----------
 func _show_view(view: String) -> void:
 	review_box.visible = view == "review"
-	ratings_view.visible = view == "ratings"
+	ratings_box.visible = view == "ratings"
+	driver_view.visible = view == "drivers"
 	reports_view.visible = view == "reports"
 	profiles_view.visible = view == "profiles"
 	predict_view.visible = view == "predict"
 	if view == "ratings":
 		_draw_ratings()
+	elif view == "drivers":
+		driver_view.refresh()
 	elif view == "reports":
 		reports_view.refresh()
 	elif view == "profiles":
@@ -402,10 +426,7 @@ func _import_training(paths: Array) -> void:
 	if not unusable.is_empty():
 		text += " No usable lap data in: " + ", ".join(unusable)
 	status.text = text
-	if profiles_view.visible:
-		profiles_view.refresh()
-	if predict_view.visible:
-		predict_view.refresh()
+	_data_changed()
 
 
 # League files: each new file opens in the review screen. Files that were already rated are
@@ -442,7 +463,7 @@ func _skip_current() -> void:
 # of the batch without stopping for review.
 func _auto_confirm_rest() -> void:
 	if not draft.is_empty():
-		draft["new_drivers"].clear()
+		_note_suspects(draft)
 		Elo.confirm_draft(draft)
 		batch["rated"] += 1
 		draft = {}
@@ -460,7 +481,7 @@ func _auto_confirm_rest() -> void:
 			else:
 				batch["skipped"] += 1
 			continue
-		d["new_drivers"].clear()
+		_note_suspects(d)
 		Elo.confirm_draft(d)
 		batch["rated"] += 1
 	_finish_batch()
@@ -474,10 +495,14 @@ func _finish_batch() -> void:
 	_rebuild()
 	status.text = "Batch done: %d rated, %d old event(s) completed with stats and lap data, %d skipped or already complete. If any file was older than events you had already rated, press Recompute all." % [
 		batch["rated"], batch["updated"], batch["skipped"]]
-	if profiles_view.visible:
-		profiles_view.refresh()
-	if predict_view.visible:
-		predict_view.refresh()
+	var sus: Dictionary = batch["suspects"]
+	if not sus.is_empty():
+		var parts := PackedStringArray()
+		for n in sus:
+			parts.append("%s (like %s)" % [n, " / ".join(PackedStringArray(sus[n]))])
+		status.text += "\nThese new names look like existing drivers and were kept separate: %s. If any are the same person, use Ratings > Merge drivers." % ", ".join(parts)
+	batch["suspects"] = {}
+	_data_changed()
 
 
 func _on_confirm() -> void:
@@ -489,6 +514,7 @@ func _on_confirm() -> void:
 		_next_in_queue()
 		return
 	_rebuild()
+	_data_changed()
 	var l := Label.new()
 	l.text = "Rated and saved: " + done
 	warnings.add_child(l)
@@ -622,12 +648,135 @@ func _recompute() -> void:
 	if not s["undated"].is_empty():
 		text += " No date in file name, used save time: " + ", ".join(s["undated"])
 	status.text = text
-	if ratings_view.visible:
+	_data_changed()
+
+
+# ---------- After any change to the data ----------
+# Driver history (Profiles) is rebuilt and the screen on display is redrawn, so profiles,
+# track fit and predictions never show data from before an import, merge or recompute.
+func _data_changed() -> void:
+	Profiles.rebuild()
+	if ratings_box.visible:
 		_draw_ratings()
+	if driver_view.visible:
+		driver_view.refresh()
 	if reports_view.visible:
 		reports_view.refresh()
 	if profiles_view.visible:
 		profiles_view.refresh()
+	if predict_view.visible:
+		predict_view.refresh()
+
+
+func _reread() -> void:
+	status.text = "Refreshed %d events." % Elo.refresh_from_archive()
+	_data_changed()
+
+
+# Batch auto-confirm keeps similar names separate; remember them for the end-of-batch message
+func _note_suspects(d: Dictionary) -> void:
+	for n in d["new_drivers"]:
+		batch["suspects"][n] = d["new_drivers"][n]
+	d["new_drivers"].clear()
+
+
+# ---------- Driver merge ----------
+func _build_merge_dialog() -> void:
+	merge_dialog.title = "Merge drivers"
+	merge_dialog.ok_button_text = "Merge"
+	var box := VBoxContainer.new()
+	box.custom_minimum_size = Vector2(520, 0)
+	var intro := Label.new()
+	intro.text = "Use this when one person appears under two names, or to rename a driver. All ratings are rebuilt from the saved events afterwards (the current ratings are backed up first), so every past result counts for the merged driver."
+	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(intro)
+	var grid := GridContainer.new()
+	grid.columns = 2
+	var l1 := Label.new()
+	l1.text = "Merge this name:"
+	grid.add_child(l1)
+	grid.add_child(merge_from)
+	var l2 := Label.new()
+	l2.text = "into this driver:"
+	grid.add_child(l2)
+	grid.add_child(merge_into)
+	var l3 := Label.new()
+	l3.text = "or rename to:"
+	grid.add_child(l3)
+	merge_new.placeholder_text = "new name (leave empty to use the driver above)"
+	merge_new.custom_minimum_size = Vector2(280, 0)
+	grid.add_child(merge_new)
+	box.add_child(grid)
+	var made := Label.new()
+	made.text = "Merges made so far:"
+	box.add_child(made)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(520, 140)
+	merge_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(merge_list)
+	box.add_child(scroll)
+	merge_dialog.add_child(box)
+	merge_dialog.confirmed.connect(_do_merge)
+	add_child(merge_dialog)
+
+
+func _open_merge() -> void:
+	var names := Elo.known_names()
+	names.sort_custom(func(a, b): return str(a).to_lower() < str(b).to_lower())
+	merge_from.clear()
+	merge_into.clear()
+	for n in names:
+		merge_from.add_item(str(n))
+		merge_into.add_item(str(n))
+	if merge_into.item_count > 1:
+		merge_into.select(1)
+	merge_new.text = ""
+	_fill_merge_list()
+	merge_dialog.popup_centered()
+
+
+func _fill_merge_list() -> void:
+	_clear(merge_list)
+	var keys := Elo.aliases.keys()
+	keys.sort_custom(func(a, b): return str(a).to_lower() < str(b).to_lower())
+	if keys.is_empty():
+		var none := Label.new()
+		none.text = "none"
+		merge_list.add_child(none)
+	for a in keys:
+		var row := HBoxContainer.new()
+		var l := Label.new()
+		l.text = "%s  ->  %s" % [a, Elo.aliases[a]]
+		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(l)
+		row.add_child(_btn("Undo", _undo_merge.bind(str(a))))
+		merge_list.add_child(row)
+
+
+func _do_merge() -> void:
+	if merge_from.selected < 0:
+		status.text = "No drivers to merge yet."
+		return
+	var from_name := merge_from.get_item_text(merge_from.selected)
+	var into := merge_new.text.strip_edges()
+	if into == "" and merge_into.selected >= 0:
+		into = merge_into.get_item_text(merge_into.selected)
+	var s := Elo.merge_drivers(from_name, into)
+	if s.has("error"):
+		status.text = "Merge not done: " + str(s["error"])
+		return
+	status.text = "%s is now %s. Ratings rebuilt from %d events." % [from_name, Elo.resolve(from_name), int(s["count"])]
+	_data_changed()
+
+
+func _undo_merge(alias_name: String) -> void:
+	var s := Elo.unmerge_driver(alias_name)
+	if s.has("error"):
+		status.text = str(s["error"])
+		return
+	status.text = "%s is a separate driver again. Ratings rebuilt from %d events." % [alias_name, int(s["count"])]
+	_fill_merge_list()
+	_data_changed()
 
 
 # ---------- Excel export (current ratings) ----------

@@ -19,7 +19,7 @@ const DEFAULT_MINUTES := 35
 const DEFAULT_LAP_S := 110.0
 
 var days := []     # chronological: {"date", "course", "track", "race", "quali"} (names resolved)
-var hist := {}     # "cls|name" -> [{"date", "r": {...}, "q": {...}}], chronological
+var hist := {}     # "cls|name" -> [{"date", "course", "r": {...}, "q": {...}}], chronological
 
 
 func _ready() -> void:
@@ -63,12 +63,12 @@ func rebuild() -> void:
 		for nm in day["race"].get("drivers", {}):
 			var e: Dictionary = day["race"]["drivers"][nm]
 			var key: String = "%s|%s" % [e["cls"], nm]
-			recs[key] = {"date": day["date"], "r": e, "q": {}}
+			recs[key] = {"date": day["date"], "course": day["course"], "r": e, "q": {}}
 		for nm in day["quali"].get("drivers", {}):
 			var e: Dictionary = day["quali"]["drivers"][nm]
 			var key: String = "%s|%s" % [e["cls"], nm]
 			if not recs.has(key):
-				recs[key] = {"date": day["date"], "r": {}, "q": {}}
+				recs[key] = {"date": day["date"], "course": day["course"], "r": {}, "q": {}}
 			recs[key]["q"] = e
 		for key in recs:
 			if not hist.has(key):

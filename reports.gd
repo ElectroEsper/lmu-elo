@@ -22,6 +22,13 @@ func _table(title: String, headers: Array, rows: Array, note := "") -> Dictionar
 	return {"title": title, "note": note, "headers": headers, "rows": rows}
 
 
+# True when a result's FinishStatus means the driver retired or was disqualified. Older LMU
+# files leave many finishers as "None", so only an explicit DNF / DQ counts as not finishing.
+func _retired(status: Variant) -> bool:
+	var t := str(status).strip_edges().to_lower()
+	return t.begins_with("dnf") or t == "dq" or t.begins_with("disq")
+
+
 func _lap(t: float) -> String:
 	if t <= 0.0:
 		return "-"
@@ -161,7 +168,7 @@ func _race_detail(title: String, rs: Array, st: Dictionary) -> Dictionary:
 		if s.is_empty():
 			rows.append([pos, c["driver"], "", "", "", "", "", "", "", "", "", "", "", ""])
 			continue
-		var finished: bool = s["status"] == "Finished Normally"
+		var finished: bool = not _retired(s["status"])
 		var pace: Variant = ""
 		if s["best"] > 0.0 and class_best > 0.0:
 			pace = snappedf((s["best"] / class_best - 1.0) * 100.0, 0.01)
@@ -285,7 +292,7 @@ func consistency() -> Array:
 				data[cls][d] = {"pos": [], "dnf": 0}
 			data[cls][d]["pos"].append(int(c["pos"]))
 			var s: Dictionary = _stats_for(ev, "race", cls).get(d, {})
-			if not s.is_empty() and s["status"] != "Finished Normally":
+			if not s.is_empty() and _retired(s["status"]):
 				data[cls][d]["dnf"] += 1
 	var tables := []
 	var classes := data.keys()
@@ -473,6 +480,7 @@ func head_to_head(cls: String, sess: String, a: String, b: String) -> Array:
 		note = "These two have not been rated in the same %s %s session yet." % [cls, sess]
 	return [_table("%s vs %s" % [a, b], ["Event", "%s pos" % a, "%s pos" % b, "Ahead"], rows, note)]
 
+
 # ---------- 11. Driver profile ----------
 # Every rated session of one driver, in date order, with that session's stored stats.
 func _driver_rows(driver_name: String) -> Array:
@@ -507,14 +515,71 @@ func driver_profile(driver_name: String) -> Array:
 		_profile_ratings(driver_name, rows),
 		_profile_race(rows),
 		_profile_quali(rows),
-		_profile_results(rows),
-		_profile_chart(rows),
 	]
+	tables.append_array(_profile_track_fit(driver_name, rows))
+	tables.append(_profile_results(rows))
+	tables.append(_profile_chart(rows))
 	var out := []
 	for t in tables:
 		if not t["rows"].is_empty():
 			out.append(t)
 	return out
+
+
+# ---------- Track fit: pace vs the character of the track (driver_track_fit.gd) ----------
+
+func _profile_track_fit(driver_name: String, rows: Array) -> Array:
+	var classes := {}
+	for r in rows:
+		classes[r["cls"]] = true
+	var cls_list := classes.keys()
+	cls_list.sort()
+	var out := []
+	for cls in cls_list:
+		var f := DriverTrackFit.fit(driver_name, cls)
+		if f["tracks"].is_empty():
+			continue
+		var suffix := " (%s)" % cls if cls_list.size() > 1 else ""
+		var trows := []
+		for t in f["tracks"]:
+			trows.append([t["course"], t["races"], _vs_own(t["race_y"]), t["quali"], _vs_own(t["quali_y"]),
+				t["standout"] if t["standout"] != "" else "-"])
+		out.append(_table("Tracks" + suffix,
+			["Track", "Races", "Race pace", "Qualis", "Quali pace", "Track's stand-out grades"], trows,
+			"Pace at each track compared with this driver's OWN average (league races only, best first). A fast driver is not quicker everywhere by this measure: it shows where they are stronger or weaker than usual. Stand-out grades are the track's 4s, 5s and 1s for %s (see Profiles > Layout > Grades)." % cls))
+		var drows := []
+		for t in f["tendencies"]:
+			drows.append([t["name"], _tendency(t), _session_fx(t["race"]), _session_fx(t["quali"])])
+		out.append(_table("Track tendencies" + suffix, ["Characteristic", "Tendency", "Race", "Quali"], drows,
+			"Is the driver quicker or slower than their own average at tracks that score high on each characteristic? Effect = pace change at a track one step above the class average (about a grade 4), negative = quicker. Tendency combines race and quali. 'Early sign' = preliminary (about one season of data), 'quicker' / 'slower' = more confident (about two seasons). Estimates are pulled towards zero; race-to-race noise is measured over the whole class (%.2f%% race, %.2f%% quali). 'Goes with X' = this characteristic moves together with X over the tracks this driver raced, so it is not a separate finding. Needs %d sessions at %d different tracks." % [
+				float(f["noise"]["race"]), float(f["noise"]["quali"]), DriverTrackFit.MIN_RACES, DriverTrackFit.MIN_TRACKS]))
+	return out
+
+
+func _vs_own(y) -> String:
+	if y == null:
+		return "-"
+	var v := float(y)
+	if absf(v) < 0.005:
+		return "average"
+	return "%.2f%% %s" % [absf(v), "quicker" if v < 0.0 else "slower"]
+
+
+# Combined verdict and effect
+func _tendency(t: Dictionary) -> String:
+	if not t.has("effect"):
+		return str(t["verdict"])
+	return "%s: %+.2f%% (±%.2f), %d sessions at %d tracks" % [t["verdict"], float(t["effect"]), float(t["se"]),
+		int(t["n"]), int(t["tracks"])]
+
+
+# One session's effect, or why there is none
+func _session_fx(e: Dictionary) -> String:
+	if e.is_empty():
+		return "-"
+	if not e.has("effect"):
+		return "not enough data (%d)" % int(e.get("n", 0))
+	return "%+.2f%% (±%.2f)" % [float(e["effect"]), float(e["se"])]
 
 
 func _profile_overview(driver_name: String, rows: Array) -> Dictionary:
@@ -635,7 +700,7 @@ func _profile_race(rows: Array) -> Dictionary:
 			var s: Dictionary = r["stats"]
 			if s.is_empty():
 				continue
-			if s["status"] != "Finished Normally":
+			if _retired(s["status"]):
 				dnfs += 1
 			laps += int(s["laps"])
 			led += int(s["led"])
@@ -702,7 +767,7 @@ func _profile_results(rows: Array) -> Dictionary:
 		var s: Dictionary = r["stats"]
 		var is_race: bool = r["sess"] == "race"
 		var status := ""
-		if not s.is_empty() and s["status"] != "Finished Normally":
+		if not s.is_empty() and _retired(s["status"]):
 			status = s["status"]
 		out.append([
 			r["event"], r["cls"], r["sess"], r["pos"], r["of"],

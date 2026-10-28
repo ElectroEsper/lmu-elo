@@ -278,16 +278,48 @@ func _apply(draft: Dictionary) -> void:
 		processed[draft["hash"]] = draft["file"]   # remembered so it is not imported twice, but never rated
 		return
 	var changes := []
-	for sess in draft["orders"]:
-		for cls in draft["orders"][sess]:
-			changes.append_array(update_session(draft["orders"][sess][cls], cls, sess))
+	var orders := _resolved_orders(draft["orders"])
+	for sess in orders:
+		for cls in orders[sess]:
+			changes.append_array(update_session(orders[sess][cls], cls, sess))
 	processed[draft["hash"]] = draft["file"]
 	history.append({
 		"file": draft["file"],
 		"time": _name_time(draft["file"]),
 		"changes": changes,
-		"stats": draft.get("stats", {}),
+		"stats": _resolved_stats(draft.get("stats", {})),
 	})
+
+
+# Saved events keep the names they were rated with. Re-applying the aliases here means a merge
+# made later (see merge_drivers) also merges every older result when the ratings are rebuilt.
+# If both names are in the same session, the better-placed entry is kept.
+func _resolved_orders(orders: Dictionary) -> Dictionary:
+	var out := {}
+	for sess in orders:
+		out[sess] = {}
+		for cls in orders[sess]:
+			var names := []
+			for n in orders[sess][cls]:
+				var r := resolve(str(n))
+				if r not in names:
+					names.append(r)
+			out[sess][cls] = names
+	return out
+
+
+func _resolved_stats(stats: Dictionary) -> Dictionary:
+	var out := {}
+	for sess in stats:
+		out[sess] = {}
+		for cls in stats[sess]:
+			var by_name := {}
+			for n in stats[sess][cls]:
+				var r := resolve(str(n))
+				if not by_name.has(r):
+					by_name[r] = stats[sess][cls][n]
+			out[sess][cls] = by_name
+	return out
 
 
 # Call after the draft has been reviewed/edited
@@ -409,6 +441,41 @@ func rebuild_all() -> Dictionary:
 # ---------- Names and aliases ----------
 func resolve(driver_name: String) -> String:
 	return aliases.get(driver_name, driver_name)
+
+
+# Makes from_name the same driver as into (an existing driver, or a new name to rename to),
+# then rebuilds every rating from the saved events so all past results are combined.
+# Earlier aliases that pointed at from_name follow it. Returns rebuild_all()'s summary,
+# or {"error": "..."}.
+func merge_drivers(from_name: String, into: String) -> Dictionary:
+	from_name = from_name.strip_edges()
+	into = resolve(into.strip_edges())
+	if from_name == "" or into == "":
+		return {"error": "Pick two drivers."}
+	if resolve(from_name) == into:
+		return {"error": "%s is already %s." % [from_name, into]}
+	aliases[from_name] = into
+	for a in aliases.keys():
+		if aliases[a] == from_name:
+			aliases[a] = into
+	aliases.erase(into)   # the target is never an alias of something else
+	return _rebuild_keeping_aliases()
+
+
+# Rebuilds the ratings; the alias table is saved even when there are no events to replay.
+func _rebuild_keeping_aliases() -> Dictionary:
+	var summary := rebuild_all()
+	if int(summary["count"]) == 0:
+		save_ratings()
+	return summary
+
+
+# Undoes a merge: from_name becomes its own driver again (ratings are rebuilt).
+func unmerge_driver(from_name: String) -> Dictionary:
+	if not aliases.has(from_name):
+		return {"error": "%s is not merged into anyone." % from_name}
+	aliases.erase(from_name)
+	return _rebuild_keeping_aliases()
 
 
 func known_names() -> Array:
