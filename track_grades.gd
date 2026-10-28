@@ -16,26 +16,26 @@ const TIE_VALUE := 0.03
 # from LMP3 and GT3 laps of Bahrain, Sebring, Spa, Paul Ricard and COTA. alt / alt_cuts: what
 # to grade when a profile lacks the key (e.g. an export without tyre wear channels).
 const TRAITS := [
-	{"id": "top", "name": "Full throttle", "src": "tel", "key": "full_throttle_pct", "cuts": [64.0, 67.0, 69.5, 71.0],
+	{"id": "top", "unit": "% of lap time", "name": "Full throttle", "src": "tel", "key": "full_throttle_pct", "cuts": [64.0, 67.0, 69.5, 71.0],
 		"tip": "Share of the lap time at full throttle. High = power and low drag pay off (and the engine works hardest). Low = more braking, part-throttle and coasting."},
-	{"id": "brake", "name": "Braking", "src": "tel", "key": "scrub_kmh_km", "cuts": [130.0, 145.0, 160.0, 175.0],
+	{"id": "brake", "unit": "km/h per km", "name": "Braking", "src": "tel", "key": "scrub_kmh_km", "cuts": [130.0, 145.0, 160.0, 175.0],
 		"tip": "Speed taken off in braking zones, per km of track. High = many and/or big stops."},
-	{"id": "hs", "name": "High-speed corners", "src": "tel", "key": "hs_corner_pct", "cuts": [12.0, 15.0, 18.0, 21.0],
+	{"id": "hs", "unit": "% of lap time", "name": "High-speed corners", "src": "tel", "key": "hs_corner_pct", "cuts": [12.0, 15.0, 18.0, 21.0],
 		"tip": "Share of the lap time above 60% of top speed with at least 1 G of lateral load. High = downforce and commitment."},
-	{"id": "traction", "name": "Traction", "src": "tel", "key": "slow_corners_km", "cuts": [0.75, 1.0, 1.25, 1.4],
+	{"id": "traction", "unit": "per km", "name": "Traction", "src": "tel", "key": "slow_corners_km", "cuts": [0.75, 1.0, 1.25, 1.4],
 		"tip": "Slow corners and hairpins per km. High = exits and traction decide the lap."},
-	{"id": "density", "name": "Corner density", "src": "tel", "key": "corners_km", "cuts": [1.95, 2.1, 2.25, 2.4],
+	{"id": "density", "unit": "per km", "name": "Corner density", "src": "tel", "key": "corners_km", "cuts": [1.95, 2.1, 2.25, 2.4],
 		"tip": "Corners per km (flat-out kinks not counted). High = busy and technical, low = long gaps between corners."},
-	{"id": "tyres", "name": "Tyre stress", "src": "tel", "key": "tyre_wear_km", "cuts": [0.08, 0.11, 0.15, 0.20],
-		"alt": "combined_g_avg", "alt_cuts": [0.90, 0.97, 1.03, 1.10],
+	{"id": "tyres", "unit": "% wear per km", "name": "Tyre stress", "src": "tel", "key": "tyre_wear_km", "cuts": [0.08, 0.11, 0.15, 0.20],
+		"alt": "combined_g_avg", "alt_cuts": [0.90, 0.97, 1.03, 1.10], "alt_unit": "G on average",
 		"tip": "Tyre wear per km on the telemetry lap (average of the four tyres), from the game's own wear model. High = hard on tyres. Without wear channels: average combined G over the lap."},
-	{"id": "fuel", "name": "Fuel use", "src": "tel", "key": "fuel_l_min", "cuts": [1.45, 1.6, 1.75, 1.9],
+	{"id": "fuel", "unit": "L per minute", "name": "Fuel use", "src": "tel", "key": "fuel_l_min", "cuts": [1.45, 1.6, 1.75, 1.9],
 		"tip": "Litres per minute of driving, which is what decides pit stops in a timed race."},
-	{"id": "bumps", "name": "Bumpiness", "src": "tel", "key": "bump_g", "cuts": [0.065, 0.085, 0.105, 0.13],
+	{"id": "bumps", "unit": "G (typical 50 m)", "name": "Bumpiness", "src": "tel", "key": "bump_g", "cuts": [0.065, 0.085, 0.105, 0.13],
 		"tip": "Fast up-and-down motion (vertical G) where the car is going straight, so kerbs do not count: the typical 50 m section, so one big hit does not decide it. High = bumpy surface."},
-	{"id": "overtake", "name": "Overtaking", "src": "res", "key": "changes_pct", "cuts": [8.0, 14.0, 20.0, 27.0],
+	{"id": "overtake", "unit": "% of the field", "name": "Overtaking", "src": "res", "key": "changes_pct", "cuts": [8.0, 14.0, 20.0, 27.0],
 		"tip": "From league races: average places gained or lost per driver, as % of the class field. High = positions change a lot."},
-	{"id": "incidents", "name": "Incident risk", "src": "res", "key": "incidents_10", "cuts": [0.5, 1.0, 2.0, 3.5],
+	{"id": "incidents", "unit": "per driver per 10 laps", "name": "Incident risk", "src": "res", "key": "incidents_10", "cuts": [0.5, 1.0, 2.0, 3.5],
 		"tip": "From league races: contacts plus track-limit warnings per driver per 10 laps."},
 ]
 
@@ -49,9 +49,11 @@ static func grade(course: String, cls: String) -> Array:
 	for t in TRAITS:
 		var key: String = t["key"]
 		var cuts: Array = t["cuts"]
+		var unit: String = t["unit"]
 		if not mine.has(key) and t.has("alt") and mine.has(t["alt"]):
 			key = t["alt"]
 			cuts = t["alt_cuts"]
+			unit = t["alt_unit"]
 		var row := {"id": t["id"], "name": t["name"], "tip": t["tip"], "grade": 0,
 			"value": "-", "detail": _detail(t["id"], mine), "basis": "no data"}
 		if mine.has(key):
@@ -60,7 +62,7 @@ static func grade(course: String, cls: String) -> Array:
 				if values[c].has(key):
 					pool[c] = float(values[c][key])
 			var x := float(mine[key])
-			row["value"] = _fmt(x)
+			row["value"] = "%s %s" % [_fmt(x), unit]
 			if pool.size() >= MIN_RANKED:
 				var r := _ranked(course, pool)
 				row["grade"] = r["grade"]
@@ -80,7 +82,17 @@ static func collect(cls: String) -> Dictionary:
 	for p in TrackStore.list():
 		if str(p.get("class", "")) != cls or not p.has("traits"):
 			continue
-		out[str(p["course"])] = (p["traits"] as Dictionary).duplicate()
+		var t := (p["traits"] as Dictionary).duplicate()
+		# context for the details: lap length and time, coasting share, kinks, wear per tyre
+		t["lap_km"] = float(p["lap"]["length_m"]) / 1000.0
+		t["lap_s"] = float(p["lap"]["time_s"])
+		var st: Dictionary = p.get("stats", {})
+		if st.has("coasting_pct"):
+			t["coasting_pct"] = st["coasting_pct"]
+		if st.has("flat_kinks"):
+			t["flat_kinks"] = st["flat_kinks"]
+		t["wear_tyres"] = p.get("resources", {}).get("tyre_wear_pct", {})
+		out[str(p["course"])] = t
 	var res := _results(cls)
 	for course in res:
 		if not out.has(course):
@@ -100,10 +112,12 @@ static func _results(cls: String) -> Dictionary:
 			continue
 		var course: String = day["course"]
 		if not acc.has(course):
-			acc[course] = {"changes": [], "incidents": [], "tank_lap": []}
+			acc[course] = {"changes": [], "incidents": [], "contacts": [], "limits": [], "tank_lap": []}
 		var a: Dictionary = acc[course]
 		var c: Dictionary = race["classes"][cls]
 		a["incidents"].append((float(c.get("con", 0.0)) + float(c.get("tl", 0.0))) * 10.0)
+		a["contacts"].append(float(c.get("con", 0.0)) * 10.0)
+		a["limits"].append(float(c.get("tl", 0.0)) * 10.0)
 		var length := float(day["track"].get("length", 0.0))
 		if float(c.get("fuel_km", 0.0)) > 0.0 and length > 0.0:
 			a["tank_lap"].append(float(c["fuel_km"]) * length / 1000.0)   # % of the tank per lap
@@ -129,6 +143,9 @@ static func _results(cls: String) -> Dictionary:
 			r["races"] = a["changes"].size()
 		if not a["incidents"].is_empty():
 			r["incidents_10"] = _mean(a["incidents"])
+			r["contacts_10"] = _mean(a["contacts"])
+			r["limits_10"] = _mean(a["limits"])
+			r["incident_races"] = a["incidents"].size()
 		if not a["tank_lap"].is_empty():
 			r["tank_pct_lap"] = _mean(a["tank_lap"])
 		out[course] = r
@@ -179,53 +196,78 @@ static func _fixed(x: float, cuts: Array) -> int:
 	return g
 
 
-# The supporting numbers shown next to each grade
+# The supporting numbers shown next to each grade. They use the same kind of measure as the
+# grade (shares of the lap, per km, per minute...) so they cannot contradict it; plain counts
+# are always given with the lap length.
 static func _detail(id: String, t: Dictionary) -> String:
 	var parts := PackedStringArray()
+	var km := float(t.get("lap_km", 0.0))
+	var on_lap := (" in %.1f km" % km) if km > 0.0 else ""
 	match id:
 		"top":
-			if t.has("longest_straight_m"):
-				parts.append("longest straight %d m" % int(t["longest_straight_m"]))
-			if t.has("top_kmh"):
-				parts.append("top %d km/h" % int(t["top_kmh"]))
+			# where the rest of the lap time goes
+			if t.has("full_throttle_pct") and t.has("braking_pct") and t.has("coasting_pct"):
+				var part := maxf(0.0, 100.0 - float(t["full_throttle_pct"]) - float(t["braking_pct"]) - float(t["coasting_pct"]))
+				parts.append("rest of the lap: braking %.1f%%, part-throttle %.1f%%, coasting %.1f%%" % [
+					float(t["braking_pct"]), part, float(t["coasting_pct"])])
 		"brake":
 			if t.has("heavy_zones_km"):
 				parts.append("%.2f heavy stops per km" % float(t["heavy_zones_km"]))
 			if t.has("braking_pct"):
-				parts.append("%.1f%% of the lap on the brakes" % float(t["braking_pct"]))
+				parts.append("on the brakes %.1f%% of the lap time" % float(t["braking_pct"]))
 			if t.has("decel_avg_g"):
-				parts.append("peak decel %.2f G on average" % float(t["decel_avg_g"]))
+				parts.append("average peak deceleration %.2f G" % float(t["decel_avg_g"]))
+		"hs":
+			if t.has("flat_kinks"):
+				parts.append("%d flat-out kink%s%s (counted here)" % [int(t["flat_kinks"]), "" if int(t["flat_kinks"]) == 1 else "s", on_lap])
 		"traction":
+			if t.has("slow_corners_km") and km > 0.0:
+				parts.append("%d slow corners and hairpins%s" % [roundi(float(t["slow_corners_km"]) * km), on_lap])
 			if int(t.get("pickup_avg_m", -1)) >= 0:
-				parts.append("full throttle %d m after the apex on average" % int(t["pickup_avg_m"]))
+				parts.append("in those, full throttle %d m after the apex on average" % int(t["pickup_avg_m"]))
 		"density":
+			if t.has("corners_km") and km > 0.0:
+				parts.append("%d corners%s" % [roundi(float(t["corners_km"]) * km), on_lap])
 			if t.has("direction_changes"):
 				parts.append("%d quick direction changes" % int(t["direction_changes"]))
 		"tyres":
-			if t.has("tyre_wear_lap"):
-				parts.append("%.2f%% wear per lap" % float(t["tyre_wear_lap"]))
+			var wear: Dictionary = t.get("wear_tyres", {})
+			if not wear.is_empty() and km > 0.0:
+				var worst := ""
+				for k in wear:
+					if worst == "" or float(wear[k]) > float(wear[worst]):
+						worst = k
+				parts.append("most worn: %s at %.3f%% per km" % [worst, float(wear[worst]) / km])
 			if t.has("combined_g_avg"):
 				parts.append("average combined load %.2f G" % float(t["combined_g_avg"]))
 		"fuel":
-			if t.has("fuel_l_lap"):
-				parts.append("%.2f L per lap" % float(t["fuel_l_lap"]))
 			if t.has("fuel_l_km"):
 				parts.append("%.3f L per km" % float(t["fuel_l_km"]))
+			if t.has("fuel_l_lap"):
+				parts.append("for pit planning: %.2f L per lap" % float(t["fuel_l_lap"]))
 			if float(t.get("tank_pct_lap", 0.0)) > 0.0:
 				var tank := float(t["tank_pct_lap"])
-				parts.append("%.1f%% of the tank per lap, about %d laps per tank (league races)" % [tank, int(100.0 / tank)])
+				var txt := "league races: %.1f%% of the tank per lap, about %d laps" % [tank, int(100.0 / tank)]
+				if float(t.get("lap_s", 0.0)) > 0.0:
+					txt += " or %d minutes" % int(100.0 / tank * float(t["lap_s"]) / 60.0)
+				parts.append(txt + " per tank")
 		"bumps":
-			if t.has("bump_g") and t.get("rough_spots", []).is_empty():
-				parts.append("no rough spots")
 			var spots: Array = t.get("rough_spots", [])
+			if t.has("bump_g") and spots.is_empty():
+				parts.append("no rough spots")
 			for j in spots.size():
 				var sp: Dictionary = spots[j]
 				parts.append("B%d at %d-%d m (%d km/h)" % [j + 1, int(sp["at"]), int(sp["at"]) + int(sp.get("len", 50)), int(sp["kmh"])])
 			if t.has("kerb_mm"):
-				parts.append("kerb strikes %.1f mm (one-sided ride-height motion in corners)" % float(t["kerb_mm"]))
+				parts.append("kerb strikes %.1f mm, not graded (one-sided ride-height motion in corners)" % float(t["kerb_mm"]))
 		"overtake":
 			if t.has("races"):
-				parts.append("%d race%s" % [int(t["races"]), "" if int(t["races"]) == 1 else "s"])
+				parts.append("average of %d race%s" % [int(t["races"]), "" if int(t["races"]) == 1 else "s"])
+		"incidents":
+			if t.has("contacts_10"):
+				parts.append("contacts %.2f, track-limit warnings %.2f (per driver per 10 laps)" % [float(t["contacts_10"]), float(t["limits_10"])])
+			if t.has("incident_races"):
+				parts.append("average of %d race%s" % [int(t["incident_races"]), "" if int(t["incident_races"]) == 1 else "s"])
 	return ", ".join(parts)
 
 
