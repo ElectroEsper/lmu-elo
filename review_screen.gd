@@ -35,7 +35,7 @@ var motec_notes := ""
 var motec_dialog := ConfirmationDialog.new()   # asks which track and class each file belongs to
 var motec_rows_box := VBoxContainer.new()
 var motec_rows: Array = []         # {"path", "track": OptionButton, "class": OptionButton}
-var motec_courses: Array = []      # track names seen in result files, in picker order
+var motec_courses: Array = []      # track names seen in result files, alphabetical (picker order)
 var motec_classes: Array = []
 var motec_info := AcceptDialog.new()
 var skip_btn := Button.new()
@@ -236,9 +236,13 @@ func _guess_class(file_name: String, classes: Array) -> String:
 
 
 func _start_motec(paths: Array) -> void:
-	motec_courses = Profiles.courses()
-	motec_classes = Profiles.classes()
+	motec_courses = Profiles.courses().duplicate()
+	motec_classes = Profiles.classes().duplicate()
 	motec_courses.erase("")
+	# alphabetical, ignoring case
+	var by_name := func(a, b): return str(a).to_lower() < str(b).to_lower()
+	motec_courses.sort_custom(by_name)
+	motec_classes.sort_custom(by_name)
 	if motec_courses.is_empty() or motec_classes.is_empty():
 		motec_info.dialog_text = "No track is known yet.\n\nImport at least one result file (.xml) for this track first, then drop the telemetry again. Telemetry can only be attached to tracks and classes seen in your results."
 		motec_info.popup_centered()

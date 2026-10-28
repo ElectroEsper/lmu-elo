@@ -1,0 +1,554 @@
+diff --git a/elo.gd b/elo.gd
+index 495ebb0..bb5dba0 100644
+--- a/elo.gd
++++ b/elo.gd
+@@ -274,6 +274,9 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
+ func _apply(draft: Dictionary) -> void:
+ 	if processed.has(draft["hash"]):
+ 		return
++	if draft.get("kind", "league") == "training":
++		processed[draft["hash"]] = draft["file"]   # remembered so it is not imported twice, but never rated
++		return
+ 	var changes := []
+ 	for sess in draft["orders"]:
+ 		for cls in draft["orders"][sess]:
+@@ -328,9 +331,14 @@ func attach_stats(draft: Dictionary) -> bool:
+ 	var saved = JSON.parse_string(FileAccess.get_file_as_string(path))
+ 	if not (saved is Dictionary):
+ 		return false
+-	saved["stats"] = draft["stats"]
+-	saved["track"] = draft.get("track", {})
+-	saved["fp"] = draft.get("fp", {})
++	if saved.get("kind", "league") == "training":
++		# training files keep no driver data: only the anonymous track / car fingerprint
++		saved["fp"] = Fingerprint.extract(draft["path"], true)
++		saved["track"] = draft.get("track", {})
++	else:
++		saved["stats"] = draft["stats"]
++		saved["track"] = draft.get("track", {})
++		saved["fp"] = draft.get("fp", {})
+ 	var f := FileAccess.open(path, FileAccess.WRITE)
+ 	f.store_string(JSON.stringify(saved))
+ 	f.close()
+@@ -367,7 +375,7 @@ func rebuild_all() -> Dictionary:
+ 			continue
+ 		var path := "user://events/" + f
+ 		var draft = JSON.parse_string(FileAccess.get_file_as_string(path))
+-		if not (draft is Dictionary) or not draft.has("orders") or not draft.has("file"):
++		if not (draft is Dictionary) or not draft.has("file") or not (draft.has("orders") or draft.get("kind", "") == "training"):
+ 			continue
+ 		var t := _name_time(draft["file"])
+ 		if t < 0:
+@@ -678,7 +686,7 @@ func _read_track(path: String) -> Dictionary:
+ 		match p.get_node_type():
+ 			XMLParser.NODE_ELEMENT:
+ 				var n := p.get_node_name()
+-				if n == "Race" or n == "Qualify":
++				if n == "Race" or n == "Qualify" or n.begins_with("Practice") or n == "Warmup":
+ 					break # header is over
+ 				tag = n if n in wanted else ""
+ 			XMLParser.NODE_TEXT:
+@@ -714,23 +722,27 @@ func collect_xml(paths: PackedStringArray) -> Array:
+ 	return out
+ 
+ 
+-# Backfill for events that were confirmed before stats / fingerprints existed.
+-# Every file that was already rated gets its stats, track info and fingerprint attached (nothing is
+-# rated again). Files that were never imported are only counted: drop them one at a time to review them.
+-# Use as: var r = await Elo.backfill(paths). on_progress is called with (done, total).
+-# Returns {"updated": int, "complete": int, "new": Array of file names}
+-func backfill(paths: Array, on_progress := Callable()) -> Dictionary:
+-	var out := {"updated": 0, "complete": 0, "new": []}
+-	for i in paths.size():
+-		var d := build_draft(paths[i])
+-		if not processed.has(d["hash"]):
+-			out["new"].append(str(paths[i]).get_file())
+-		elif event_lacks_stats(d):
+-			if attach_stats(d):
+-				out["updated"] += 1
+-		else:
+-			out["complete"] += 1
+-		if on_progress.is_valid():
+-			on_progress.call(i + 1, paths.size())
+-		await get_tree().process_frame
+-	return out
++# Stores a TRAINING file: track and car-model data only. Nothing is rated, no driver names are
++# kept (the fingerprint is anonymous) and it does not count as a league event.
++# Returns "added", "duplicate" or "no data".
++func import_training(path: String) -> String:
++	var file_hash := FileAccess.get_sha256(path)
++	if processed.has(file_hash):
++		return "duplicate"
++	var fp := Fingerprint.extract(path, true)
++	if not fp.has("race") and not fp.has("quali"):
++		return "no data"
++	var draft := {
++		"file": path.get_file(), "path": path, "hash": file_hash,
++		"kind": "training", "track": _read_track(path), "fp": fp,
++	}
++	archive_xml(draft)
++	processed[file_hash] = draft["file"]
++	var saved := draft.duplicate(true)
++	saved.erase("path")
++	DirAccess.make_dir_recursive_absolute("user://events")
++	var f := FileAccess.open("user://events/%s.json" % draft["file"], FileAccess.WRITE)
++	f.store_string(JSON.stringify(saved))
++	f.close()
++	save_ratings()
++	return "added"
+diff --git a/fingerprint.gd b/fingerprint.gd
+index c750849..5baa6e9 100644
+--- a/fingerprint.gd
++++ b/fingerprint.gd
+@@ -23,9 +23,12 @@ const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5
+ const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
+ const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
+ const MIN_LAPS := 5
++const SESSION_TAGS := ["Race", "Qualify", "Practice1", "Practice2", "Practice3", "Practice4", "Warmup"]
+ 
+ 
+-static func extract(path: String) -> Dictionary:
++# training = true: the file is training data. Practice / warmup sessions are accepted too, and the
++# driver names are dropped (entries become "#1", "#2", ...), so only track and car-model data remain.
++static func extract(path: String, training := false) -> Dictionary:
+ 	var p := XMLParser.new()
+ 	if p.open(path) != OK:
+ 		return {}
+@@ -53,7 +56,7 @@ static func extract(path: String) -> Dictionary:
+ 					continue
+ 				var tag := p.get_node_name()
+ 				depth += 1
+-				if session == "" and (tag == "Race" or tag == "Qualify"):
++				if session == "" and tag in SESSION_TAGS:
+ 					session = tag
+ 					session_depth = depth
+ 					cur = {"drivers": [], "minutes": 0, "tl": {}, "con": {}, "pens": {}}
+@@ -145,14 +148,54 @@ static func extract(path: String) -> Dictionary:
+ 			"length": length,
+ 		},
+ 	}
+-	if sessions.has("Race") and not sessions["Race"]["drivers"].is_empty():
+-		var r := _race(sessions["Race"], length)
++	var race_src: Dictionary = sessions.get("Race", {})
++	var quali_src: Dictionary = sessions.get("Qualify", {})
++	if training:
++		# a practice or warmup session stands in for whatever is missing
++		var practice := _best_practice(sessions)
++		if race_src.is_empty() or race_src["drivers"].is_empty():
++			race_src = practice
++		if quali_src.is_empty() or quali_src["drivers"].is_empty():
++			quali_src = practice
++	if not race_src.is_empty() and not race_src["drivers"].is_empty():
++		var r := _race(race_src, length)
+ 		if not r["drivers"].is_empty():
+ 			out["race"] = r
+-	if sessions.has("Qualify") and not sessions["Qualify"]["drivers"].is_empty():
+-		var q := _quali(sessions["Qualify"], length)
++	if not quali_src.is_empty() and not quali_src["drivers"].is_empty():
++		var q := _quali(quali_src, length)
+ 		if not q["drivers"].is_empty():
+ 			out["quali"] = q
++	if training:
++		out["kind"] = "training"
++		for k in ["race", "quali"]:
++			if out.has(k):
++				out[k]["drivers"] = _anonymous(out[k]["drivers"])
++	return out
++
++
++# The practice / warmup session with the most laps driven (empty if the file has none).
++static func _best_practice(sessions: Dictionary) -> Dictionary:
++	var best := {}
++	var best_laps := 0
++	for tag in sessions:
++		if tag == "Race" or tag == "Qualify":
++			continue
++		var total := 0
++		for d in sessions[tag]["drivers"]:
++			total += d["laps"].size()
++		if total > best_laps:
++			best_laps = total
++			best = sessions[tag]
++	return best
++
++
++# Same rows without driver names.
++static func _anonymous(rows: Dictionary) -> Dictionary:
++	var out := {}
++	var i := 1
++	for driver_name in rows:
++		out["#%d" % i] = rows[driver_name]
++		i += 1
+ 	return out
+ 
+ 
+@@ -168,6 +211,8 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
+ 		if nm == "" or cls == "" or d.get("FinishStatus", "") == "DQ":
+ 			continue
+ 		var n := int(d.get("Laps", "0"))
++		if n == 0:
++			n = d["laps"].size()   # practice files may not carry a Laps field
+ 		if n < MIN_LAPS:
+ 			continue
+ 		var times := []
+@@ -260,8 +305,10 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
+ 		var top5 := names.filter(func(nm): return rows[nm]["pos"] > 0)
+ 		top5.sort_custom(func(a, b): return rows[a]["pos"] < rows[b]["pos"])
+ 		top5 = top5.slice(0, 5)
+-		if top5.is_empty():
+-			top5 = names.slice(0, 5)
++		if top5.is_empty():   # no finishing positions (practice): use the five quickest instead
++			top5 = names.duplicate()
++			top5.sort_custom(func(a, b): return rows[a]["pace"] < rows[b]["pace"])
++			top5 = top5.slice(0, 5)
+ 		var t5_pace := []
+ 		var t5_top := []
+ 		for nm in top5:
+diff --git a/predict.gd b/predict.gd
+index 73b68bb..2b787dc 100644
+--- a/predict.gd
++++ b/predict.gd
+@@ -239,7 +239,7 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0,
+ func backtest_races() -> Array:
+ 	var races := []
+ 	for day in Profiles.days:
+-		if day["race"].is_empty():
++		if day["race"].is_empty() or day.get("training", false):
+ 			continue
+ 		for cls in day["race"]["classes"]:
+ 			var rows := []
+diff --git a/profiles.gd b/profiles.gd
+index c9e2c6d..be7e6d9 100644
+--- a/profiles.gd
++++ b/profiles.gd
+@@ -40,9 +40,12 @@ func rebuild() -> void:
+ 		if fp.is_empty() or not fp.has("track"):
+ 			continue
+ 		var date: String = str(draft["file"]).left(10)
+-		if not by_date.has(date):
+-			by_date[date] = {"date": date, "course": "", "track": {}, "race": {}, "quali": {}}
+-		var day: Dictionary = by_date[date]
++		var training: bool = draft.get("kind", "league") == "training"
++		# a league weekend merges its quali and race files by date; each training file stays on its own
++		var day_key: String = ("%s|T|%s" % [date, draft["file"]]) if training else date
++		if not by_date.has(day_key):
++			by_date[day_key] = {"date": date, "course": "", "track": {}, "race": {}, "quali": {}, "training": training}
++		var day: Dictionary = by_date[day_key]
+ 		day["track"] = fp["track"]
+ 		day["course"] = fp["track"].get("course", "")
+ 		if fp.has("race"):
+@@ -54,6 +57,8 @@ func rebuild() -> void:
+ 	for d in dates:
+ 		days.append(by_date[d])
+ 	for day in days:
++		if day.get("training", false):
++			continue   # training data never creates driver history
+ 		var recs := {}
+ 		for nm in day["race"].get("drivers", {}):
+ 			var e: Dictionary = day["race"]["drivers"][nm]
+@@ -145,7 +150,7 @@ func class_means(cls: String, before := "") -> Dictionary:
+ 	var cons := 0.0
+ 	var n := 0
+ 	for day in days:
+-		if before != "" and day["date"] >= before:
++		if day.get("training", false) or (before != "" and day["date"] >= before):
+ 			continue
+ 		for nm in day["race"].get("drivers", {}):
+ 			var r: Dictionary = day["race"]["drivers"][nm]
+@@ -227,6 +232,10 @@ func classes() -> Array:
+ 	var seen := {}
+ 	for key in hist:
+ 		seen[key.get_slice("|", 0)] = true
++	for day in days:   # classes that only appear in training data still get car and track tables
++		for sec in ["race", "quali"]:
++			for c in day[sec].get("classes", {}):
++				seen[c] = true
+ 	var out := seen.keys()
+ 	out.sort()
+ 	return out
+diff --git a/profiles_view.gd b/profiles_view.gd
+index 57de1fc..4b3efaa 100644
+--- a/profiles_view.gd
++++ b/profiles_view.gd
+@@ -20,6 +20,42 @@ const TAG_INFO := {
+ 	"Saturday hero": "Quicker in qualifying than in the race (at least 0.4% better, over 2+ qualis).",
+ 	"Sunday driver": "Quicker in the race than in qualifying (at least 0.4% better, over 2+ qualis).",
+ }
++# Tooltips for the column headers (one per column, same order as the columns).
++const DRIVER_TIPS := [
++	"Driver name. Aliases you merged are combined.",
++	"Races with lap data in this class.",
++	"Qualifying pace against the class median, in percent. Negative = quicker. Drivers with few sessions are pulled toward 0.",
++	"Race pace on clean laps against the class median, in percent. Negative = quicker.",
++	"Tyre wear per km against the class median, in percent. Negative = gentler on the tyres.",
++	"Top speed against the class median, in percent. Positive = faster in a straight line.",
++	"Fuel use per km against the class median, in percent. Negative = more economical.",
++	"Track-limit warnings per lap.",
++	"Contacts with other cars per lap.",
++	"Lap-time spread as a percent of the median lap. Lower = more consistent.",
++	"",
++]
++const CAR_TIPS := [
++	"Car model.",
++	"Driver entries seen with this car (league and training data).",
++	"Qualifying pace of this car against the class median, in percent. Negative = quicker.",
++	"Race pace of this car against the class median, in percent. Negative = quicker.",
++	"Top speed against the class median, in percent.",
++	"Fuel use per km against the class median, in percent. Negative = more economical.",
++	"Tyre wear per km against the class median, in percent. Negative = gentler.",
++]
++const TRACK_TIPS := [
++	"Track layout.",
++	"Sessions recorded here (league and training data).",
++	"Track length in km.",
++	"Average speed over the best qualifying laps.",
++	"Highest top speed recorded.",
++	"Share of the lap time spent in sector 1, in percent.",
++	"Share of the lap time spent in sector 2, in percent.",
++	"Share of the lap time spent in sector 3, in percent.",
++	"Tyre wear per km at this track, in percent.",
++	"Fuel use per km at this track.",
++	"Track-limit warnings per lap.",
++]
+ const TAG_RULES := "Tags need 3+ races. \"Far\" means at least one standard deviation from the class average, and needs 6+ drivers with 3+ races to compare against. At most 3 tags are shown."
+ 
+ var class_pick := OptionButton.new()
+@@ -52,7 +88,11 @@ func _ready() -> void:
+ 		0, -1, [true, false, true, true, false, true, true], range(1, 7))
+ 	_setup(tracks, "Tracks", ["Track", "Visits", "Length km", "Avg km/h", "Top km/h", "S1 %", "S2 %", "S3 %", "Wear %/km", "Fuel %/km", "Limits / lap"],
+ 		0, -1, [true, false, false, false, false, false, false, false, false, false, false], range(1, 11))
+-	drivers.set_column_title_tooltip_text(10, _glossary())
++	var driver_tips := DRIVER_TIPS.duplicate()
++	driver_tips[10] = _glossary()   # the Tags header lists every tag and its meaning
++	for pair in [[drivers, driver_tips], [cars, CAR_TIPS], [tracks, TRACK_TIPS]]:
++		for i in pair[1].size():
++			pair[0].set_column_title_tooltip_text(i, pair[1][i])
+ 
+ 
+ func _setup(tree: Tree, title: String, cols: Array, wide: int, wide2: int, first_asc: Array, right_cols: Array) -> void:
+@@ -171,10 +211,10 @@ func _fill() -> void:
+ 		for t in [drivers, cars, tracks]:
+ 			_rows[t] = []
+ 			_render(t)
+-		legend.text = "No lap-data fingerprints yet. Confirm a result file, or drop the folder with your result XMLs on the window to backfill the saved events."
++		legend.text = "No lap-data fingerprints yet. Drop result XMLs (or a whole folder) on the window and choose League results or Training data; files imported earlier are completed automatically."
+ 		return
+ 	var cls := class_pick.get_item_text(class_pick.selected)
+-	legend.text = "Percent columns compare with the class median (negative pace = quicker). Few-race drivers are pulled toward the field, so early numbers are cautious. Click a column header to sort. Hover a tag (or the Tags header) to see what it means."
++	legend.text = "Percent columns compare with the class median (negative pace = quicker). Few-race drivers are pulled toward the field, so early numbers are cautious. Click a column header to sort. Hover a header or a tag to see what it means. Cars and tracks also use training data."
+ 	_fill_drivers(cls)
+ 	_fill_cars(cls)
+ 	_fill_tracks(cls)
+diff --git a/review_screen.gd b/review_screen.gd
+index e4775b7..db588f2 100644
+--- a/review_screen.gd
++++ b/review_screen.gd
+@@ -26,6 +26,15 @@ var reports_view := ReportsView.new()
+ var predict_view := PredictView.new()
+ var profiles_view := ProfilesView.new()
+ 
++# batch import
++var type_dialog := AcceptDialog.new()
++var skip_btn := Button.new()
++var auto_btn := Button.new()
++var pending: Array = []        # dropped files waiting for the league / training answer
++var queue: Array = []          # league files still to review in this batch
++var batch_active := false
++var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0}
++
+ 
+ func _ready() -> void:
+ 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+@@ -55,10 +64,20 @@ func _ready() -> void:
+ 	review_box.add_child(warnings)
+ 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+ 	review_box.add_child(tabs)
++	var confirm_row := HFlowContainer.new()
++	review_box.add_child(confirm_row)
+ 	confirm_btn.text = "Confirm and rate"
+ 	confirm_btn.disabled = true
+ 	confirm_btn.pressed.connect(_on_confirm)
+-	review_box.add_child(confirm_btn)
++	confirm_row.add_child(confirm_btn)
++	skip_btn.text = "Skip this file"
++	skip_btn.visible = false
++	skip_btn.pressed.connect(_skip_current)
++	confirm_row.add_child(skip_btn)
++	auto_btn.text = "Confirm this and all remaining without review"
++	auto_btn.visible = false
++	auto_btn.pressed.connect(_auto_confirm_rest)
++	confirm_row.add_child(auto_btn)
+ 
+ 	# ratings view
+ 	ratings_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+@@ -84,6 +103,16 @@ func _ready() -> void:
+ 	confirm_dialog.confirmed.connect(_recompute)
+ 	add_child(confirm_dialog)
+ 
++	# league or training? asked every time files are dropped
++	type_dialog.title = "What are these files?"
++	type_dialog.ok_button_text = "League results"
++	type_dialog.add_button("Training data", false, "training")
++	type_dialog.add_cancel_button("Cancel")
++	type_dialog.confirmed.connect(_start_batch.bind("league"))
++	type_dialog.custom_action.connect(_on_type_action)
++	type_dialog.canceled.connect(func(): pending.clear())
++	add_child(type_dialog)
++
+ 	_show_view("review")
+ 	get_window().files_dropped.connect(_on_files_dropped)
+ 
+@@ -123,23 +152,131 @@ func _btn(text: String, action: Callable) -> Button:
+ 
+ 
+ # ---------- Loading and confirming ----------
++# One file, several files or whole folders can be dropped. Files are handled oldest first
++# (their names start with a timestamp), after asking whether they are league or training data.
+ func _on_files_dropped(files: PackedStringArray) -> void:
+-	# a folder (or several files) backfills events that were confirmed earlier; one file opens the review
+-	if files.size() > 1 or DirAccess.dir_exists_absolute(files[0]):
+-		_backfill(Elo.collect_xml(files))
++	var paths := Elo.collect_xml(files)
++	if paths.is_empty():
++		status.text = "No .xml files found in what you dropped."
+ 		return
+-	draft = Elo.build_draft(files[0], grid_check.button_pressed)
+-	_show_view("review")
+-	_rebuild()
++	paths.sort_custom(func(a, b): return str(a).get_file() < str(b).get_file())
++	pending = paths
++	type_dialog.dialog_text = "%d file(s) dropped (%s to %s).\n\nLeague results are rated: their drivers feed ratings, profiles and predictions.\nTraining data only feeds track and car-model data: no driver is rated or stored." % [
++		paths.size(), str(paths[0]).get_file(), str(paths[paths.size() - 1]).get_file()]
++	type_dialog.popup_centered()
++
+ 
++func _on_type_action(action: StringName) -> void:
++	if action == "training":
++		type_dialog.hide()
++		_start_batch("training")
+ 
+-func _backfill(paths: Array) -> void:
++
++func _start_batch(kind: String) -> void:
++	var paths := pending.duplicate()
++	pending.clear()
+ 	if paths.is_empty():
+-		status.text = "No .xml files found in what you dropped."
+ 		return
+-	status.text = "Reading %d files..." % paths.size()
+-	var r: Dictionary = await Elo.backfill(paths, func(done: int, total: int): status.text = "Reading %d of %d..." % [done, total])
+-	status.text = "Backfill done: %d event(s) updated, %d already complete, %d not imported yet (drop those one at a time to review and rate them)." % [r["updated"], r["complete"], r["new"].size()]
++	if kind == "training":
++		_import_training(paths)
++		return
++	queue = paths
++	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0}
++	batch_active = true
++	_next_in_queue()
++
++
++# Training files: track and car-model data only, saved without any driver information.
++func _import_training(paths: Array) -> void:
++	var added := 0
++	var known := 0
++	var unusable := PackedStringArray()
++	for i in paths.size():
++		status.text = "Reading training file %d of %d..." % [i + 1, paths.size()]
++		await get_tree().process_frame
++		match Elo.import_training(paths[i]):
++			"added":
++				added += 1
++			"duplicate":
++				known += 1
++			_:
++				unusable.append(str(paths[i]).get_file())
++	var text := "Training data: %d added, %d already imported." % [added, known]
++	if not unusable.is_empty():
++		text += " No usable lap data in: " + ", ".join(unusable)
++	status.text = text
++	if profiles_view.visible:
++		profiles_view.refresh()
++	if predict_view.visible:
++		predict_view.refresh()
++
++
++# League files: each new file opens in the review screen. Files that were already rated are
++# not rated again; they only get their stats and lap data completed if those are missing.
++func _next_in_queue() -> void:
++	while not queue.is_empty():
++		var path: String = queue.pop_front()
++		var d := Elo.build_draft(path, grid_check.button_pressed)
++		if d["duplicate"]:
++			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
++				batch["updated"] += 1
++			else:
++				batch["skipped"] += 1
++			status.text = "Checking files... %d left." % queue.size()
++			await get_tree().process_frame
++			continue
++		draft = d
++		_show_view("review")
++		_rebuild()
++		skip_btn.visible = true
++		auto_btn.visible = not queue.is_empty()
++		status.text = "File %d of %d: %s" % [batch["total"] - queue.size(), batch["total"], d["file"]]
++		return
++	_finish_batch()
++
++
++func _skip_current() -> void:
++	batch["skipped"] += 1
++	draft = {}
++	_next_in_queue()
++
++
++# Confirms the file on screen as it is (similar names stay separate drivers), then rates the rest
++# of the batch without stopping for review.
++func _auto_confirm_rest() -> void:
++	if not draft.is_empty():
++		draft["new_drivers"].clear()
++		Elo.confirm_draft(draft)
++		batch["rated"] += 1
++		draft = {}
++	skip_btn.visible = false
++	auto_btn.visible = false
++	confirm_btn.disabled = true
++	while not queue.is_empty():
++		var path: String = queue.pop_front()
++		status.text = "Rating %s (%d left)..." % [path.get_file(), queue.size()]
++		await get_tree().process_frame
++		var d := Elo.build_draft(path, grid_check.button_pressed)
++		if d["duplicate"]:
++			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
++				batch["updated"] += 1
++			else:
++				batch["skipped"] += 1
++			continue
++		d["new_drivers"].clear()
++		Elo.confirm_draft(d)
++		batch["rated"] += 1
++	_finish_batch()
++
++
++func _finish_batch() -> void:
++	batch_active = false
++	skip_btn.visible = false
++	auto_btn.visible = false
++	draft = {}
++	_rebuild()
++	status.text = "Batch done: %d rated, %d old event(s) completed with stats and lap data, %d skipped or already complete. If any file was older than events you had already rated, press Recompute all." % [
++		batch["rated"], batch["updated"], batch["skipped"]]
+ 	if profiles_view.visible:
+ 		profiles_view.refresh()
+ 	if predict_view.visible:
+@@ -150,6 +287,10 @@ func _on_confirm() -> void:
+ 	var done: String = draft["file"]
+ 	Elo.confirm_draft(draft)
+ 	draft = {}
++	if batch_active:
++		batch["rated"] += 1
++		_next_in_queue()
++		return
+ 	_rebuild()
+ 	var l := Label.new()
+ 	l.text = "Rated and saved: " + done

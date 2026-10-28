@@ -29,7 +29,7 @@ const ROUGH_MIN_G := 0.15   # a rough spot shakes at least this much (vertical G
 const ROUGH_FACTOR := 1.5   # ... and at least this many times the track's typical section
 const ROUGH_MAX := 5        # rough spots kept per lap
 const ROUGH_SEG := 50     # metres per section when looking for the roughest spots
-const VERSION := 5        # bump when the analysis changes, so stored profiles get rebuilt
+const VERSION := 6        # bump when the analysis changes, so stored profiles get rebuilt
 const TRACE_STEP := 10         # metres between stored map / trace points
 const WHEELS := ["FL", "FR", "RL", "RR"]
 
@@ -218,8 +218,10 @@ static func analyze(path: String) -> Dictionary:
 # ---------- reading the CSV ----------
 static func _wanted() -> Array:
 	var out := ["Distance", "Ground Speed", "Throttle Pos", "Brake Pos", "G Force Lat", "G Force Long",
-		"Gear", "Engine RPM", "Lap Number", "Fuel Level", "Eng Water Temp", "Ambient Temperature", "Track Temperature"]
+		"G Force Vert", "Gear", "Engine RPM", "Lap Number", "Fuel Level", "Eng Water Temp",
+		"Ambient Temperature", "Track Temperature"]
 	for k in WHEELS:
+		out.append("Ride Height " + k)
 		out.append("Tyre Wear " + k)
 		out.append("Tyre Pressure " + k)
 		out.append("Brake Temp " + k)
