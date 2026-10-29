@@ -45,6 +45,14 @@ static func guess_from_name(file_name: String) -> Dictionary:
 
 
 # Returns the profile, or {"error": "..."} if the file cannot be used.
+# Real circuits are 1.5 km or more; anything shorter is a fragment of a lap, not a lap.
+const MIN_LAP_M := 1500.0
+
+
+static func is_full_lap(length_m: float) -> bool:
+	return length_m >= MIN_LAP_M
+
+
 static func analyze(path: String) -> Dictionary:
 	var data := _load(path)
 	if data.is_empty():
@@ -67,8 +75,8 @@ static func analyze(path: String) -> Dictionary:
 	var a: int = seg[0]
 	var b: int = seg[1]
 	var r := _resample(ch, a, b, ["Ground Speed", "Throttle Pos", "Brake Pos", "G Force Lat", "G Force Long", "Gear", "Engine RPM"])
-	if r.is_empty():
-		return {"error": "the lap is too short"}
+	if r.is_empty() or not is_full_lap(float(ch["Distance"][b]) - float(ch["Distance"][a])):
+		return {"error": "no complete lap in the file (the longest piece is too short to be a lap)"}
 	var n: int = r["len"] + 1
 
 	var v: Array = r["Ground Speed"]

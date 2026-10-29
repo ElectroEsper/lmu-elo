@@ -11,6 +11,8 @@ const MAX_SIZED_ROWS := 300   # rows looked at when choosing column widths
 var headers: Array = []
 var rows: Array = []
 var header_tips: Array = []   # optional tooltip per column header
+var grade_col := -1           # column holding "n / 5" driver grades, red (1) to green (5); -1 = none
+var cell_tips := {}           # column -> [tooltip per row, in the original row order]
 
 var _numeric: Array = []      # per column: holds numbers?
 var _col := -1                # sorted column, -1 = original order
@@ -130,6 +132,10 @@ func _render() -> void:
 				it.set_text_alignment(c, HORIZONTAL_ALIGNMENT_RIGHT)
 			if txt.length() > 28:
 				it.set_tooltip_text(c, txt)
+			if c == grade_col and txt.length() == 5 and txt.ends_with(" / 5"):
+				it.set_custom_color(c, UiTheme.driver_grade_color(txt.left(1).to_int()))   # "4 / 5" -> 4
+			if cell_tips.has(c) and i < cell_tips[c].size():
+				it.set_tooltip_text(c, str(cell_tips[c][i]))
 
 
 # Every column gets the width that fits its header and values; the last text column
@@ -144,7 +150,8 @@ func _size_columns() -> void:
 		for i in mini(rows.size(), MAX_SIZED_ROWS):
 			chars = maxi(chars, cell_text(_cell(i, c)).length())
 		chars = mini(chars, 48)
-		set_column_custom_minimum_width(c, clampi(chars * 9 + 24, 48, 420))
+		var per_char := 8 if _numeric[c] else 10   # digits are narrow, capitals and names are not
+		set_column_custom_minimum_width(c, clampi(chars * per_char + 24, 48, 440))
 		set_column_expand(c, c == grow_col)
 		set_column_expand_ratio(c, maxi(chars, 4))
 		set_column_clip_content(c, true)

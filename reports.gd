@@ -512,12 +512,13 @@ func driver_profile(driver_name: String) -> Array:
 	var rows := _driver_rows(driver_name)
 	if rows.is_empty():
 		return [_table("Profile", ["Stat", "Value"], [], "No results found for this driver.")]
-	var tables := [
+	var tables := _profile_grades(driver_name, rows)
+	tables.append_array([
 		_profile_overview(driver_name, rows),
 		_profile_ratings(driver_name, rows),
 		_profile_race(rows),
 		_profile_quali(rows),
-	]
+	])
 	tables.append_array(_profile_track_fit(driver_name, rows))
 	tables.append(_profile_results(rows))
 	tables.append(_profile_chart(rows))
@@ -526,6 +527,52 @@ func driver_profile(driver_name: String) -> Array:
 		if not t["rows"].is_empty():
 			out.append(t)
 	return out
+
+
+# ---------- Grades: 1 to 5 against the class, at a glance (driver_grades.gd) ----------
+
+func _profile_grades(driver_name: String, rows: Array) -> Array:
+	var classes := {}
+	for r in rows:
+		classes[r["cls"]] = true
+	var cls_list := classes.keys()
+	cls_list.sort()
+	# one table for all classes; classes where nothing is graded yet are left out
+	var per_class := []
+	for cls in cls_list:
+		var gs := DriverGrades.driver(driver_name, cls)
+		var any := false
+		for g in gs:
+			if g["grade"] > 0:
+				any = true
+		if any:
+			per_class.append([cls, gs])
+	if per_class.is_empty():
+		return []
+	var multi := per_class.size() > 1
+	var grows := []
+	var tips := []
+	for pc in per_class:
+		for g in pc[1]:
+			var place := "-"
+			if g["rank"] > 0:
+				place = "%s of %d" % [DriverGrades.ordinal(g["rank"]), g["of"]]
+			elif g["of"] > 0:
+				place = "needs %d sessions" % DriverGrades.MIN_SESSIONS
+			var grade := "%d / 5" % g["grade"] if g["grade"] > 0 else "-"
+			var row := [g["name"], grade, place, g["value"]]
+			if multi:
+				row.push_front(pc[0])
+			grows.append(row)
+			tips.append(g["tip"])
+	var headers := ["Characteristic", "Grade", "Place in class", "Value"]
+	if multi:
+		headers.push_front("Class")
+	var t := _table("Grades", headers, grows,
+		"How this driver compares with the other drivers of the class: 5 = best fifth, 1 = bottom fifth (Finishing uses a fixed scale). Only drivers with %d+ sessions are graded, and few-race drivers are pulled toward the field, so early grades are cautious. Hover a characteristic for what it measures." % DriverGrades.MIN_SESSIONS)
+	t["grade_col"] = 2 if multi else 1
+	t["cell_tips"] = {(1 if multi else 0): tips}
+	return [t]
 
 
 # ---------- Track fit: pace vs the character of the track (driver_track_fit.gd) ----------

@@ -48,6 +48,8 @@ static func build(t: Dictionary) -> Control:
 	table.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	table.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	table.custom_minimum_size = Vector2(0, 180)
+	table.grade_col = int(t.get("grade_col", -1))
+	table.cell_tips = t.get("cell_tips", {})
 	table.set_table(t["headers"], t["rows"], t.get("tips", []))
 	box.add_child(table)
 	return box

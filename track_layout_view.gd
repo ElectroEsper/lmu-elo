@@ -107,6 +107,7 @@ func _show() -> void:
 # Grades 1 to 5 against the other tracks of the same class. Hover a name for what it measures.
 func _grades_panel(p: Dictionary) -> Control:
 	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED   # long text wraps instead
 	var box := VBoxContainer.new()
 	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(box)
@@ -116,10 +117,11 @@ func _grades_panel(p: Dictionary) -> Control:
 	if not p.has("traits"):
 		note.text += " This profile was built by an older version: drop its CSV again to get the telemetry grades."
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	note.custom_minimum_size = Vector2(480, 0)
+	note.theme_type_variation = "Muted"
 	box.add_child(note)
 	var grid := GridContainer.new()
 	grid.columns = 5
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 16)
 	for h in ["Characteristic", "Grade", "Value", "Details", "Basis"]:
 		var hl := Label.new()
@@ -137,27 +139,40 @@ func _grades_panel(p: Dictionary) -> Control:
 		grade_l.text = "-" if g == 0 else "%d / 5" % g
 		grade_l.add_theme_color_override("font_color", _grade_colour(g))
 		grid.add_child(grade_l)
-		for txt in [r["value"], r["detail"] if r["detail"] != "" else "-", r["basis"]]:
+		var value_l := Label.new()
+		value_l.text = r["value"]
+		grid.add_child(value_l)
+		# details and basis wrap, sharing the width that is left (details get more)
+		var wide := [[r["detail"] if r["detail"] != "" else "-", 3.0], [_short_basis(r["basis"]), 1.6]]
+		for w in wide:
 			var l := Label.new()
-			l.text = txt
+			l.text = w[0]
+			if w[0] != r["basis"] and w[1] < 2.0:   # shortened basis: the full list on hover
+				l.tooltip_text = r["basis"]
+				l.mouse_filter = Control.MOUSE_FILTER_PASS
+			l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			l.size_flags_stretch_ratio = w[1]
+			l.custom_minimum_size = Vector2(160, 0)
 			grid.add_child(l)
 	box.add_child(grid)
 	return scroll
 
 
+# "ranked among 17 tracks, tied with A, B, C, D" -> "ranked among 17 tracks, tied with 4 others"
+# when the list is long; the full text stays in the tooltip.
+func _short_basis(basis: String) -> String:
+	var at := basis.find("tied with ")
+	if at < 0:
+		return basis
+	var names := basis.substr(at + 10).split(", ")
+	if names.size() <= 2:
+		return basis
+	return basis.substr(0, at) + "tied with %d others (hover for the list)" % names.size()
+
+
 func _grade_colour(g: int) -> Color:
-	match g:
-		1:
-			return Color(0.45, 0.65, 1.0)
-		2:
-			return Color(0.45, 0.85, 0.85)
-		3:
-			return Color(0.6, 0.9, 0.5)
-		4:
-			return Color(1.0, 0.8, 0.35)
-		5:
-			return Color(1.0, 0.45, 0.4)
-	return Color(0.6, 0.6, 0.6)
+	return UiTheme.grade_color(g)   # same colours as the driver grades
 
 
 func _corner_table(p: Dictionary) -> Dictionary:

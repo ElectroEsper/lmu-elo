@@ -7,10 +7,12 @@ extends RefCounted
 ## 5 always means "the most": most time at full throttle, hardest braking, thirstiest, etc.
 
 const MIN_RANKED := 5
-# Near-ties share a grade: values closer than TIE_RANGE x (spread of the class) or
-# TIE_VALUE x (typical value), whichever is larger, are grouped (chained, so A~B~C is one group).
-const TIE_RANGE := 0.10
-const TIE_VALUE := 0.03
+# Near-ties share a grade: a track joins a group when its value is within TIE_RANGE x (spread
+# of the class) or TIE_VALUE x (typical value), whichever is larger, of the group's FIRST value.
+# Groups do not chain (A~B and B~C does not put A with C), so with many tracks the grades still
+# spread over 1 to 5.
+const TIE_RANGE := 0.05
+const TIE_VALUE := 0.01
 
 # key: the raw value that is graded. cuts: fixed-scale limits for grades 2, 3, 4 and 5, set
 # from LMP3 and GT3 laps of Bahrain, Sebring, Spa, Paul Ricard and COTA. alt / alt_cuts: what
@@ -82,6 +84,8 @@ static func collect(cls: String) -> Dictionary:
 	for p in TrackStore.list():
 		if str(p.get("class", "")) != cls or not p.has("traits"):
 			continue
+		if not MotecProfile.is_full_lap(float(p.get("lap", {}).get("length_m", 0.0))):
+			continue   # a broken profile (no full lap in the export) would distort every grade
 		var t := (p["traits"] as Dictionary).duplicate()
 		# context for the details: lap length and time, coasting share, kinks, wear per tyre
 		t["lap_km"] = float(p["lap"]["length_m"]) / 1000.0
@@ -151,17 +155,18 @@ static func _ranked(course: String, pool: Dictionary) -> Dictionary:
 	var names := pool.keys()
 	names.sort_custom(func(a, b): return pool[a] < pool[b])
 	var n := names.size()
-	var lo: float = pool[names[0]]
-	var hi: float = pool[names[n - 1]]
+	# spread of the middle 80% of tracks, so one odd track cannot make everything else look equal
+	var lo: float = pool[names[int(floor((n - 1) * 0.1))]]
+	var hi: float = pool[names[int(ceil((n - 1) * 0.9))]]
 	var mean := 0.0
 	for c in names:
 		mean += pool[c]
 	mean /= n
 	var tol := maxf(TIE_RANGE * (hi - lo), TIE_VALUE * absf(mean))
-	# split the sorted list wherever the gap to the next value is bigger than the tolerance
+	# walk the sorted list; a new group starts when a value is too far from the group's first one
 	var groups := [[names[0]]]
 	for i in range(1, n):
-		if pool[names[i]] - pool[names[i - 1]] <= tol:
+		if pool[names[i]] - pool[groups.back()[0]] <= tol:
 			groups.back().append(names[i])
 		else:
 			groups.append([names[i]])

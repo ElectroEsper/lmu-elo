@@ -18,9 +18,21 @@ const ACCENT_SOFT := Color("f2b98c")  # table and grid headers
 const SELECT := Color(0.91, 0.51, 0.23, 0.22)
 const GOOD := Color("5cc98a")
 const BAD := Color("e06666")
+# track grades 1 to 5 (5 = the most of something): blue -> red
+const GRADES := [Color(0.45, 0.65, 1.0), Color(0.45, 0.85, 0.85), Color(0.6, 0.9, 0.5), Color(1.0, 0.8, 0.35), Color(1.0, 0.45, 0.4)]
+# driver grades 1 to 5 (5 = the best): red -> green, like a traffic light
+const DRIVER_GRADES := [Color("ee5a5a"), Color("f0954a"), Color("e8d55a"), Color("a6dc5e"), Color("4fd27a")]
 
 const FONT_SIZE := 15
 const RADIUS := 6
+
+
+static func grade_color(g: int) -> Color:
+	return GRADES[clampi(g, 1, 5) - 1] if g > 0 else MUTED
+
+
+static func driver_grade_color(g: int) -> Color:
+	return DRIVER_GRADES[clampi(g, 1, 5) - 1] if g > 0 else MUTED
 
 
 static func build() -> Theme:
