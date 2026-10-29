@@ -39,50 +39,100 @@ var _busy := false
 
 
 func _ready() -> void:
-	var bar := HFlowContainer.new()
-	add_child(bar)
-	bar.add_child(class_pick)
-	mode_pick.add_item("After quali: use the grid below", Predict.Mode.ACTUAL_GRID)
-	mode_pick.add_item("Before quali: predict quali, then race", Predict.Mode.PREDICTED_QUALI)
-	mode_pick.add_item("Race only: ignore the grid", Predict.Mode.RACE_ONLY)
+	# two columns: settings and actions on the left, the forecast on the right
+	var cols := HBoxContainer.new()
+	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cols.add_theme_constant_override("separation", 16)
+	add_child(cols)
+	var left_scroll := ScrollContainer.new()
+	left_scroll.custom_minimum_size = Vector2(380, 0)
+	left_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	cols.add_child(left_scroll)
+	var left := VBoxContainer.new()
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.add_theme_constant_override("separation", 12)
+	left_scroll.add_child(left)
+	var right := VBoxContainer.new()
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.add_child(right)
+
+	# race setup
+	var setup := _card(left, "RACE SETUP")
+	var form := GridContainer.new()
+	form.columns = 2
+	form.add_theme_constant_override("h_separation", 12)
+	setup.add_child(form)
+	mode_pick.add_item("After quali", Predict.Mode.ACTUAL_GRID)
+	mode_pick.add_item("Before quali", Predict.Mode.PREDICTED_QUALI)
+	mode_pick.add_item("Race only", Predict.Mode.RACE_ONLY)
 	mode_pick.select(0)
-	bar.add_child(mode_pick)
-	bar.add_child(track_pick)
-	bar.add_child(_label("Minutes"))
+	mode_pick.tooltip_text = "After quali: the race from the grid in the entry list (pole first).\nBefore quali: predict qualifying first, then the race from that grid.\nRace only: ignore the grid."
 	minutes_spin.min_value = 0
 	minutes_spin.max_value = 240
 	minutes_spin.step = 1
-	minutes_spin.tooltip_text = "0 = take from the data"
-	bar.add_child(minutes_spin)
-	bar.add_child(_label("Lap (s)"))
+	minutes_spin.tooltip_text = "Race length. 0 = take it from the data."
 	lap_spin.min_value = 0
 	lap_spin.max_value = 600
 	lap_spin.step = 0.1
-	lap_spin.tooltip_text = "0 = take from the data"
-	bar.add_child(lap_spin)
+	lap_spin.tooltip_text = "Typical lap time. 0 = take it from the data."
+	for pair in [["Class", class_pick], ["Forecast", mode_pick], ["Track", track_pick],
+			["Minutes", minutes_spin], ["Lap time (s)", lap_spin]]:
+		var l := _label(pair[0])
+		l.theme_type_variation = "Muted"
+		form.add_child(l)
+		var c: Control = pair[1]
+		c.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		if c is OptionButton:
+			(c as OptionButton).clip_text = true
+			c.custom_minimum_size = Vector2(150, 0)
+		form.add_child(c)
 
-	var bar2 := HFlowContainer.new()
-	add_child(bar2)
-	bar2.add_child(_btn("Load grid from latest quali", _load_latest_quali))
-	bar2.add_child(_btn("Fill with recent drivers", _fill_recent))
+	# entry list
+	var entry := _card(left, "ENTRY LIST")
+	entries.custom_minimum_size = Vector2(0, 230)
+	entries.placeholder_text = "One driver per line.\nAfter quali: pole position first.\nBefore quali: just the entry list.\nAliases are resolved."
+	entry.add_child(entries)
+	var fill_row := HBoxContainer.new()
+	entry.add_child(fill_row)
+	var from_quali := _btn("Grid from latest quali", _load_latest_quali)
+	from_quali.tooltip_text = "Fill the list with the latest qualifying result, pole first."
+	var recent := _btn("Recent drivers", _fill_recent)
+	recent.tooltip_text = "Fill the list with drivers who raced in this class recently."
+	for b in [from_quali, recent]:
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		fill_row.add_child(b)
 	var go := _btn("Predict", _run)
 	go.theme_type_variation = "AccentButton"
-	bar2.add_child(go)
-	bar2.add_child(_btn("Backtest", _backtest))
-	bar2.add_child(_btn("Fit noise (slow)", _fit_noise))
-	bar2.add_child(_btn("Test upgrades (slow)", _test_upgrades))
-	var toggle := CheckButton.new()
-	toggle.text = "Model assumptions"
-	toggle.toggled.connect(func(on: bool): assumptions.visible = on)
-	bar2.add_child(toggle)
+	entry.add_child(go)
 
+	# model checks and settings
+	var model := _card(left, "MODEL")
+	var checks := HFlowContainer.new()
+	model.add_child(checks)
+	var bt := _btn("Backtest", _backtest)
+	bt.tooltip_text = "Replay past races, each forecast only from earlier events, and score the odds."
+	checks.add_child(bt)
+	var fn := _btn("Fit noise", _fit_noise)
+	fn.tooltip_text = "Try a few noise levels and keep the best. Slow."
+	checks.add_child(fn)
+	var tu := _btn("Test upgrades", _test_upgrades)
+	tu.tooltip_text = "Test each upgrade and its strength against past races; the ones that help are switched on. Slow."
+	checks.add_child(tu)
+	var toggle := CheckButton.new()
+	toggle.text = "Show assumptions"
+	toggle.toggled.connect(func(on: bool): assumptions.visible = on)
+	model.add_child(toggle)
 	assumptions.visible = false
-	add_child(assumptions)
+	model.add_child(assumptions)
 	var grid := GridContainer.new()
-	grid.columns = 4
+	grid.columns = 2
 	assumptions.add_child(grid)
 	for row in PARAM_ROWS:
-		grid.add_child(_label(row[1]))
+		var l := _label(row[1])
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		l.custom_minimum_size = Vector2(200, 0)
+		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		grid.add_child(l)
 		var sb := SpinBox.new()
 		sb.min_value = row[2]
 		sb.max_value = row[3]
@@ -93,15 +143,12 @@ func _ready() -> void:
 		spins[row[0]] = sb
 	assumptions.add_child(_btn("Reset assumptions", _reset_params))
 
-	entries.custom_minimum_size = Vector2(0, 150)
-	entries.placeholder_text = "One driver per line.\nAfter quali: pole position first. Before quali: just the entry list.\nAliases are resolved."
-	add_child(entries)
-
+	# forecast
 	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	info.theme_type_variation = "Muted"
-	add_child(info)
+	right.add_child(info)
 	grid_line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	add_child(grid_line)
+	right.add_child(grid_line)
 
 	tree.columns = 11
 	tree.column_titles_visible = true
@@ -113,12 +160,37 @@ func _ready() -> void:
 		tree.set_column_title(i, titles[i])
 		if i >= 2:
 			tree.set_column_title_alignment(i, HORIZONTAL_ALIGNMENT_RIGHT)
+		else:
+			tree.set_column_title_alignment(i, HORIZONTAL_ALIGNMENT_LEFT)
+		if i != 1:
+			tree.set_column_custom_minimum_width(i, maxi(64, str(titles[i]).length() * 9 + 26))
 		tree.set_column_expand(i, i == 1)
 	tree.set_column_custom_minimum_width(1, 170)
-	add_child(tree)
+	right.add_child(tree)
 
+	# notes and results of backtests: scrolls when long, so the table keeps its room
+	var out_scroll := ScrollContainer.new()
+	out_scroll.custom_minimum_size = Vector2(0, 110)
+	out_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	right.add_child(out_scroll)
 	out_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	add_child(out_label)
+	out_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	out_scroll.add_child(out_label)
+
+
+# A titled panel; returns the box to put its contents in.
+func _card(parent: Control, title: String) -> VBoxContainer:
+	var card := PanelContainer.new()
+	card.theme_type_variation = "Card"
+	parent.add_child(card)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	card.add_child(box)
+	var l := Label.new()
+	l.text = title
+	l.theme_type_variation = "SectionLabel"
+	box.add_child(l)
+	return box
 
 
 # Called by the main screen whenever this view is shown.
@@ -142,7 +214,7 @@ func refresh() -> void:
 			class_pick.select(i)
 	var keep_track := track_pick.get_item_text(track_pick.selected) if track_pick.item_count > 0 and track_pick.selected >= 0 else ""
 	track_pick.clear()
-	track_pick.add_item("Track: latest event", 0)
+	track_pick.add_item("Latest event", 0)
 	for i in Profiles.courses().size():
 		track_pick.add_item(Profiles.courses()[i], i + 1)
 	for i in track_pick.item_count:

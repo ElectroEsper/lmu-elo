@@ -71,7 +71,10 @@ var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}
 
 func _ready() -> void:
 	# one theme for the whole window: every screen, dialog, popup and tooltip (see ui_theme.gd)
-	get_window().theme = UiTheme.build()
+	# set on the window (tooltips, popups) and on this screen (everything inside it)
+	var look := UiTheme.build()
+	get_window().theme = look
+	theme = look
 	get_window().min_size = Vector2i(960, 600)
 	RenderingServer.set_default_clear_color(UiTheme.BG)
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -270,7 +273,7 @@ func _show_view(view: String) -> void:
 		if v[0] == view:
 			view_title.text = v[1]
 			view_sub.text = v[2]
-			nav_buttons[v[0]].set_pressed_no_signal(true)
+			nav_buttons[v[0]].button_pressed = true   # the button group releases the others
 	review_box.visible = view == "review"
 	ratings_box.visible = view == "ratings"
 	driver_view.visible = view == "drivers"

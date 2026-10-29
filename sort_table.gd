@@ -132,15 +132,20 @@ func _render() -> void:
 				it.set_tooltip_text(c, txt)
 
 
-# Widths follow the longest text in each column, so short number columns stay narrow.
+# Every column gets the width that fits its header and values; the last text column
+# (or the last column, if all hold numbers) takes the rest of the width.
 func _size_columns() -> void:
+	var grow_col := headers.size() - 1
 	for c in headers.size():
-		var chars := str(headers[c]).length() + 3
+		if not _numeric[c]:
+			grow_col = c
+	for c in headers.size():
+		var chars := str(headers[c]).length() + 3   # room for the sort arrow
 		for i in mini(rows.size(), MAX_SIZED_ROWS):
 			chars = maxi(chars, cell_text(_cell(i, c)).length())
 		chars = mini(chars, 48)
-		set_column_custom_minimum_width(c, clampi(chars * 8 + 20, 56, 420))
-		set_column_expand(c, true)
+		set_column_custom_minimum_width(c, clampi(chars * 9 + 24, 48, 420))
+		set_column_expand(c, c == grow_col)
 		set_column_expand_ratio(c, maxi(chars, 4))
 		set_column_clip_content(c, true)
 

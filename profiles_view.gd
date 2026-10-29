@@ -106,6 +106,7 @@ func _setup(tree: Tree, title: String, cols: Array, wide: int, wide2: int, first
 	tree.select_mode = Tree.SELECT_ROW
 	for i in cols.size():
 		tree.set_column_expand(i, i == wide or i == wide2)
+		tree.set_column_custom_minimum_width(i, maxi(64, str(cols[i]).length() * 9 + 30))
 		tree.set_column_title_alignment(i, HORIZONTAL_ALIGNMENT_RIGHT if i in right_cols else HORIZONTAL_ALIGNMENT_LEFT)
 	tree.set_column_custom_minimum_width(wide, 170)
 	tree.column_title_clicked.connect(_on_header_clicked.bind(tree))
