@@ -30,19 +30,45 @@ func rebuild() -> void:
 	days.clear()
 	hist.clear()
 	var by_date := {}
+	# events in the order they happened, so a quali is met before its race
+	var drafts := []
 	for f in DirAccess.get_files_at("user://events"):
 		if not f.ends_with(".json"):
 			continue
-		var draft = JSON.parse_string(FileAccess.get_file_as_string("user://events/" + f))
-		if not (draft is Dictionary) or not draft.has("fp") or not draft.has("file"):
-			continue
+		var loaded = JSON.parse_string(FileAccess.get_file_as_string("user://events/" + f))
+		if loaded is Dictionary and loaded.has("fp") and loaded.has("file"):
+			drafts.append(loaded)
+	drafts.sort_custom(func(a, b):
+		var ta := Elo.event_time(a)
+		var tb := Elo.event_time(b)
+		if ta != tb:
+			return ta < tb
+		if Elo.session_rank(a) != Elo.session_rank(b):
+			return Elo.session_rank(a) < Elo.session_rank(b)
+		return str(a["file"]) < str(b["file"]))
+	for draft in drafts:
 		var fp: Dictionary = draft["fp"]
 		if fp.is_empty() or not fp.has("track"):
 			continue
-		var date: String = str(draft["file"]).left(10)
+		# event date from the file name, or from the XML itself when the name has none
+		var date: String = Elo.event_date(draft)
+		if date == "":
+			date = str(draft["file"]).left(10)
 		var training: bool = draft.get("kind", "league") == "training"
-		# a league weekend merges its quali and race files by date; each training file stays on its own
-		var day_key: String = ("%s|T|%s" % [date, draft["file"]]) if training else date
+		var course: String = fp["track"].get("course", "")
+		# a league event merges its quali and race files by date and track; a second event on the
+		# same day and track (e.g. sprint and endurance) gets its own slot; training stays on its own
+		var day_key: String = "%s|T|%s" % [date, draft["file"]]
+		if not training:
+			var base := "%s|%s" % [date, course]
+			day_key = base
+			var n := 2
+			# a race file (which may carry its own quali) needs a slot without a race yet;
+			# a quali-only file needs a slot without a quali yet
+			while by_date.has(day_key) and ((fp.has("race") and not by_date[day_key]["race"].is_empty())
+					or (not fp.has("race") and fp.has("quali") and not by_date[day_key]["quali"].is_empty())):
+				day_key = "%s|%d" % [base, n]
+				n += 1
 		if not by_date.has(day_key):
 			by_date[day_key] = {"date": date, "course": "", "track": {}, "race": {}, "quali": {}, "training": training}
 		var day: Dictionary = by_date[day_key]
@@ -63,12 +89,14 @@ func rebuild() -> void:
 		for nm in day["race"].get("drivers", {}):
 			var e: Dictionary = day["race"]["drivers"][nm]
 			var key: String = "%s|%s" % [e["cls"], nm]
-			recs[key] = {"date": day["date"], "course": day["course"], "r": e, "q": {}}
+			recs[key] = {"date": day["date"], "course": day["course"], "r": e, "q": {},
+				"wet_r": float(day["race"].get("wet", 0.0)), "wet_q": float(day["quali"].get("wet", 0.0))}
 		for nm in day["quali"].get("drivers", {}):
 			var e: Dictionary = day["quali"]["drivers"][nm]
 			var key: String = "%s|%s" % [e["cls"], nm]
 			if not recs.has(key):
-				recs[key] = {"date": day["date"], "course": day["course"], "r": {}, "q": {}}
+				recs[key] = {"date": day["date"], "course": day["course"], "r": {}, "q": {},
+					"wet_r": float(day["race"].get("wet", 0.0)), "wet_q": float(day["quali"].get("wet", 0.0))}
 			recs[key]["q"] = e
 		for key in recs:
 			if not hist.has(key):
@@ -336,6 +364,7 @@ func _course_stats(course: String, cls: String, before: String, quali_day: Strin
 			_add(acc, cnt, "tl", c.get("tl", 0.0))
 			_add(acc, cnt, "kmh_r", c.get("kmh", 0.0))
 			_add(acc, cnt, "minutes", day["race"].get("minutes", 0.0))
+			_add(acc, cnt, "pit_loss", c.get("pit_loss", 0.0))
 			visits += 1
 		if quali_ok and day["quali"]["classes"].has(cls):
 			var q: Dictionary = day["quali"]["classes"][cls]
@@ -361,7 +390,8 @@ static func _add(acc: Dictionary, cnt: Dictionary, key: String, v: float) -> voi
 
 
 # What the lap-time model needs to know about a track:
-# {"ref_s", "minutes", "top_z", "wear_z", "fuel_z", "known_race", "course"}
+# {"ref_s", "minutes", "top_z", "wear_z", "fuel_z", "known_race", "course", and when known
+# "pit_loss" (s per routine stop) and "tank_laps" (laps on a full tank)}
 # before / quali_day work as in _course_stats (use them to replay history; leave "" for a live forecast).
 func track_info(course: String, cls: String, before := "", quali_day := "") -> Dictionary:
 	var t := _course_stats(course, cls, before, quali_day)
@@ -381,6 +411,11 @@ func track_info(course: String, cls: String, before := "", quali_day := "") -> D
 		out["minutes"] = roundi(t["minutes"])
 	else:
 		out["minutes"] = _last_minutes()
+	# pit stops: typical loss per routine stop, and how many laps a full tank lasts
+	if t.has("pit_loss"):
+		out["pit_loss"] = t["pit_loss"]
+	if float(t.get("fuel_km", 0.0)) > 0.0 and float(t.get("length", 0.0)) > 0.0:
+		out["tank_laps"] = 100.0 / (float(t["fuel_km"]) * float(t["length"]) / 1000.0)
 	# z-scores against every track seen so far (needs a few tracks to mean anything)
 	var norms := _norms(cls, before, quali_day)
 	for pair in [["top", "top_z"], ["wear_km", "wear_z"], ["fuel_km", "fuel_z"]]:

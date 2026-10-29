@@ -63,7 +63,7 @@ var tabs := TabContainer.new()
 var drivers := Tree.new()
 var cars := Tree.new()
 var tracks := Tree.new()
-var layout_view := TrackLayoutView.new()
+var layout_view := TrackLayoutView.new()   # track profiles built from MoTeC exports
 var legend := Label.new()
 
 var _titles := {}      # tree -> column titles
@@ -79,6 +79,7 @@ func _ready() -> void:
 	class_pick.item_selected.connect(func(_i: int): _fill())
 	bar.add_child(class_pick)
 	legend.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	legend.theme_type_variation = "Muted"
 	add_child(legend)
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(tabs)
@@ -102,8 +103,10 @@ func _setup(tree: Tree, title: String, cols: Array, wide: int, wide2: int, first
 	tree.columns = cols.size()
 	tree.column_titles_visible = true
 	tree.hide_root = true
+	tree.select_mode = Tree.SELECT_ROW
 	for i in cols.size():
 		tree.set_column_expand(i, i == wide or i == wide2)
+		tree.set_column_title_alignment(i, HORIZONTAL_ALIGNMENT_RIGHT if i in right_cols else HORIZONTAL_ALIGNMENT_LEFT)
 	tree.set_column_custom_minimum_width(wide, 170)
 	tree.column_title_clicked.connect(_on_header_clicked.bind(tree))
 	_titles[tree] = cols
@@ -148,7 +151,7 @@ func _update_titles(tree: Tree) -> void:
 	for i in cols.size():
 		var mark := ""
 		if i == s["col"]:
-			mark = " ^" if s["asc"] else " v"
+			mark = "  ▲" if s["asc"] else "  ▼"
 		tree.set_column_title(i, str(cols[i]) + mark)
 
 

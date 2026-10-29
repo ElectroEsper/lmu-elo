@@ -210,6 +210,8 @@ func _quali_detail(title: String, rs: Array, st: Dictionary) -> Dictionary:
 func rating_history() -> Array:
 	var tables := []
 	var n_events := Elo.history.size()
+	var full := Elo.full_events()   # history entry -> full-event number (quali + race share one)
+	var n_full: int = (full.back() + 1) if not full.is_empty() else 0
 	for board in Elo.boards():
 		var pts := {}           # driver -> [[event index, rating after], ...]
 		var first_before := {}  # driver -> rating before their first event
@@ -220,7 +222,7 @@ func rating_history() -> Array:
 					if not pts.has(d):
 						pts[d] = []
 						first_before[d] = c["before"]
-					pts[d].append([i, c["after"]])
+					pts[d].append([full[i], c["after"]])
 		var names := pts.keys()
 		names.sort_custom(func(n1, n2): return pts[n1].back()[1] > pts[n2].back()[1])
 
@@ -241,8 +243,8 @@ func rating_history() -> Array:
 				roundi(latest - first_before[d]), roundi(peak), pts[d].size()])
 		var t := _table("%s %s" % [board[0], board[1]],
 			["Driver", "Start", "Now", "Change", "Peak", "Events"], rows,
-			"Chart: top %d drivers by current rating. Horizontal axis = event number." % CHART_TOP_N)
-		t["chart"] = {"series": series, "x_max": float(maxi(n_events - 1, 1))}
+			"Chart: top %d drivers by current rating. Horizontal axis = event number; the qualifying and race of the same event share one step." % CHART_TOP_N)
+		t["chart"] = {"series": series, "x_max": float(maxi(n_full - 1, 1))}
 		tables.append(t)
 	return tables
 
@@ -540,20 +542,54 @@ func _profile_track_fit(driver_name: String, rows: Array) -> Array:
 		if f["tracks"].is_empty():
 			continue
 		var suffix := " (%s)" % cls if cls_list.size() > 1 else ""
+		out.append(_track_fit_summary(f, suffix))
 		var trows := []
 		for t in f["tracks"]:
 			trows.append([t["course"], t["races"], _vs_own(t["race_y"]), t["quali"], _vs_own(t["quali_y"]),
-				t["standout"] if t["standout"] != "" else "-"])
+				t["flag"] if t["flag"] != "" else "-", t["standout"] if t["standout"] != "" else "-"])
 		out.append(_table("Tracks" + suffix,
-			["Track", "Races", "Race pace", "Qualis", "Quali pace", "Track's stand-out grades"], trows,
-			"Pace at each track compared with this driver's OWN average (league races only, best first). A fast driver is not quicker everywhere by this measure: it shows where they are stronger or weaker than usual. Stand-out grades are the track's 4s, 5s and 1s for %s (see Profiles > Layout > Grades)." % cls))
+			["Track", "Races", "Race pace", "Qualis", "Quali pace", "Stands out", "Track's stand-out grades"], trows,
+			"Pace at each track compared with this driver's OWN average (league races only, best first). A fast driver is not quicker everywhere by this measure: it shows where they are stronger or weaker than usual. Stands out = race and quali together are at least %.0f times their uncertainty away from the driver's average, and still clearly so without the single most extreme session (so one wrecked race cannot decide it); other gaps are within normal variation. Stand-out grades are the track's 4s, 5s and 1s for %s (see Profiles > Layout > Grades)." % [
+				DriverTrackFit.STANDOUT, cls]))
 		var drows := []
 		for t in f["tendencies"]:
 			drows.append([t["name"], _tendency(t), _session_fx(t["race"]), _session_fx(t["quali"])])
 		out.append(_table("Track tendencies" + suffix, ["Characteristic", "Tendency", "Race", "Quali"], drows,
-			"Is the driver quicker or slower than their own average at tracks that score high on each characteristic? Effect = pace change at a track one step above the class average (about a grade 4), negative = quicker. Tendency combines race and quali. 'Early sign' = preliminary (about one season of data), 'quicker' / 'slower' = more confident (about two seasons). Estimates are pulled towards zero; race-to-race noise is measured over the whole class (%.2f%% race, %.2f%% quali). 'Goes with X' = this characteristic moves together with X over the tracks this driver raced, so it is not a separate finding. Needs %d sessions at %d different tracks." % [
+			"Is the driver quicker or slower than their own average at tracks that score high on each characteristic? Effect = pace change at a track one step above the class average (about a grade 4), negative = quicker. Tendency combines race and quali. 'Early sign' = preliminary (about one season of data), 'quicker' / 'slower' = more confident (about two seasons). Estimates are pulled towards zero; race-to-race noise is this driver's own scatter blended with the class figure (%.2f%% race, %.2f%% quali). 'Goes with X' = this characteristic moves together with X over the tracks this driver raced, so it is not a separate finding. Needs %d sessions at %d different tracks." % [
 				float(f["noise"]["race"]), float(f["noise"]["quali"]), DriverTrackFit.MIN_RACES, DriverTrackFit.MIN_TRACKS]))
 	return out
+
+
+# Headline for the driver's track fit: does the track matter for them, and where do they stand out?
+func _track_fit_summary(f: Dictionary, suffix: String) -> Dictionary:
+	var c: Dictionary = f["consistency"]
+	var rows := []
+	var verdict: String = c["verdict"]
+	match verdict:
+		"track-dependent":
+			verdict += ": clearly stronger at some tracks than others"
+		"early sign: track-dependent":
+			verdict += ": a hint that the track matters, not yet clear"
+		"all-rounder":
+			verdict += ": performs at the same level wherever they race"
+	rows.append(["Verdict", verdict])
+	if c.has("r"):
+		rows.append(["Race and quali agree track by track", "%+.2f over %d tracks (1 = same pattern in both, 0 = no relation)" % [float(c["r"]), int(c["pairs"])]])
+	else:
+		rows.append(["Race and quali agree track by track", "needs a race and a quali at %d tracks (%d so far)" % [DriverTrackFit.MIN_PAIRS, int(c["pairs"])]])
+	rows.append(["Strong spots", ", ".join(PackedStringArray(c["strong"])) if not c["strong"].is_empty() else "none beyond normal variation"])
+	rows.append(["Weak spots", ", ".join(PackedStringArray(c["weak"])) if not c["weak"].is_empty() else "none beyond normal variation"])
+	if not c.get("lean_strong", []).is_empty():
+		rows.append(["Leaning strong (not certain yet)", ", ".join(PackedStringArray(c["lean_strong"]))])
+	if not c.get("lean_weak", []).is_empty():
+		rows.append(["Leaning weak (not certain yet)", ", ".join(PackedStringArray(c["lean_weak"]))])
+	var wl: Dictionary = f.get("wet_left_out", {})
+	if int(wl.get("race", 0)) + int(wl.get("quali", 0)) > 0:
+		rows.append(["Wet sessions left out", "%d race(s), %d quali(s): track fit compares dry running" % [int(wl.get("race", 0)), int(wl.get("quali", 0))]])
+	rows.append(["Session-to-session scatter", "race %.2f%%, quali %.2f%% (class: %.2f%%, %.2f%%)" % [
+		float(f["noise"]["race"]), float(f["noise"]["quali"]), float(f["class_noise"]["race"]), float(f["class_noise"]["quali"])]])
+	return _table("Track fit" + suffix, ["Stat", "Value"], rows,
+		"Race and quali are separate sessions with separate luck. If a driver really is better at some tracks, both show the same pattern track by track; if the gaps are luck, they don't. 'All-rounder' means the track-to-track differences look like ordinary variation. A lower scatter than the class means a more consistent driver, which makes small differences easier to trust.")
 
 
 func _vs_own(y) -> String:
@@ -583,12 +619,13 @@ func _session_fx(e: Dictionary) -> String:
 
 
 func _profile_overview(driver_name: String, rows: Array) -> Dictionary:
-	var events := {}
+	var full := Elo.full_events()
+	var events := {}   # full events (qualifying + race of the same event count once)
 	var classes := {}
 	var laps := 0
 	var led := 0
 	for r in rows:
-		events[r["idx"]] = true
+		events[full[r["idx"]]] = true
 		classes[r["cls"]] = true
 		if r["sess"] == "race" and not r["stats"].is_empty():
 			laps += int(r["stats"]["laps"])
@@ -784,12 +821,13 @@ func _profile_results(rows: Array) -> Dictionary:
 
 
 func _profile_chart(rows: Array) -> Dictionary:
-	var by_board := {}   # "GT3 race" -> [[event index, rating after], ...]
+	var full := Elo.full_events()
+	var by_board := {}   # "GT3 race" -> [[full event number, rating after], ...]
 	for r in rows:
 		var label := "%s %s" % [r["cls"], r["sess"]]
 		if not by_board.has(label):
 			by_board[label] = []
-		by_board[label].append([r["idx"], r["after"]])
+		by_board[label].append([full[r["idx"]], r["after"]])
 	var labels := by_board.keys()
 	labels.sort()
 	var series := []
@@ -806,6 +844,6 @@ func _profile_chart(rows: Array) -> Dictionary:
 			peak = maxf(peak, pt[1])
 		out.append([labels[k], pts.size(), roundi(pts[0][1]), roundi(pts.back()[1]), roundi(peak)])
 	var t := _table("Rating history", ["Rating", "Events", "After first", "Latest", "Peak"], out,
-		"Horizontal axis = event number across all events.")
-	t["chart"] = {"series": series, "x_max": float(maxi(Elo.history.size() - 1, 1))}
+		"Horizontal axis = event number across all events; the qualifying and race of the same event share one step.")
+	t["chart"] = {"series": series, "x_max": float(maxi((full.back() if not full.is_empty() else 0), 1))}
 	return t

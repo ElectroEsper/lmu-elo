@@ -9,6 +9,12 @@ extends Node
 ##   + lap-to-lap scatter (their consistency, summed over N laps)
 ##   + expected track-limit cost, plus a small chance of a track-limit penalty
 ##   + contacts: lost time now, plus damage that slows every lap that follows
+##   + pit stops: stops needed for the race distance (from the track's fuel use and the driver's
+##     own fuel use) x the track's typical pit-lane loss
+## Pace (race and quali) can also be adjusted by the driver's own history at this track and by
+## their track tendencies applied to this track's characteristics (driver_track_fit.gd).
+## Each of those three upgrades has a strength setting, off by default: test_upgrades() replays
+## past races with each on and off and keeps only the ones that make the forecasts better.
 ## The finishing order is the order of total times. Qualifying works the same way on quali pace.
 ## Defaults were calibrated on the first 19 events (see the model-assumptions panel in the view).
 
@@ -25,22 +31,32 @@ const DEFAULTS := {
 	"fit": 1.0,        # strength of driver-trait x track-trait effects (0 = switched off)
 	"lap_noise": 1.0,  # multiplier on the drivers' lap-time scatter
 	"sq": 0.8,         # quali noise, % of lap time
+	"p_track": 0.0,    # strength of the driver's own history at this track (0 = off, 1 = full)
+	"p_tend": 0.0,     # strength of the driver's track tendencies (0 = off, 1 = full)
+	"pits": 0.0,       # pit stops simulated (0 = off, 1 = on)
 }
+const K_TRACK := 2.0   # sessions at a track before the driver's own history there gets half weight
+const PIT_SD := 3.0    # seconds of scatter per pit stop
+const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track tendencies"], ["pits", "Pit stops"]]
 const B_WEAR := 0.1    # % pace per (tyre-wear z of driver x tyre-wear z of track): hard-on-tyres drivers lose at tyre-killer tracks
 const B_TOP := -0.1    # high-top-speed drivers gain at top-speed tracks
 const B_FUEL := 0.1    # thirsty drivers lose at fuel-hungry tracks
 const ELO_TO_PACE := -0.03   # fallback when a driver has no lap data: % pace per Elo point above 1500
 const N_SIMS := 4000
 const BACKTEST_SIMS := 300
+const STRENGTHS := [0.5, 1.5]    # extra strengths tried for a kept upgrade (1.0 is the first test)
+const UPGRADE_MARGIN := 0.0005   # an upgrade must lower the backtest error by more than this to be kept
 const SETTINGS_PATH := "user://predict.json"
 
 var params := DEFAULTS.duplicate()
 var rng := RandomNumberGenerator.new()
+var pit_rng := RandomNumberGenerator.new()   # separate, so pit stops do not shift the other random draws
 var last_backtest := {}
 
 
 func _ready() -> void:
 	rng.randomize()
+	pit_rng.randomize()
 	_load_settings()
 
 
@@ -49,12 +65,20 @@ func _ready() -> void:
 # One dict per driver with everything the simulation needs.
 # before = "" uses all data plus current Elo as a fallback (live forecast);
 # before = a date replays history without peeking (backtest, no Elo).
-func driver_inputs(names: Array, cls: String, before := "") -> Array:
+# course: the track being forecast (for the track-history and tendency terms; "" = none).
+func driver_inputs(names: Array, cls: String, before := "", course := "") -> Array:
 	var cm = Profiles.class_means(cls, before)
 	var sd = Profiles.trait_sd(cls, before)
+	# shared by every driver: the tracks' characteristics and the class noise
+	var values := TrackGrades.collect(cls)
+	var class_sig := {
+		"race": DriverTrackFit.class_noise(cls, "r", "pace_rel", "wet_r", before),
+		"quali": DriverTrackFit.class_noise(cls, "q", "rel", "wet_q", before),
+	}
 	var out := []
 	for nm in names:
 		var s = Profiles.raw_stats(nm, cls, before)
+		var fit := _track_terms(nm, cls, before, course, values, class_sig)
 		var prior_r := 0.0
 		var prior_q := 0.0
 		var has_elo := false
@@ -79,7 +103,43 @@ func driver_inputs(names: Array, cls: String, before := "") -> Array:
 			"tl": Profiles.shrunk(s["tl"], s["n_r"], Profiles.K_RATE, cm["tl"]),
 			"con": Profiles.shrunk(s["con"], s["n_r"], Profiles.K_RATE, cm["con"]),
 			"cons": Profiles.shrunk(s["cons"], s["n_r"], Profiles.K_CONS, cm["cons"]),
+			"fuel_rel": Profiles.shrunk(s["fuel"], s["n_fuel"], Profiles.K_PACE, 0.0),
+			"track_gap_r": fit["gap_r"],
+			"track_gap_q": fit["gap_q"],
+			"tend": fit["tend"],
 		})
+	return out
+
+
+# The driver's own history at this course (gap to their own average, pulled towards 0 with
+# few visits) and their track tendencies applied to this course's characteristics. Only
+# tendencies the profile actually reports (early sign or stronger, not "goes with ...") and only
+# telemetry characteristics count: those are fixed, so a backtest cannot peek at later results.
+# All in % of lap time, negative = quicker.
+func _track_terms(nm: String, cls: String, before: String, course: String, values: Dictionary,
+		class_sig: Dictionary) -> Dictionary:
+	var out := {"gap_r": 0.0, "gap_q": 0.0, "tend": 0.0}
+	if course == "":
+		return out
+	var f := DriverTrackFit.fit(nm, cls, before, values, class_sig, true)
+	for t in f["tracks"]:
+		if t["course"] != course:
+			continue
+		if t["race_y"] != null:
+			out["gap_r"] = float(t["race_y"]) * t["races"] / (t["races"] + K_TRACK)
+		if t["quali_y"] != null:
+			out["gap_q"] = float(t["quali_y"]) * t["quali"] / (t["quali"] + K_TRACK)
+	if values.has(course):
+		for t in f["tendencies"]:
+			var verdict := str(t.get("verdict", ""))
+			if t.get("src", "") != "tel" or not t.has("effect") or not t.has("sd"):
+				continue
+			if not (verdict == "quicker" or verdict == "slower" or verdict.begins_with("early sign")):
+				continue
+			if not values[course].has(t["key"]) or float(t["sd"]) <= 0.0:
+				continue
+			var z := (float(values[course][t["key"]]) - float(t["mean"])) / float(t["sd"])
+			out["tend"] += float(t["effect"]) * z
 	return out
 
 
@@ -112,11 +172,22 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var tl_cost := []     # expected seconds lost to track limits
 	var tl_pen := []      # penalty rate over the race
 	var con_rate := []    # contacts over the race
+	var stops := []       # planned pit stops per driver
+	var pit_loss := float(track.get("pit_loss", 0.0))
+	var tank_laps := float(track.get("tank_laps", 0.0))
 	for d in inputs:
 		var adj: float = P["fit"] * (B_WEAR * d["wear_z"] * track["wear_z"]
 			+ B_TOP * d["top_z"] * track["top_z"] + B_FUEL * d["fuel_z"] * track["fuel_z"])
-		base.append(d["pace"] + adj)
-		qbase.append(d["qpace"])
+		var p_track := float(P.get("p_track", 0.0))
+		var p_tend := float(P.get("p_tend", 0.0))
+		base.append(d["pace"] + adj + p_track * float(d.get("track_gap_r", 0.0)) + p_tend * float(d.get("tend", 0.0)))
+		qbase.append(d["qpace"] + p_track * float(d.get("track_gap_q", 0.0)) + p_tend * float(d.get("tend", 0.0)))
+		var n_stops := 0
+		if float(P.get("pits", 0.0)) > 0.0 and pit_loss > 0.0 and tank_laps > 0.0:
+			# a thirstier driver gets fewer laps out of a tank
+			var own_tank := tank_laps / maxf(1.0 + float(d.get("fuel_rel", 0.0)) / 100.0, 0.5)
+			n_stops = maxi(0, int(ceil(float(laps) / own_tank)) - 1)
+		stops.append(n_stops)
 		lap_sd.append(d["cons"] * P["lap_noise"] / 100.0 * t_ref * sqrt(laps))
 		tl_cost.append(d["tl"] * laps * P["tl_cost"])
 		tl_pen.append(d["tl"] * laps * P["tl_pen"])
@@ -172,6 +243,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 			t += _poisson(tl_pen[i]) * P["pen_s"]
 			for c in _poisson(con_rate[i]):
 				t += P["c0"] + t_ref * P["dmg"] / 100.0 * laps * (1.0 - rng.randf())
+			for k in stops[i]:
+				t += pit_loss + pit_rng.randfn(0.0, PIT_SD)
 			tot[i] = t
 		idx.sort_custom(by_total)
 		for k in m:
@@ -186,7 +259,7 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 		if s % 500 == 499:
 			await get_tree().process_frame
 	var f := float(sims)
-	var out := {"laps": laps, "pole": [], "front": [], "exp_grid": [], "win": [], "podium": [], "top10": [], "exp_pos": []}
+	var out := {"laps": laps, "stops": stops, "pole": [], "front": [], "exp_grid": [], "win": [], "podium": [], "top10": [], "exp_pos": []}
 	for i in m:
 		out["pole"].append(pole[i] / f)
 		out["front"].append(front[i] / f)
@@ -216,7 +289,15 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 		notes.append("No lap-data fingerprints saved yet: drivers are rated from Elo only. Drop your XML folder to backfill them.")
 	elif not track["known_race"]:
 		notes.append("No earlier race at this track: lap time comes from quali (or a default), and tyre / fuel track effects are off.")
-	var inputs := driver_inputs(names, cls)
+	var inputs := driver_inputs(names, cls, "", course)
+	var on := []
+	for u in UPGRADES:
+		if float(params.get(u[0], 0.0)) > 0.0:
+			on.append(u[1].to_lower())
+	if not on.is_empty():
+		notes.append("Upgrades on: " + ", ".join(PackedStringArray(on)) + ".")
+	if float(params.get("pits", 0.0)) > 0.0 and not (track.has("pit_loss") and track.has("tank_laps")):
+		notes.append("Pit stops are on, but this track has no measured pit loss or fuel range yet, so none are simulated.")
 	var res := await simulate(inputs, track, mode, N_SIMS)
 	var rows := []
 	for i in inputs.size():
@@ -228,6 +309,8 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 			"pole": res["pole"][i], "front": res["front"][i], "exp_grid": res["exp_grid"][i],
 			"win": res["win"][i], "podium": res["podium"][i], "top10": res["top10"][i],
 			"exp_pos": res["exp_pos"][i],
+			"stops": res["stops"][i],
+			"track_gap": d["track_gap_r"], "tend": d["tend"],
 		})
 	rows.sort_custom(func(a, b): return a["exp_pos"] < b["exp_pos"])
 	return {"rows": rows, "track": track, "laps": res["laps"], "notes": notes}
@@ -266,12 +349,20 @@ func backtest_races() -> Array:
 
 
 # Scores one mode on the past races: podium + top-10 Brier (lower is better), winner log-loss.
-func _score(races: Array, mode: int, sims: int, prm: Dictionary) -> Dictionary:
+# cache (optional): race index -> {"inputs", "track"}, filled on first use, so several variants
+# of the assumptions can be scored without recomputing every driver's history.
+func _score(races: Array, mode: int, sims: int, prm: Dictionary, cache := {}) -> Dictionary:
 	var brier := 0.0
 	var ll := 0.0
-	for r in races:
-		var inputs := driver_inputs(r["names"], r["cls"], r["date"])
-		var track = Profiles.track_info(r["course"], r["cls"], r["date"], r["date"])
+	for ri in races.size():
+		var r: Dictionary = races[ri]
+		if not cache.has(ri):
+			cache[ri] = {
+				"inputs": driver_inputs(r["names"], r["cls"], r["date"], r["course"]),
+				"track": Profiles.track_info(r["course"], r["cls"], r["date"], r["date"]),
+			}
+		var inputs: Array = cache[ri]["inputs"]
+		var track: Dictionary = cache[ri]["track"]
 		var res := await simulate(inputs, track, mode, sims, prm)
 		var m: int = inputs.size()
 		var b := 0.0
@@ -302,6 +393,76 @@ func run_backtest() -> Dictionary:
 	out["modes"]["Race only (no grid)"] = await _score(races, Mode.RACE_ONLY, BACKTEST_SIMS, {})
 	last_backtest = out
 	return out
+
+
+# Replays past races with each upgrade off and on (same random draws for every variant, so the
+# comparison is fair), in both forecast modes, and switches on only the upgrades that make the
+# forecasts better, then checks them together. Slow: a minute or more on a big archive.
+# Returns {"races", "rows": [{"name", "brier", "ll"}], "on": [names kept], "note"?}
+func test_upgrades() -> Dictionary:
+	var races := backtest_races()
+	var out := {"races": races.size(), "rows": [], "on": [], "strength": {}}
+	if races.size() < 4:
+		out["note"] = "Need at least 4 past races with lap data."
+		return out
+	var cache := {}
+	var base := params.duplicate()
+	for u in UPGRADES:
+		base[u[0]] = 0.0
+	var b0 := await _score_both(races, base, cache)
+	out["rows"].append({"name": "Without upgrades", "brier": b0["brier"], "ll": b0["ll"]})
+	var keep := base.duplicate()
+	for u in UPGRADES:
+		var prm := base.duplicate()
+		prm[u[0]] = 1.0
+		var sc := await _score_both(races, prm, cache)
+		out["rows"].append({"name": "+ " + u[1], "brier": sc["brier"], "ll": sc["ll"]})
+		if sc["brier"] < b0["brier"] - UPGRADE_MARGIN:
+			keep[u[0]] = 1.0
+			out["on"].append(u[1])
+	# strength: each kept upgrade that has a strength (not the on/off pit stops) is also tried
+	# at half and one-and-a-half, keeping whichever scores best
+	for u in UPGRADES:
+		if u[0] == "pits" or keep[u[0]] <= 0.0:
+			continue
+		var best_v := 1.0
+		var best_b := INF
+		for row in out["rows"]:
+			if row["name"] == "+ " + u[1]:
+				best_b = row["brier"]
+		for v in STRENGTHS:
+			var prm := base.duplicate()
+			prm[u[0]] = v
+			var sc := await _score_both(races, prm, cache)
+			out["rows"].append({"name": "  %s at %.1f" % [u[1], v], "brier": sc["brier"], "ll": sc["ll"]})
+			if sc["brier"] < best_b:
+				best_b = sc["brier"]
+				best_v = v
+		keep[u[0]] = best_v
+		out["strength"][u[1]] = best_v
+	if out["on"].size() > 1:
+		var together := await _score_both(races, keep, cache)
+		out["rows"].append({"name": "Kept upgrades together", "brier": together["brier"], "ll": together["ll"]})
+		if together["brier"] >= b0["brier"]:
+			keep = base.duplicate()
+			out["on"] = []
+	for u in UPGRADES:
+		params[u[0]] = keep[u[0]]
+	save_settings()
+	rng.randomize()
+	pit_rng.randomize()
+	return out
+
+
+# Average of the actual-grid and predicted-quali scores, with fixed random draws
+func _score_both(races: Array, prm: Dictionary, cache: Dictionary) -> Dictionary:
+	rng.seed = 20261028
+	pit_rng.seed = 7
+	var a := await _score(races, Mode.ACTUAL_GRID, BACKTEST_SIMS, prm, cache)
+	rng.seed = 20261029
+	pit_rng.seed = 8
+	var q := await _score(races, Mode.PREDICTED_QUALI, BACKTEST_SIMS, prm, cache)
+	return {"brier": (a["brier"] + q["brier"]) / 2.0, "ll": (a["ll"] + q["ll"]) / 2.0}
 
 
 # Tries a few race-day-noise levels (actual-grid mode) and keeps the best. Slow: a few tens of seconds.

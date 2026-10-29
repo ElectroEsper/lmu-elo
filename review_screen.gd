@@ -7,9 +7,23 @@ extends Control
 
 var draft := {}
 
-# top area
+# screens: [key, sidebar label, one line shown under the title]
+const VIEWS := [
+	["review", "Review", "Check a result file before it is rated. Drop result XMLs, whole folders or MoTeC CSVs anywhere on the window."],
+	["ratings", "Ratings", "Elo per class and session. Click a column header to sort."],
+	["drivers", "Drivers", "Everything known about one driver: ratings, history, fingerprint and track fit."],
+	["reports", "Reports", "League reports. Each one can be exported to Excel."],
+	["profiles", "Profiles", "Lap-data fingerprints of drivers, cars and tracks, and the telemetry track layouts."],
+	["predict", "Predict", "Monte Carlo forecast of qualifying and the race."],
+]
+
+# frame
 var status := Label.new()
 var confirm_dialog := ConfirmationDialog.new()
+var nav_buttons := {}               # view key -> sidebar Button
+var view_title := Label.new()
+var view_sub := Label.new()
+var drop_hint := VBoxContainer.new()   # shown on Review while no file is loaded
 
 # review view
 var review_box := VBoxContainer.new()
@@ -56,29 +70,108 @@ var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}
 
 
 func _ready() -> void:
+	# one theme for the whole window: every screen, dialog, popup and tooltip (see ui_theme.gd)
+	get_window().theme = UiTheme.build()
+	get_window().min_size = Vector2i(960, 600)
+	RenderingServer.set_default_clear_color(UiTheme.BG)
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	var root := VBoxContainer.new()
-	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(root)
+	var bg := Panel.new()
+	bg.theme_type_variation = "Background"
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(bg)
+	var frame := HBoxContainer.new()
+	frame.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	frame.add_theme_constant_override("separation", 0)
+	add_child(frame)
 
-	# top bar
-	var top_bar := HFlowContainer.new()
-	root.add_child(top_bar)
-	top_bar.add_child(_btn("Review", _show_view.bind("review")))
-	top_bar.add_child(_btn("Ratings", _show_view.bind("ratings")))
-	top_bar.add_child(_btn("Drivers", _show_view.bind("drivers")))
-	top_bar.add_child(_btn("Reports", _show_view.bind("reports")))
-	top_bar.add_child(_btn("Profiles", _show_view.bind("profiles")))
-	top_bar.add_child(_btn("Predict", _show_view.bind("predict")))
-	top_bar.add_child(_btn("Recompute all", confirm_dialog.popup_centered))
-	top_bar.add_child(_btn("Export to Excel", _export))
-	top_bar.add_child(_btn("Re-read archived XML", _reread))
+	# sidebar: screens at the top, data actions at the bottom
+	var side := PanelContainer.new()
+	side.theme_type_variation = "Sidebar"
+	side.custom_minimum_size = Vector2(210, 0)
+	frame.add_child(side)
+	var nav := VBoxContainer.new()
+	nav.add_theme_constant_override("separation", 4)
+	side.add_child(nav)
+	var app := Label.new()
+	app.text = "LMU Elo"
+	app.theme_type_variation = "HeaderLarge"
+	nav.add_child(app)
+	var tagline := Label.new()
+	tagline.text = "Le Mans Ultimate league tool"
+	tagline.theme_type_variation = "Muted"
+	tagline.add_theme_font_size_override("font_size", 12)
+	nav.add_child(tagline)
+	nav.add_child(_gap(18))
+	nav.add_child(_section("SCREENS"))
+	var group := ButtonGroup.new()
+	for v in VIEWS:
+		var b := Button.new()
+		b.text = v[1]
+		b.theme_type_variation = "NavButton"
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.toggle_mode = true
+		b.button_group = group
+		b.focus_mode = Control.FOCUS_NONE
+		b.pressed.connect(_show_view.bind(v[0]))
+		nav.add_child(b)
+		nav_buttons[v[0]] = b
+	var push := Control.new()
+	push.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	nav.add_child(push)
+	nav.add_child(_section("DATA"))
+	nav.add_child(_side_btn("Recompute all...", confirm_dialog.popup_centered,
+		"Rebuild every rating from the saved events, oldest to newest."))
+	nav.add_child(_side_btn("Export all to Excel", _export,
+		"Ratings, history and events in one workbook, saved to Documents."))
+	nav.add_child(_side_btn("Re-read archived XML", _reread,
+		"Read the archived result files again, so newer lap-data measures are filled in."))
+
+	# main column: title, the screen, status bar
+	var main := VBoxContainer.new()
+	main.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main.add_theme_constant_override("separation", 0)
+	frame.add_child(main)
+	var head := MarginContainer.new()
+	_margins(head, 24, 18, 24, 10)
+	main.add_child(head)
+	var head_box := VBoxContainer.new()
+	head_box.add_theme_constant_override("separation", 2)
+	head.add_child(head_box)
+	view_title.theme_type_variation = "HeaderLarge"
+	head_box.add_child(view_title)
+	view_sub.theme_type_variation = "Muted"
+	view_sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	head_box.add_child(view_sub)
+	var body := MarginContainer.new()
+	_margins(body, 24, 4, 24, 14)
+	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	main.add_child(body)
+	var root := VBoxContainer.new()
+	body.add_child(root)
+	var status_bar := PanelContainer.new()
+	status_bar.theme_type_variation = "StatusBar"
+	main.add_child(status_bar)
+	status.theme_type_variation = "Muted"
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	root.add_child(status)
+	status.text = "Ready."
+	status_bar.add_child(status)
 
 	# review view
 	review_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	root.add_child(review_box)
+	drop_hint.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	drop_hint.alignment = BoxContainer.ALIGNMENT_CENTER
+	var hint_big := Label.new()
+	hint_big.text = "Drop result files here"
+	hint_big.theme_type_variation = "HeaderMedium"
+	hint_big.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	drop_hint.add_child(hint_big)
+	var hint_small := Label.new()
+	hint_small.text = "Result XMLs or whole folders: you will be asked whether they are league results or training data.\nMoTeC CSV exports become track profiles."
+	hint_small.theme_type_variation = "Muted"
+	hint_small.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	drop_hint.add_child(hint_small)
+	review_box.add_child(drop_hint)
 	grid_check.text = "No quali file: use grid positions as quali"
 	review_box.add_child(grid_check)
 	review_box.add_child(warnings)
@@ -87,6 +180,7 @@ func _ready() -> void:
 	var confirm_row := HFlowContainer.new()
 	review_box.add_child(confirm_row)
 	confirm_btn.text = "Confirm and rate"
+	confirm_btn.theme_type_variation = "AccentButton"
 	confirm_btn.disabled = true
 	confirm_btn.pressed.connect(_on_confirm)
 	confirm_row.add_child(confirm_btn)
@@ -166,11 +260,17 @@ func _ready() -> void:
 	add_child(motec_info)
 
 	_show_view("review")
+	_rebuild()
 	get_window().files_dropped.connect(_on_files_dropped)
 
 
 # ---------- Views ----------
 func _show_view(view: String) -> void:
+	for v in VIEWS:
+		if v[0] == view:
+			view_title.text = v[1]
+			view_sub.text = v[2]
+			nav_buttons[v[0]].set_pressed_no_signal(true)
 	review_box.visible = view == "review"
 	ratings_box.visible = view == "ratings"
 	driver_view.visible = view == "drivers"
@@ -204,6 +304,33 @@ func _btn(text: String, action: Callable) -> Button:
 	b.text = text
 	b.pressed.connect(action)
 	return b
+
+
+func _side_btn(text: String, action: Callable, tip: String) -> Button:
+	var b := _btn(text, action)
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.tooltip_text = tip
+	return b
+
+
+func _section(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.theme_type_variation = "SectionLabel"
+	return l
+
+
+func _gap(height: int) -> Control:
+	var c := Control.new()
+	c.custom_minimum_size = Vector2(0, height)
+	return c
+
+
+func _margins(m: MarginContainer, left: int, top: int, right: int, bottom: int) -> void:
+	m.add_theme_constant_override("margin_left", left)
+	m.add_theme_constant_override("margin_top", top)
+	m.add_theme_constant_override("margin_right", right)
+	m.add_theme_constant_override("margin_bottom", bottom)
 
 
 # ---------- Loading and confirming ----------
@@ -402,7 +529,7 @@ func _start_batch(kind: String) -> void:
 		_import_training(paths)
 		return
 	queue = paths
-	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0}
+	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0, "suspects": {}}
 	batch_active = true
 	_next_in_queue()
 
@@ -495,7 +622,7 @@ func _finish_batch() -> void:
 	_rebuild()
 	status.text = "Batch done: %d rated, %d old event(s) completed with stats and lap data, %d skipped or already complete. If any file was older than events you had already rated, press Recompute all." % [
 		batch["rated"], batch["updated"], batch["skipped"]]
-	var sus: Dictionary = batch["suspects"]
+	var sus: Dictionary = batch.get("suspects", {})
 	if not sus.is_empty():
 		var parts := PackedStringArray()
 		for n in sus:
@@ -532,7 +659,12 @@ func _attach_stats() -> void:
 func _rebuild() -> void:
 	var keep := tabs.current_tab
 	_clear(tabs)
-	if draft.is_empty():
+	var empty := draft.is_empty()
+	drop_hint.visible = empty and not batch_active
+	tabs.visible = not empty
+	grid_check.visible = not empty
+	confirm_btn.visible = not empty
+	if empty:
 		_show_warnings()
 		return
 	for sess in draft["orders"]:
@@ -552,13 +684,25 @@ func _rebuild() -> void:
 
 func _row(order: Array, i: int) -> HBoxContainer:
 	var row := HBoxContainer.new()
+	var pos := Label.new()
+	pos.text = "P%d" % (i + 1)
+	pos.theme_type_variation = "Muted"
+	pos.custom_minimum_size = Vector2(44, 0)
+	pos.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(pos)
 	var label := Label.new()
-	label.text = "%d. %s" % [i + 1, order[i]]
+	label.text = str(order[i])
 	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(label)
-	row.add_child(_btn("Up", _move.bind(order, i, i - 1)))
-	row.add_child(_btn("Down", _move.bind(order, i, i + 1)))
-	row.add_child(_btn("Drop", _drop.bind(order, i)))
+	var up := _btn("Up", _move.bind(order, i, i - 1))
+	var down := _btn("Down", _move.bind(order, i, i + 1))
+	var drop := _btn("Drop", _drop.bind(order, i))
+	up.disabled = i == 0
+	down.disabled = i == order.size() - 1
+	for btn in [up, down, drop]:
+		btn.theme_type_variation = "SmallButton"
+		btn.focus_mode = Control.FOCUS_NONE
+		row.add_child(btn)
 	return row
 
 
@@ -612,30 +756,28 @@ func _keep_new(driver_name: String) -> void:
 
 # ---------- Ratings view ----------
 func _draw_ratings() -> void:
+	var keep := ratings_view.current_tab
 	_clear(ratings_view)
 	for b in Elo.boards():
-		var scroll := ScrollContainer.new()
-		var list := VBoxContainer.new()
-		list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		scroll.add_child(list)
-		var legend := Label.new()
-		legend.text = "* = still settling (few duels so far)"
-		list.add_child(legend)
+		var rows := []
 		var rank := 1
 		for row in Elo.leaderboard(b[0], b[1]):
-			var mark := " *" if row["d"] < Elo.K_RAMP_DUELS else ""
-			var l := Label.new()
-			l.text = "%d. %s   %d%s   (%d duels)" % [
-				rank, row["name"], roundi(row["r"]), mark, int(row["d"])]
-			list.add_child(l)
+			rows.append([rank, row["name"], roundi(row["r"]), int(row["d"]),
+				"Settling" if row["d"] < Elo.K_RAMP_DUELS else ""])
 			rank += 1
-		ratings_view.add_child(scroll)
+		ratings_view.add_child(TableView.build({
+			"note": "Settling = fewer than %d duels so far, so the rating still moves quickly." % int(Elo.K_RAMP_DUELS),
+			"headers": ["#", "Driver", "Rating", "Duels", "Status"],
+			"rows": rows,
+			"tips": ["Place on the leaderboard.", "", "Elo rating.", "Head-to-head comparisons counted so far.", ""],
+		}))
 		ratings_view.set_tab_title(ratings_view.get_tab_count() - 1, "%s %s" % [b[0], b[1]])
 	if ratings_view.get_tab_count() == 0:
 		var empty := Label.new()
 		empty.text = "No ratings yet. Confirm a result file first."
 		ratings_view.add_child(empty)
 		ratings_view.set_tab_title(0, "Empty")
+	ratings_view.current_tab = clampi(keep, 0, maxi(ratings_view.get_tab_count() - 1, 0))
 
 
 # ---------- Recompute ----------
@@ -676,6 +818,8 @@ func _reread() -> void:
 # Batch auto-confirm keeps similar names separate; remember them for the end-of-batch message
 func _note_suspects(d: Dictionary) -> void:
 	for n in d["new_drivers"]:
+		if not batch.has("suspects"):
+			batch["suspects"] = {}
 		batch["suspects"][n] = d["new_drivers"][n]
 	d["new_drivers"].clear()
 

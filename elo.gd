@@ -265,6 +265,8 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 		if not g.is_empty():
 			draft["orders"]["quali"] = g
 	draft["track"] = _read_track(path)
+	if _name_time(draft["file"]) < 0:
+		draft["event_time"] = _xml_time(path)   # no date in the file name: use the session's own
 	draft["fp"] = Fingerprint.extract(path)   # lap-data fingerprint, saved with the event for Profiles / Predict
 	draft["duplicate"] = processed.has(draft["hash"])
 	draft["new_drivers"] = _find_suspects(draft)
@@ -285,7 +287,8 @@ func _apply(draft: Dictionary) -> void:
 	processed[draft["hash"]] = draft["file"]
 	history.append({
 		"file": draft["file"],
-		"time": _name_time(draft["file"]),
+		"time": event_time(draft),
+		"course": str(draft.get("track", {}).get("TrackCourse", "")),
 		"changes": changes,
 		"stats": _resolved_stats(draft.get("stats", {})),
 	})
@@ -371,6 +374,8 @@ func attach_stats(draft: Dictionary) -> bool:
 		saved["stats"] = draft["stats"]
 		saved["track"] = draft.get("track", {})
 		saved["fp"] = draft.get("fp", {})
+	if draft.has("event_time"):
+		saved["event_time"] = draft["event_time"]
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_string(JSON.stringify(saved))
 	f.close()
@@ -379,6 +384,108 @@ func attach_stats(draft: Dictionary) -> bool:
 			h["stats"] = draft["stats"]
 	save_ratings()
 	return true
+
+
+var _time_cache := {}   # file name -> event time read from its archived XML
+
+
+# When an event happened, as Unix time (local clock, like the file names): from the file name
+# when it starts with a date, else from the session's own TimeString inside the XML (saved with
+# the event as "event_time", or read once from the archived copy). -1 if neither is available.
+func event_time(draft: Dictionary) -> int:
+	var file_name := str(draft.get("file", ""))
+	var t := _name_time(file_name)
+	if t >= 0:
+		return t
+	if draft.has("event_time") and int(draft["event_time"]) >= 0:
+		return int(draft["event_time"])
+	if _time_cache.has(file_name):
+		return _time_cache[file_name]
+	var path := stored_xml_path(file_name)
+	if path == "":
+		path = str(draft.get("path", ""))
+	t = _xml_time(path) if path != "" else -1
+	_time_cache[file_name] = t
+	return t
+
+
+# Full events: a qualifying file and the race file of the same event (same date and track) share
+# one number. Returns, for every entry of history, its full-event number (0, 1, 2...). A new full
+# event starts when the date or track changes, or when the entry repeats a session the current
+# event already has: a second race, or a second qualifying-only file, on the same day and track.
+func full_events() -> Array:
+	var out := []
+	var n := -1
+	var key := ""
+	var sessions := {}
+	for h in history:
+		var t := int(h.get("time", -1))
+		var date := ""
+		if t >= 0:
+			var d := Time.get_datetime_dict_from_unix_time(t)
+			date = "%04d_%02d_%02d" % [int(d["year"]), int(d["month"]), int(d["day"])]
+		var k := "%s|%s" % [date, str(h.get("course", ""))]
+		var has := {}
+		for c in h["changes"]:
+			has[c["sess"]] = true
+		# a race file (it may carry its own quali) repeats only a race; a quali-only file repeats a quali
+		var repeats: bool = (has.has("race") and sessions.has("race")) \
+				or (not has.has("race") and has.has("quali") and sessions.has("quali"))
+		if n < 0 or date == "" or k != key or repeats:
+			n += 1
+			key = k
+			sessions = {}
+		sessions.merge(has)
+		out.append(n)
+	return out
+
+
+# 0 for a file with only qualifying in it, 1 for one with a race: qualifying sorts first on a tie
+func session_rank(draft: Dictionary) -> int:
+	if draft.has("orders"):
+		return 1 if draft["orders"].has("race") else 0
+	return 1 if draft.get("fp", {}).has("race") else 0
+
+
+# "YYYY_MM_DD" of the event (same form as the file-name dates), or "" if unknown
+func event_date(draft: Dictionary) -> String:
+	var t := event_time(draft)
+	if t < 0:
+		return ""
+	var d := Time.get_datetime_dict_from_unix_time(t)
+	return "%04d_%02d_%02d" % [int(d["year"]), int(d["month"]), int(d["day"])]
+
+
+# Start of the first session in a result XML, from <TimeString>2026/10/14 20:04:18</TimeString>
+# (local time, matching the file names); falls back to <DateTime> (Unix time). -1 if missing.
+func _xml_time(path: String) -> int:
+	var p := XMLParser.new()
+	if path == "" or p.open(path) != OK:
+		return -1
+	var tag := ""
+	var unix := -1
+	while p.read() == OK:
+		match p.get_node_type():
+			XMLParser.NODE_ELEMENT:
+				tag = p.get_node_name()
+				if tag == "Driver":
+					break   # dates sit in the session headers, before the drivers
+			XMLParser.NODE_TEXT:
+				var txt := p.get_node_data().strip_edges()
+				if tag == "TimeString":
+					var m := RegEx.create_from_string("^(\\d{4})/(\\d{2})/(\\d{2}) (\\d{2}):(\\d{2}):(\\d{2})").search(txt)
+					if m != null:
+						return Time.get_unix_time_from_datetime_dict({
+							"year": int(m.get_string(1)), "month": int(m.get_string(2)),
+							"day": int(m.get_string(3)), "hour": int(m.get_string(4)),
+							"minute": int(m.get_string(5)), "second": int(m.get_string(6)),
+						})
+				elif tag == "DateTime" and unix < 0 and txt.is_valid_int():
+					unix = int(txt)
+				tag = ""
+			XMLParser.NODE_ELEMENT_END:
+				tag = ""
+	return unix
 
 
 # Unix time from a file name like 2026_10_14_21_13_28-32R1.xml, or -1 if it has no date
@@ -409,7 +516,7 @@ func rebuild_all() -> Dictionary:
 		var draft = JSON.parse_string(FileAccess.get_file_as_string(path))
 		if not (draft is Dictionary) or not draft.has("file") or not (draft.has("orders") or draft.get("kind", "") == "training"):
 			continue
-		var t := _name_time(draft["file"])
+		var t := event_time(draft)
 		if t < 0:
 			undated.append(draft["file"])
 			t = FileAccess.get_modified_time(path)
@@ -419,10 +526,13 @@ func rebuild_all() -> Dictionary:
 	if events.is_empty():
 		return summary
 
-	# oldest first; same-second ties fall back to file name
+	# oldest first; on a tie (a quali file and its race file often carry the same start time)
+	# qualifying comes first, then file name
 	events.sort_custom(func(a, b):
 		if a["time"] != b["time"]:
 			return a["time"] < b["time"]
+		if session_rank(a["draft"]) != session_rank(b["draft"]):
+			return session_rank(a["draft"]) < session_rank(b["draft"])
 		return a["draft"]["file"] < b["draft"]["file"])
 
 	if FileAccess.file_exists(SAVE_PATH):

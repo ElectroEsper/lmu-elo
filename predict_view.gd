@@ -18,6 +18,9 @@ const PARAM_ROWS := [
 	["pen_s", "Penalty size (seconds)", 0.0, 60.0, 1.0],
 	["fit", "Track-fit strength (0 = off)", 0.0, 3.0, 0.1],
 	["lap_noise", "Lap-to-lap scatter (x)", 0.0, 3.0, 0.1],
+	["p_track", "Upgrade: own history at the track (0 = off, 1 = on)", 0.0, 2.0, 0.1],
+	["p_tend", "Upgrade: track tendencies (0 = off, 1 = on)", 0.0, 2.0, 0.1],
+	["pits", "Upgrade: pit stops (0 = off, 1 = on)", 0.0, 1.0, 1.0],
 ]
 
 var class_pick := OptionButton.new()
@@ -62,9 +65,12 @@ func _ready() -> void:
 	add_child(bar2)
 	bar2.add_child(_btn("Load grid from latest quali", _load_latest_quali))
 	bar2.add_child(_btn("Fill with recent drivers", _fill_recent))
-	bar2.add_child(_btn("Predict", _run))
+	var go := _btn("Predict", _run)
+	go.theme_type_variation = "AccentButton"
+	bar2.add_child(go)
 	bar2.add_child(_btn("Backtest", _backtest))
 	bar2.add_child(_btn("Fit noise (slow)", _fit_noise))
+	bar2.add_child(_btn("Test upgrades (slow)", _test_upgrades))
 	var toggle := CheckButton.new()
 	toggle.text = "Model assumptions"
 	toggle.toggled.connect(func(on: bool): assumptions.visible = on)
@@ -92,17 +98,21 @@ func _ready() -> void:
 	add_child(entries)
 
 	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	info.theme_type_variation = "Muted"
 	add_child(info)
 	grid_line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(grid_line)
 
-	tree.columns = 10
+	tree.columns = 11
 	tree.column_titles_visible = true
 	tree.hide_root = true
+	tree.select_mode = Tree.SELECT_ROW
 	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	var titles := ["Grid", "Driver", "Pole %", "Front row %", "Exp. grid", "Win %", "Podium %", "Top 10 %", "Exp. finish", "Race pace %"]
+	var titles := ["Grid", "Driver", "Pole %", "Front row %", "Exp. grid", "Win %", "Podium %", "Top 10 %", "Exp. finish", "Race pace %", "Stops"]
 	for i in titles.size():
 		tree.set_column_title(i, titles[i])
+		if i >= 2:
+			tree.set_column_title_alignment(i, HORIZONTAL_ALIGNMENT_RIGHT)
 		tree.set_column_expand(i, i == 1)
 	tree.set_column_custom_minimum_width(1, 170)
 	add_child(tree)
@@ -273,7 +283,11 @@ func _show(res: Dictionary, mode: int) -> void:
 		it.set_text(7, "%.1f" % (100.0 * r["top10"]))
 		it.set_text(8, "%.1f" % r["exp_pos"])
 		it.set_text(9, "%+.2f" % r["pace"])
-		for c in range(2, 10):
+		it.set_text(10, str(int(r.get("stops", 0))) if float(Predict.params.get("pits", 0.0)) > 0.0 else "-")
+		var tip := "Race pace vs class median, in %%. Track history here: %+.2f%%, track tendencies: %+.2f%% (negative = quicker; applied only when that upgrade is on)." % [
+			float(r.get("track_gap", 0.0)), float(r.get("tend", 0.0))]
+		it.set_tooltip_text(9, tip)
+		for c in range(2, 11):
 			it.set_text_alignment(c, HORIZONTAL_ALIGNMENT_RIGHT)
 	var t: Dictionary = res["track"]
 	var lines := ["Track: %s. %d laps of about %.1f s (%d min)." % [t["course"] if t["course"] != "" else "unknown", res["laps"], t["ref_s"], t["minutes"]]]
@@ -307,6 +321,31 @@ func _backtest() -> void:
 	for k in s["modes"]:
 		lines.append("%s: %.3f   (log-loss %.2f)" % [k, s["modes"][k]["brier"], s["modes"][k]["ll"]])
 	out_label.text = "\n".join(lines)
+
+
+func _test_upgrades() -> void:
+	if _busy:
+		return
+	_busy = true
+	out_label.text = "Replaying past races with each upgrade off and on, in two forecast modes. This takes a while..."
+	var s: Dictionary = await Predict.test_upgrades()
+	_busy = false
+	if s.has("note"):
+		out_label.text = s["note"]
+		return
+	var lines := ["Upgrades tested on %d past races (podium + top-10 error, lower is better; winner log-loss):" % s["races"]]
+	for row in s["rows"]:
+		lines.append("%s: %.4f   (log-loss %.2f)" % [row["name"], row["brier"], row["ll"]])
+	if s["on"].is_empty():
+		lines.append("None of them made the forecasts better, so all stay off.")
+	else:
+		var on := PackedStringArray()
+		for name in s["on"]:
+			on.append("%s (strength %.1f)" % [name, float(s["strength"].get(name, 1.0))])
+		lines.append("Switched on: " + ", ".join(on) + ". The others stay off.")
+	out_label.text = "\n".join(lines)
+	for key in spins:
+		spins[key].set_value_no_signal(float(Predict.params[key]))
 
 
 func _fit_noise() -> void:

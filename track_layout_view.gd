@@ -124,7 +124,7 @@ func _grades_panel(p: Dictionary) -> Control:
 	for h in ["Characteristic", "Grade", "Value", "Details", "Basis"]:
 		var hl := Label.new()
 		hl.text = h
-		hl.add_theme_color_override("font_color", Color(0.6, 0.8, 1.0))
+		hl.theme_type_variation = "TableHeader"
 		grid.add_child(hl)
 	for r in TrackGrades.grade(str(p["course"]), str(p["class"])):
 		var name_l := Label.new()

@@ -19,7 +19,7 @@ extends RefCounted
 ## tl = track-limit events per lap, con = contacts with other cars per lap,
 ## cons = lap-time spread in % of the median clean lap, wear_km / fuel_km are % per km.
 
-const VERSION := 2
+const VERSION := 3
 const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5 median are not "clean"
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
@@ -84,6 +84,8 @@ static func extract(path: String, training := false) -> Dictionary:
 							"s1": _attr(p, "s1"), "s2": _attr(p, "s2"), "s3": _attr(p, "s3"),
 							"p": int(_attr(p, "p")),   # race position at the end of the lap
 							"pit": p.get_named_attribute_value_safe("pit") == "1",
+							"wet": ("wet" in p.get_named_attribute_value_safe("fcompound").to_lower()
+								or "wet" in p.get_named_attribute_value_safe("rcompound").to_lower()),
 						})
 						in_lap = true
 					else:
@@ -187,6 +189,7 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 	var km := length / 1000.0
 	var rows := {}       # raw name -> metrics
 	var raw := {}        # raw name -> unrounded extras for the class stats
+	var lap_med := _lap_medians(cur["drivers"])   # class -> {lap number: median lap time}
 	for d in cur["drivers"]:
 		var nm: String = d.get("Name", "")
 		var cls: String = d.get("CarClass", "")
@@ -218,18 +221,36 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		for t in times:
 			if t <= CLEAN_LIMIT * ref:
 				clean.append(t)
-		if clean.size() < MIN_LAPS:
+		# lap-by-lap pace: every lap against the class median of that same lap, so a changing
+		# track (rain, drying, rubber, fuel burn) or retiring early does not skew the comparison
+		var ratios := _lap_ratios(d["laps"], lap_med.get(cls, {}))
+		# in a race that turns wet, laps far off the driver's dry best still count lap by lap
+		if clean.size() < MIN_LAPS and ratios.size() < MIN_LAPS:
 			continue
+		if clean.size() < MIN_LAPS:
+			clean = times
 		var pace := _median(clean)
+		var cons := _std(clean) / pace * 100.0
+		var ratio := -1.0
+		if ratios.size() >= MIN_LAPS:
+			ratio = _median(ratios)
+			var clean_r := []
+			for r in ratios:
+				if r <= CLEAN_LIMIT * ratio:
+					clean_r.append(r)
+			if clean_r.size() >= MIN_LAPS:
+				cons = _std(clean_r) / ratio * 100.0
 		var m := {
 			"cls": cls, "car": d.get("CarType", ""), "laps": n,
 			"grid": int(d.get("ClassGridPos", "0")), "pos": int(d.get("ClassPosition", "0")),
-			"pace": pace, "cons": _std(clean) / pace * 100.0,
+			"pace": pace, "cons": cons,
 			"tl": cur["tl"].get(nm, {}).size() / float(n),
 			"con": cur["con"].get(nm, 0) / float(n),
 			"pen": cur["pens"].get(nm, 0),
 		}
 		var x := {}
+		if ratio > 0.0:
+			x["ratio"] = ratio
 		if not tops.is_empty():
 			x["top"] = tops.max()
 		var wr := _wear_rate(wear_series)
@@ -267,12 +288,20 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			if raw[nm].has("fuel"):
 				fuels.append(raw[nm]["fuel"])
 		var med_pace := _median(paces)
+		var ratios_c := []
+		for nm in names:
+			if raw[nm].has("ratio"):
+				ratios_c.append(raw[nm]["ratio"])
+		var med_ratio := _median(ratios_c) if ratios_c.size() >= 3 else 0.0
 		var med_top := _median(tops) if not tops.is_empty() else 0.0
 		var med_wear := _median(wears) if not wears.is_empty() else 0.0
 		var med_fuel := _median(fuels) if not fuels.is_empty() else 0.0
 		for nm in names:
 			var m: Dictionary = rows[nm]
-			m["pace_rel"] = _r((m["pace"] / med_pace - 1.0) * 100.0)
+			if med_ratio > 0.0 and raw[nm].has("ratio"):
+				m["pace_rel"] = _r((raw[nm]["ratio"] / med_ratio - 1.0) * 100.0)
+			else:   # too few comparable laps: whole-race medians as before
+				m["pace_rel"] = _r((m["pace"] / med_pace - 1.0) * 100.0)
 			if raw[nm].has("top") and med_top > 0.0:
 				m["top_rel"] = _r((raw[nm]["top"] / med_top - 1.0) * 100.0)
 			if raw[nm].has("wear") and med_wear > 0.0:
@@ -309,7 +338,100 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			"n": names.size(),
 		}
 		classes[c].merge(_passes(cur["drivers"], c))
-	return {"minutes": cur["minutes"], "classes": classes, "drivers": rows}
+		var pl := _pit_loss(cur["drivers"], c, lap_med.get(c, {}))
+		if pl > 0.0:
+			classes[c]["pit_loss"] = _r(pl, 0.1)
+	return {"minutes": cur["minutes"], "classes": classes, "drivers": rows, "wet": _wet_share(cur["drivers"])}
+
+
+# A lap that can be compared with other cars on the same lap: not the start, not a pit lap
+# and not the out-lap after one, with a valid time.
+static func _comparable(laps: Array, i: int) -> bool:
+	var l: Dictionary = laps[i]
+	if l["n"] <= 1 or l["t"] <= 0.0 or l["pit"]:
+		return false
+	return i == 0 or not laps[i - 1]["pit"]
+
+
+# class -> {lap number: median time of the comparable laps}; a lap needs at least a third of
+# the class (and 3 cars) to give a median worth comparing with
+static func _lap_medians(drivers: Array) -> Dictionary:
+	var acc := {}     # class -> {lap: [times]}
+	var count := {}   # class -> cars
+	for d in drivers:
+		var cls: String = d.get("CarClass", "")
+		if cls == "":
+			continue
+		count[cls] = int(count.get(cls, 0)) + 1
+		if not acc.has(cls):
+			acc[cls] = {}
+		var laps: Array = d["laps"]
+		for i in laps.size():
+			if _comparable(laps, i):
+				var k: int = laps[i]["n"]
+				if not acc[cls].has(k):
+					acc[cls][k] = []
+				acc[cls][k].append(laps[i]["t"])
+	var out := {}
+	for cls in acc:
+		out[cls] = {}
+		var need := maxi(3, int(ceil(int(count[cls]) / 3.0)))
+		for k in acc[cls]:
+			if acc[cls][k].size() >= need:
+				out[cls][k] = _median(acc[cls][k])
+	return out
+
+
+# This driver's comparable laps divided by the class median of the same lap
+static func _lap_ratios(laps: Array, med: Dictionary) -> Array:
+	var out := []
+	for i in laps.size():
+		if _comparable(laps, i) and med.has(laps[i]["n"]):
+			out.append(laps[i]["t"] / float(med[laps[i]["n"]]))
+	return out
+
+
+# Typical time lost to a routine pit stop in one class, in seconds: the in-lap and the out-lap
+# compared with the class median of those same laps (lane, stop and slow out-lap together).
+# Only races where at least half the class stopped count: in a sprint the few stops are repairs,
+# far longer than a planned stop. 0 if that is not the case or fewer than two stops are usable.
+static func _pit_loss(drivers: Array, cls: String, med: Dictionary) -> float:
+	var losses := []
+	var cars := 0
+	var stopped := 0
+	for d in drivers:
+		if d.get("CarClass", "") != cls:
+			continue
+		cars += 1
+		var laps: Array = d["laps"]
+		for l in laps:
+			if l["pit"]:
+				stopped += 1
+				break
+		for i in range(laps.size() - 1):
+			if not laps[i]["pit"]:
+				continue
+			var a: Dictionary = laps[i]
+			var b: Dictionary = laps[i + 1]
+			if a["t"] > 0.0 and b["t"] > 0.0 and med.has(a["n"]) and med.has(b["n"]):
+				var loss: float = (a["t"] - med[a["n"]]) + (b["t"] - med[b["n"]])
+				if loss > 5.0 and loss < 300.0:
+					losses.append(loss)
+	if stopped * 2 < cars:
+		return 0.0
+	return _median(losses) if losses.size() >= 2 else 0.0
+
+
+# Share of all laps in a session driven on wet tyres (0 = dry, 1 = fully wet)
+static func _wet_share(drivers: Array) -> float:
+	var total := 0
+	var wet := 0
+	for d in drivers:
+		for l in d["laps"]:
+			total += 1
+			if l.get("wet", false):
+				wet += 1
+	return _r(wet / float(total), 0.01) if total > 0 else 0.0
 
 
 # On-track passes in one class, from the running order at the end of every lap (the lap's
@@ -425,7 +547,7 @@ static func _quali(cur: Dictionary, length: float) -> Dictionary:
 		classes[c] = cs
 	for nm in rows:
 		rows[nm]["best"] = _r(rows[nm]["best"], 0.0001)
-	return {"classes": classes, "drivers": rows}
+	return {"classes": classes, "drivers": rows, "wet": _wet_share(cur["drivers"])}
 
 
 # ---------- Helpers ----------
