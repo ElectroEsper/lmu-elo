@@ -79,7 +79,20 @@ static func grade(course: String, cls: String) -> Array:
 
 
 # course -> raw values for one class, from the stored telemetry profiles and the league results
+static var _collect_cache := {}   # cls -> {"stamp", "values"}
+
+
 static func collect(cls: String) -> Dictionary:
+	var stamp := "%d|%d" % [TrackStore.revision, Profiles.revision]
+	var hit: Dictionary = _collect_cache.get(cls, {})
+	if hit.get("stamp", "") == stamp:
+		return hit["values"]
+	var out := _collect(cls)
+	_collect_cache[cls] = {"stamp": stamp, "values": out}
+	return out
+
+
+static func _collect(cls: String) -> Dictionary:
 	var out := {}
 	for p in TrackStore.list():
 		if str(p.get("class", "")) != cls or not p.has("traits"):

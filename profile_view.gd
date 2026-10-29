@@ -9,6 +9,7 @@ var search := LineEdit.new()
 var picker := OptionButton.new()
 var out_tabs := TabContainer.new()
 var shown: Array = []   # tables currently displayed
+var _typing := Timer.new()   # the profile is redrawn once typing pauses, not on every key
 
 
 func _ready() -> void:
@@ -17,6 +18,10 @@ func _ready() -> void:
 	search.placeholder_text = "Type to filter drivers"
 	search.custom_minimum_size = Vector2(220, 0)
 	search.text_changed.connect(_on_search)
+	_typing.one_shot = true
+	_typing.wait_time = 0.35
+	_typing.timeout.connect(_after_typing)
+	add_child(_typing)
 	bar.add_child(search)
 	picker.custom_minimum_size = Vector2(240, 0)
 	picker.item_selected.connect(_on_pick)
@@ -56,7 +61,11 @@ func _fill_picker() -> void:
 
 
 func _on_search(_text: String) -> void:
-	_fill_picker()
+	_fill_picker()   # the list filters at once; the (slower) profile waits for a pause
+	_typing.start()
+
+
+func _after_typing() -> void:
 	_show()
 
 
@@ -91,7 +100,7 @@ func _show() -> void:
 	_clear(out_tabs)
 	for t in tables:
 		out_tabs.add_child(TableView.build(t))
-		out_tabs.set_tab_title(out_tabs.get_tab_count() - 1, t["title"])
+		out_tabs.set_tab_title(out_tabs.get_tab_count() - 1, LeagueSettings.label(t["title"]))
 	out_tabs.current_tab = clampi(keep, 0, maxi(out_tabs.get_tab_count() - 1, 0))
 
 
@@ -102,7 +111,7 @@ func _export() -> void:
 		return
 	var sheets := []
 	for t in shown:
-		sheets.append({"name": t["title"], "headers": t["headers"], "rows": t["rows"]})
+		sheets.append({"name": LeagueSettings.label(t["title"]), "headers": t["headers"], "rows": t["rows"]})
 	var driver_name := picker.get_item_text(picker.selected)
 	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
 	var stamp := Time.get_datetime_string_from_system().replace(":", "-")

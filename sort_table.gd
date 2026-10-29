@@ -13,6 +13,7 @@ var rows: Array = []
 var header_tips: Array = []   # optional tooltip per column header
 var grade_col := -1           # column holding "n / 5" driver grades, red (1) to green (5); -1 = none
 var cell_tips := {}           # column -> [tooltip per row, in the original row order]
+var cell_colors := {}         # column -> [Color per row, in the original row order] (e.g. ranks)
 
 var _numeric: Array = []      # per column: holds numbers?
 var _col := -1                # sorted column, -1 = original order
@@ -115,7 +116,7 @@ func _render() -> void:
 		var mark := ""
 		if c == _col:
 			mark = "  ▲" if _asc else "  ▼"
-		set_column_title(c, str(headers[c]) + mark)
+		set_column_title(c, LeagueSettings.label(str(headers[c])) + mark)
 		set_column_title_alignment(c, HORIZONTAL_ALIGNMENT_RIGHT if _numeric[c] else HORIZONTAL_ALIGNMENT_LEFT)
 		var tip := str(header_tips[c]) if c < header_tips.size() else ""
 		set_column_title_tooltip_text(c, (tip + "\n" if tip != "" else "") + "Click to sort.")
@@ -126,7 +127,7 @@ func _render() -> void:
 		var it := create_item(root)
 		var r: Array = rows[i]
 		for c in mini(r.size(), headers.size()):
-			var txt := cell_text(r[c])
+			var txt := LeagueSettings.label(cell_text(r[c]))
 			it.set_text(c, txt)
 			if _numeric[c]:
 				it.set_text_alignment(c, HORIZONTAL_ALIGNMENT_RIGHT)
@@ -134,6 +135,8 @@ func _render() -> void:
 				it.set_tooltip_text(c, txt)
 			if c == grade_col and txt.length() == 5 and txt.ends_with(" / 5"):
 				it.set_custom_color(c, UiTheme.driver_grade_color(txt.left(1).to_int()))   # "4 / 5" -> 4
+			if cell_colors.has(c) and i < cell_colors[c].size() and cell_colors[c][i] is Color:
+				it.set_custom_color(c, cell_colors[c][i])
 			if cell_tips.has(c) and i < cell_tips[c].size():
 				it.set_tooltip_text(c, str(cell_tips[c][i]))
 

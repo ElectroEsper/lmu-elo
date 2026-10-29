@@ -5,9 +5,15 @@ extends Node
 
 # ---------- Settings ----------
 const START := 1500.0
-const K_START := 32.0
-const K_END := 16.0
-const K_RAMP_DUELS := 60.0   # duels needed to go from K_START to K_END (tune this)
+# Tuned on four seasons of league results (90 events): replaying them with different settings,
+# these predicted who finishes ahead in the next session best (75% right, was 73% with 32 -> 16).
+const K_START := 128.0
+const K_END := 64.0
+const K_RAMP_DUELS := 480.0   # duels needed to go from K_START to K_END
+const SETTLED_DUELS := 120.0  # below this many duels a rating is shown as "settling" (provisional)
+# Ratings saved by an older model are replayed with this one at start-up (see _ready).
+# 2: bigger K, and a driver's first quali (or race) rating starts from their race (or quali) one.
+const RATING_MODEL := 2
 const SAVE_PATH := "user://elo.json"
 const INCIDENT_GAP := 5.0    # contact reports closer than this (seconds) count as one incident
 
@@ -22,10 +28,58 @@ var ratings := {}     # "name|class|session" -> {"r": rating, "d": duels fought}
 var processed := {}   # file sha256 -> file name
 var history := []     # per event: {"file", "time", "changes": [...], "stats": {...}}
 var aliases := {}     # "John P" -> "John Peters"
+var revision := 0     # goes up on every save, so caches elsewhere know the data changed
+var load_error := ""  # set when elo.json could not be read at start-up (shown on the main screen)
+
+
+var _model_loaded := RATING_MODEL
 
 
 func _ready() -> void:
 	load_ratings()
+	if _model_loaded < RATING_MODEL and not history.is_empty() and DirAccess.dir_exists_absolute("user://events"):
+		rebuild_all()   # ratings from an older model: replay every event once with the new one
+		load_error = ("" if load_error == "" else load_error + " ") + "Ratings were recalculated with the updated rating model (bigger steps, so they spread wider than before)."
+
+
+# ---------- Seasons ----------
+# The season an event belongs to, from the file name ("s5-mc2-r.xml" -> "Season 5"); files
+# named another way are grouped by the year they were run.
+var _season_rx := RegEx.create_from_string("(?i)^s(\\d+)[-_ ]")
+
+
+func season_of(ev: Dictionary) -> String:
+	var m := _season_rx.search(str(ev.get("file", "")))
+	if m != null:
+		return "Season %d" % int(m.get_string(1))
+	var t := int(ev.get("time", 0))
+	return Time.get_date_string_from_unix_time(t).left(4) if t > 0 else "Undated"
+
+
+# The series an event belongs to, from the code after the season in the file name
+# ("s5-mc2-r.xml" -> "mc" -> "Multiclass", names in Settings); "" when the name has no code.
+var _series_rx := RegEx.create_from_string("(?i)^s\\d+[-_ ]([a-z]+)\\d")
+
+
+func series_of(ev: Dictionary) -> String:
+	var m := _series_rx.search(str(ev.get("file", "")))
+	if m == null:
+		return ""
+	var code := m.get_string(1).to_lower()
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	return str(names.get(code, code.to_upper()))
+
+
+# Seasons in the order they started
+func seasons() -> Array:
+	var first := {}
+	for ev in history:
+		var s := season_of(ev)
+		if not first.has(s) or int(ev.get("time", 0)) < first[s]:
+			first[s] = int(ev.get("time", 0))
+	var out := first.keys()
+	out.sort_custom(func(a, b): return first[a] < first[b])
+	return out
 
 
 # ---------- Elo core ----------
@@ -33,9 +87,18 @@ func _key(driver: String, cls: String, sess: String) -> String:
 	return "%s|%s|%s" % [driver, cls, sess]
 
 
+# A new rating starts at START, or, when the driver already has a rating for the other session
+# of the same class (race for a first quali, quali for a first race), from that rating: someone
+# rated in races is not a complete unknown in qualifying. From then on each moves on its own.
 func _entry(k: String) -> Dictionary:
 	if not ratings.has(k):
-		ratings[k] = {"r": START, "d": 0}
+		var parts := k.rsplit("|", true, 2)
+		var start := START
+		if parts.size() == 3:
+			var other := "%s|%s|%s" % [parts[0], parts[1], "race" if parts[2] == "quali" else "quali"]
+			if ratings.has(other):
+				start = float(ratings[other]["r"])
+		ratings[k] = {"r": start, "d": 0}
 	return ratings[k]
 
 
@@ -85,8 +148,8 @@ func parse_results(path: String) -> Dictionary:
 	var out := {
 		"Qualify": [], "Race": [],
 		"Notes": {
-			"Qualify": {"inc": {}, "pens": {}},
-			"Race": {"inc": {}, "pens": {}},
+			"Qualify": {"inc": {}, "pens": {}, "inc_ev": []},
+			"Race": {"inc": {}, "pens": {}, "inc_ev": []},
 		},
 	}
 	var p := XMLParser.new()
@@ -145,17 +208,15 @@ func parse_results(path: String) -> Dictionary:
 						var other := m.get_string(3)
 						var k := who + "|" + other
 						if incident_et - float(last_inc.get(k, -1000.0)) > INCIDENT_GAP:
-							var inc: Dictionary = out["Notes"][session]["inc"]
-							var e: Dictionary = inc.get(who, {"veh": 0, "env": 0})
 							var kind := "veh" if other.begins_with("another vehicle") else "env"
-							e[kind] += 1
-							inc[who] = e
+							out["Notes"][session]["inc_ev"].append([who, kind, incident_et])   # counted at session end
 						last_inc[k] = incident_et
 			XMLParser.NODE_ELEMENT_END:
 				if driver_depth != -1 and depth == driver_depth:
 					out[session].append(driver)
 					driver_depth = -1
 				elif session != "" and depth == session_depth:
+					_count_incidents(out, session)
 					session = ""
 					session_depth = -1
 					last_inc.clear()
@@ -163,6 +224,25 @@ func parse_results(path: String) -> Dictionary:
 				in_incident = false
 				depth -= 1
 	return out
+
+
+# Contacts after a driver's own chequered flag (celebrating into walls, cool-down lap bumps) do
+# not count. Incidents come before the drivers in the file, so they are counted here, at the end
+# of the session, once every driver's finish time is known. Non-finishers keep everything.
+func _count_incidents(out: Dictionary, session: String) -> void:
+	var fin := {}
+	for d in out[session]:
+		var ft := float(d.get("FinishTime", "0"))
+		if ft > 0.0 and d.has("Name"):
+			fin[d["Name"]] = ft
+	var inc := {}
+	for ev in out["Notes"][session]["inc_ev"]:
+		if fin.has(ev[0]) and float(ev[2]) > fin[ev[0]]:
+			continue
+		var e: Dictionary = inc.get(ev[0], {"veh": 0, "env": 0})
+		e[ev[1]] += 1
+		inc[ev[0]] = e
+	out["Notes"][session]["inc"] = inc
 
 
 func _valid(d: Dictionary, section: String) -> bool:
@@ -244,6 +324,12 @@ func _stats(parsed: Dictionary, section: String) -> Dictionary:
 
 
 # ---------- Drafts (review step before rating) ----------
+# A file with no race and no qualifying result (practice or warm-up only) is never rated or
+# stored: practice laps are not a reliable picture of pace, fuel or tyre use.
+func has_sessions(draft: Dictionary) -> bool:
+	return not draft.get("orders", {}).is_empty()
+
+
 # grid_fallback: use ClassGridPos from the race file as quali when the file has no quali section
 func build_draft(path: String, grid_fallback := false) -> Dictionary:
 	var parsed := parse_results(path)
@@ -327,7 +413,7 @@ func _resolved_stats(stats: Dictionary) -> Dictionary:
 
 # Call after the draft has been reviewed/edited
 func confirm_draft(draft: Dictionary) -> void:
-	if processed.has(draft["hash"]):
+	if processed.has(draft["hash"]) or not has_sessions(draft):
 		return
 	_apply(draft)
 	archive_xml(draft)
@@ -682,7 +768,7 @@ func export_xlsx(path: String) -> Error:
 		var rank := 1
 		for r in leaderboard(b[0], b[1]):
 			rows.append([rank, r["name"], roundi(r["r"]), int(r["d"]),
-				"settling" if r["d"] < K_RAMP_DUELS else ""])
+				"settling" if r["d"] < SETTLED_DUELS else ""])
 			rank += 1
 		sheets.append({
 			"name": "%s %s" % [b[0], b[1]],
@@ -801,26 +887,50 @@ func _sheet_xml(sheet: Dictionary) -> String:
 
 
 # ---------- Persistence ----------
+# Written to a temporary file first and then swapped in, so a crash or power cut in the middle
+# of saving cannot leave a half-written elo.json behind.
 func save_ratings() -> void:
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	revision += 1
+	var tmp := SAVE_PATH + ".tmp"
+	var f := FileAccess.open(tmp, FileAccess.WRITE)
+	if f == null:
+		push_error("Could not save ratings (error %d)" % FileAccess.get_open_error())
+		return
 	f.store_string(JSON.stringify({
 		"ratings": ratings,
 		"processed": processed,
 		"aliases": aliases,
 		"history": history,
+		"model": RATING_MODEL,
 	}))
 	f.close()
+	if DirAccess.rename_absolute(tmp, SAVE_PATH) != OK:
+		# some systems refuse to rename over an existing file: remove it, then rename
+		DirAccess.remove_absolute(SAVE_PATH)
+		DirAccess.rename_absolute(tmp, SAVE_PATH)
 
 
+# If elo.json cannot be read, it is kept aside as elo.unreadable-<time>.json (never overwritten
+# by the next save) and the backup from the last Recompute all is used instead, if there is one.
 func load_ratings() -> void:
 	if not FileAccess.file_exists(SAVE_PATH):
 		return
 	var data = JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
+	if not data is Dictionary:
+		var keep := "user://elo.unreadable-%s.json" % Time.get_datetime_string_from_system().replace(":", "-")
+		DirAccess.copy_absolute(SAVE_PATH, keep)
+		load_error = "Your ratings file could not be read; a copy was kept as %s." % keep.get_file()
+		if FileAccess.file_exists("user://elo.backup.json"):
+			data = JSON.parse_string(FileAccess.get_file_as_string("user://elo.backup.json"))
+			if data is Dictionary:
+				load_error += " The backup from the last Recompute all was loaded instead; press Recompute all to bring it up to date."
 	if data is Dictionary:
 		ratings = data.get("ratings", {})
 		processed = data.get("processed", {})
 		aliases = data.get("aliases", {})
 		history = data.get("history", [])
+		_model_loaded = int(data.get("model", 1))
+	revision += 1
 
 # ---------- XML archive ----------
 # Every confirmed result file is copied here so it can be re-read later (new stats, tracks, etc.).
@@ -912,6 +1022,9 @@ func import_training(path: String) -> String:
 	if processed.has(file_hash):
 		return "duplicate"
 	var fp := Fingerprint.extract(path, true)
+	var parsed := parse_results(path)
+	if parsed["Race"].is_empty() and parsed["Qualify"].is_empty():
+		return "practice only"
 	if not fp.has("race") and not fp.has("quali"):
 		return "no data"
 	var draft := {

@@ -15,12 +15,15 @@ const VIEWS := [
 	["reports", "Reports", "League reports. Each one can be exported to Excel."],
 	["profiles", "Profiles", "Lap-data fingerprints of drivers, cars and tracks, and the telemetry track layouts."],
 	["predict", "Predict", "Monte Carlo forecast of qualifying and the race."],
+	["settings", "Settings", "League settings: rank names and limits, standings points, grading. Saved in league_settings.json in the app's data folder."],
 ]
 
 # frame
 var status := Label.new()
 var confirm_dialog := ConfirmationDialog.new()
 var nav_buttons := {}               # view key -> sidebar Button
+var progress := ProgressBar.new()   # status bar, shown while files are being read
+var busy := false                   # an import is running: further drops wait
 var view_title := Label.new()
 var view_sub := Label.new()
 var drop_hint := VBoxContainer.new()   # shown on Review while no file is loaded
@@ -48,6 +51,7 @@ var driver_view := ProfileView.new()
 var reports_view := ReportsView.new()
 var predict_view := PredictView.new()
 var profiles_view := ProfilesView.new()
+var settings_view := SettingsView.new()
 
 # batch import
 var type_dialog := AcceptDialog.new()
@@ -66,7 +70,7 @@ var auto_btn := Button.new()
 var pending: Array = []        # dropped files waiting for the league / training answer
 var queue: Array = []          # league files still to review in this batch
 var batch_active := false
-var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}}
+var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": []}
 
 
 func _ready() -> void:
@@ -128,6 +132,8 @@ func _ready() -> void:
 		"Ratings, history and events in one workbook, saved to Documents."))
 	nav.add_child(_side_btn("Re-read archived XML", _reread,
 		"Read the archived result files again, so newer lap-data measures are filled in."))
+	nav.add_child(_side_btn("Back up data", _backup,
+		"Save everything (ratings, events, archived results, track profiles, settings) in one .zip in Documents."))
 
 	# main column: title, the screen, status bar
 	var main := VBoxContainer.new()
@@ -156,8 +162,16 @@ func _ready() -> void:
 	main.add_child(status_bar)
 	status.theme_type_variation = "Muted"
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status.text = "Ready."
-	status_bar.add_child(status)
+	status.text = "Ready." if Elo.load_error == "" else Elo.load_error
+	status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var status_row := HBoxContainer.new()
+	status_row.add_theme_constant_override("separation", 16)
+	status_bar.add_child(status_row)
+	status_row.add_child(status)
+	progress.custom_minimum_size = Vector2(260, 0)
+	progress.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	progress.visible = false
+	status_row.add_child(progress)
 
 	# review view
 	review_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -226,6 +240,12 @@ func _ready() -> void:
 	predict_view.notice.connect(_on_notice)
 	root.add_child(predict_view)
 
+	# settings view
+	settings_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	settings_view.notice.connect(_on_notice)
+	settings_view.saved.connect(_data_changed)
+	root.add_child(settings_view)
+
 	# recompute confirmation
 	confirm_dialog.dialog_text = "Rebuild every rating from the saved events, oldest to newest?\nThe current ratings are backed up first."
 	confirm_dialog.confirmed.connect(_recompute)
@@ -280,6 +300,9 @@ func _show_view(view: String) -> void:
 	reports_view.visible = view == "reports"
 	profiles_view.visible = view == "profiles"
 	predict_view.visible = view == "predict"
+	settings_view.visible = view == "settings"
+	if view == "settings":
+		settings_view.refresh()
 	if view == "ratings":
 		_draw_ratings()
 	elif view == "drivers":
@@ -307,6 +330,30 @@ func _btn(text: String, action: Callable) -> Button:
 	b.text = text
 	b.pressed.connect(action)
 	return b
+
+
+# ---------- Work off the main thread ----------
+# Runs `work` (reading and analysing files) on a separate thread while the window keeps
+# redrawing, and returns its result. Saving and rating stay on the main thread.
+func _in_background(work: Callable) -> Variant:
+	var t := Thread.new()
+	t.start(work)
+	while t.is_alive():
+		await get_tree().process_frame
+	return t.wait_to_finish()
+
+
+func _progress(done: int, total: int, text: String) -> void:
+	busy = true
+	progress.visible = true
+	progress.max_value = maxi(total, 1)
+	progress.value = done
+	status.text = text
+
+
+func _progress_done() -> void:
+	busy = false
+	progress.visible = false
 
 
 func _side_btn(text: String, action: Callable, tip: String) -> Button:
@@ -340,6 +387,9 @@ func _margins(m: MarginContainer, left: int, top: int, right: int, bottom: int) 
 # One file, several files or whole folders can be dropped. Files are handled oldest first
 # (their names start with a timestamp), after asking whether they are league or training data.
 func _on_files_dropped(files: PackedStringArray) -> void:
+	if busy:
+		status.text = "Still reading the previous files; drop these again when the progress bar is gone."
+		return
 	var csv_paths := Elo.collect_files(files, ".csv")
 	var paths := Elo.collect_xml(files)
 	if not csv_paths.is_empty():   # MoTeC telemetry exports become track profiles
@@ -428,7 +478,7 @@ func _start_motec(paths: Array) -> void:
 		class_pick.add_item("Choose the class...")
 		var cls_guess := _guess_class(file_name, motec_classes)
 		for i in motec_classes.size():
-			class_pick.add_item(str(motec_classes[i]))
+			class_pick.add_item(LeagueSettings.label(str(motec_classes[i])))
 			if str(motec_classes[i]) == cls_guess:
 				class_pick.select(i + 1)
 		class_pick.item_selected.connect(func(_i: int): _validate_motec())
@@ -496,9 +546,9 @@ func _import_motec() -> void:
 	var failed := PackedStringArray()
 	for i in motec_items.size():
 		var item: Dictionary = motec_items[i]
-		status.text = "Reading telemetry %d of %d: %s" % [i + 1, motec_items.size(), str(item["path"]).get_file()]
-		await get_tree().process_frame
-		var prof := MotecProfile.analyze(item["path"])
+		_progress(i, motec_items.size(), "Reading telemetry %d of %d: %s" % [i + 1, motec_items.size(), str(item["path"]).get_file()])
+		var path: String = item["path"]
+		var prof: Dictionary = await _in_background(func(): return MotecProfile.analyze(path))
 		if prof.has("error"):
 			failed.append("%s (%s)" % [str(item["path"]).get_file(), prof["error"]])
 			continue
@@ -509,6 +559,7 @@ func _import_motec() -> void:
 		else:
 			saved += 1
 	motec_items.clear()
+	_progress_done()
 	var text := "Track profiles: %d saved, %d skipped because a faster lap was already stored." % [saved, kept]
 	if not failed.is_empty():
 		text += " Could not use: " + ", ".join(failed) + "."
@@ -532,7 +583,7 @@ func _start_batch(kind: String) -> void:
 		_import_training(paths)
 		return
 	queue = paths
-	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0, "suspects": {}}
+	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": []}
 	batch_active = true
 	_next_in_queue()
 
@@ -542,19 +593,26 @@ func _import_training(paths: Array) -> void:
 	var added := 0
 	var known := 0
 	var unusable := PackedStringArray()
+	var practice := PackedStringArray()
 	for i in paths.size():
-		status.text = "Reading training file %d of %d..." % [i + 1, paths.size()]
-		await get_tree().process_frame
-		match Elo.import_training(paths[i]):
+		_progress(i, paths.size(), "Reading training file %d of %d..." % [i + 1, paths.size()])
+		var path: String = paths[i]
+		var verdict: String = await _in_background(func(): return Elo.import_training(path))
+		match verdict:
 			"added":
 				added += 1
 			"duplicate":
 				known += 1
+			"practice only":
+				practice.append(str(paths[i]).get_file())
 			_:
 				unusable.append(str(paths[i]).get_file())
 	var text := "Training data: %d added, %d already imported." % [added, known]
 	if not unusable.is_empty():
 		text += " No usable lap data in: " + ", ".join(unusable)
+	if not practice.is_empty():
+		text += " Skipped, practice or warm-up only: " + ", ".join(practice)
+	_progress_done()
 	status.text = text
 	_data_changed()
 
@@ -564,7 +622,12 @@ func _import_training(paths: Array) -> void:
 func _next_in_queue() -> void:
 	while not queue.is_empty():
 		var path: String = queue.pop_front()
-		var d := Elo.build_draft(path, grid_check.button_pressed)
+		_progress(batch["total"] - queue.size() - 1, batch["total"], "Checking %s (%d left)..." % [path.get_file(), queue.size()])
+		var grid_q := grid_check.button_pressed
+		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path, grid_q))
+		if not Elo.has_sessions(d):   # practice / warm-up only: never rated
+			batch["practice"].append(path.get_file())
+			continue
 		if d["duplicate"]:
 			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
 				batch["updated"] += 1
@@ -573,6 +636,7 @@ func _next_in_queue() -> void:
 			status.text = "Checking files... %d left." % queue.size()
 			await get_tree().process_frame
 			continue
+		busy = false   # waiting for the review: the bar stays as a batch counter
 		draft = d
 		_show_view("review")
 		_rebuild()
@@ -602,9 +666,12 @@ func _auto_confirm_rest() -> void:
 	confirm_btn.disabled = true
 	while not queue.is_empty():
 		var path: String = queue.pop_front()
-		status.text = "Rating %s (%d left)..." % [path.get_file(), queue.size()]
-		await get_tree().process_frame
-		var d := Elo.build_draft(path, grid_check.button_pressed)
+		_progress(batch["total"] - queue.size() - 1, batch["total"], "Rating %s (%d left)..." % [path.get_file(), queue.size()])
+		var grid_q := grid_check.button_pressed
+		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path, grid_q))
+		if not Elo.has_sessions(d):   # practice / warm-up only: never rated
+			batch["practice"].append(path.get_file())
+			continue
 		if d["duplicate"]:
 			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
 				batch["updated"] += 1
@@ -618,6 +685,7 @@ func _auto_confirm_rest() -> void:
 
 
 func _finish_batch() -> void:
+	_progress_done()
 	batch_active = false
 	skip_btn.visible = false
 	auto_btn.visible = false
@@ -625,6 +693,8 @@ func _finish_batch() -> void:
 	_rebuild()
 	status.text = "Batch done: %d rated, %d old event(s) completed with stats and lap data, %d skipped or already complete. If any file was older than events you had already rated, press Recompute all." % [
 		batch["rated"], batch["updated"], batch["skipped"]]
+	if not batch.get("practice", []).is_empty():
+		status.text += "\nSkipped, no race or qualifying session (practice and warm-up are not used): " + ", ".join(PackedStringArray(batch["practice"]))
 	var sus: Dictionary = batch.get("suspects", {})
 	if not sus.is_empty():
 		var parts := PackedStringArray()
@@ -763,18 +833,22 @@ func _draw_ratings() -> void:
 	_clear(ratings_view)
 	for b in Elo.boards():
 		var rows := []
+		var colours := []
 		var rank := 1
 		for row in Elo.leaderboard(b[0], b[1]):
-			rows.append([rank, row["name"], roundi(row["r"]), int(row["d"]),
-				"Settling" if row["d"] < Elo.K_RAMP_DUELS else ""])
+			var rk := Ranks.of(row["name"], b[0])
+			rows.append([rank, row["name"], roundi(row["r"]), int(row["d"]), rk["label"],
+				"Settling" if row["d"] < Elo.SETTLED_DUELS else ""])
+			colours.append(rk["color"])
 			rank += 1
 		ratings_view.add_child(TableView.build({
-			"note": "Settling = fewer than %d duels so far, so the rating still moves quickly." % int(Elo.K_RAMP_DUELS),
-			"headers": ["#", "Driver", "Rating", "Duels", "Status"],
+			"note": "Settling = fewer than %d duels so far, so the rating still moves quickly. Rank is for the whole class (race and quali together, see Reports > Ranks and Settings)." % int(Elo.SETTLED_DUELS),
+			"headers": ["#", "Driver", "Rating", "Duels", "Rank", "Status"],
 			"rows": rows,
-			"tips": ["Place on the leaderboard.", "", "Elo rating.", "Head-to-head comparisons counted so far.", ""],
+			"tips": ["Place on the leaderboard.", "", "Elo rating.", "Head-to-head comparisons counted so far.", "League rank in this class.", ""],
+			"cell_colors": {4: colours},
 		}))
-		ratings_view.set_tab_title(ratings_view.get_tab_count() - 1, "%s %s" % [b[0], b[1]])
+		ratings_view.set_tab_title(ratings_view.get_tab_count() - 1, LeagueSettings.label("%s %s" % [b[0], b[1]]))
 	if ratings_view.get_tab_count() == 0:
 		var empty := Label.new()
 		empty.text = "No ratings yet. Confirm a result file first."
@@ -813,8 +887,68 @@ func _data_changed() -> void:
 		predict_view.refresh()
 
 
+# ---------- Backup ----------
+# One zip with the whole data folder except Godot's own logs and caches. To restore: close the
+# app, unzip into the data folder (Project > Open User Data Folder in the editor), start again.
+func _backup() -> void:
+	if busy:
+		return
+	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	var path := "%s/lmu_elo_backup_%s.zip" % [dir, Time.get_datetime_string_from_system().replace(":", "-")]
+	_progress(0, 1, "Backing up...")
+	var result: Array = await _in_background(func(): return _write_backup(path))
+	_progress_done()
+	if result[0] == OK:
+		status.text = "Backed up %d files to %s" % [result[1], path]
+		OS.shell_open(dir)
+	else:
+		status.text = "Backup failed (error %d)." % result[0]
+
+
+# Runs on the background thread: [error, files written]
+static func _write_backup(path: String) -> Array:
+	var zip := ZIPPacker.new()
+	var err := zip.open(path)
+	if err != OK:
+		return [err, 0]
+	var count := 0
+	var todo := [""]
+	var root := ProjectSettings.globalize_path("user://")
+	while not todo.is_empty():
+		var rel: String = todo.pop_back()
+		var abs_dir := root.path_join(rel)
+		for d in DirAccess.get_directories_at(abs_dir):
+			if rel == "" and d in ["logs", "shader_cache", "objectdb_snapshots", "vulkan"]:
+				continue
+			todo.append(rel.path_join(d))
+		for f in DirAccess.get_files_at(abs_dir):
+			if f.ends_with(".tmp"):
+				continue
+			zip.start_file(rel.path_join(f))
+			zip.write_file(FileAccess.get_file_as_bytes(abs_dir.path_join(f)))
+			zip.close_file()
+			count += 1
+	zip.close()
+	return [OK, count]
+
+
 func _reread() -> void:
-	status.text = "Refreshed %d events." % Elo.refresh_from_archive()
+	if busy:
+		return
+	var files := []
+	if DirAccess.dir_exists_absolute(Elo.XML_DIR):
+		for f in DirAccess.get_files_at(Elo.XML_DIR):
+			if f.ends_with(".xml"):
+				files.append("%s/%s" % [Elo.XML_DIR, f])
+	var n := 0
+	for i in files.size():
+		_progress(i, files.size(), "Re-reading archived results %d of %d..." % [i + 1, files.size()])
+		var path: String = files[i]
+		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path))
+		if Elo.attach_stats(d):   # saving stays on the main thread
+			n += 1
+	_progress_done()
+	status.text = "Refreshed %d events." % n
 	_data_changed()
 
 

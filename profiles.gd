@@ -20,15 +20,30 @@ const DEFAULT_LAP_S := 110.0
 
 var days := []     # chronological: {"date", "course", "track", "race", "quali"} (names resolved)
 var hist := {}     # "cls|name" -> [{"date", "course", "r": {...}, "q": {...}}], chronological
+var revision := 0  # goes up on every rebuild, so caches elsewhere know the data changed
 
 
 func _ready() -> void:
 	rebuild()
 
 
+# Rebuilds only if the ratings data changed since the last build (screens call this on every
+# visit; a full rebuild takes ~0.15 s on four seasons of results).
+func ensure() -> void:
+	if _built_for != Elo.revision:
+		rebuild()
+
+
+var _built_for := -1   # Elo.revision the current build was made from
+
+
 func rebuild() -> void:
+	_built_for = Elo.revision
+	revision += 1
 	days.clear()
 	hist.clear()
+	if not DirAccess.dir_exists_absolute("user://events"):
+		return   # nothing imported yet (first start)
 	var by_date := {}
 	# events in the order they happened, so a quali is met before its race
 	var drafts := []
@@ -272,14 +287,20 @@ func classes() -> Array:
 # ---------- Cars ----------
 
 # One row per car model: how it compares with the class median (all drivers, all events).
+# Car models spelled slightly differently between game versions ("Genesis GMR-001" and
+# "Genesis GMR001") count as one; the first spelling seen is shown.
 func car_rows(cls: String) -> Array:
 	var acc := {}
+	var shown := {}   # car key -> name shown
 	for day in days:
 		for nm in day["race"].get("drivers", {}):
 			var r: Dictionary = day["race"]["drivers"][nm]
 			if r["cls"] != cls:
 				continue
-			var a: Dictionary = acc.get(r["car"], {"n": 0, "pace": 0.0, "top": 0.0, "nt": 0, "fuel": 0.0, "nf": 0, "wear": 0.0, "nw": 0, "q": 0.0, "nq": 0})
+			var ck := DriverGrades.car_key(str(r["car"]))
+			if not shown.has(ck):
+				shown[ck] = r["car"]
+			var a: Dictionary = acc.get(ck, {"n": 0, "pace": 0.0, "top": 0.0, "nt": 0, "fuel": 0.0, "nf": 0, "wear": 0.0, "nw": 0, "q": 0.0, "nq": 0})
 			a["n"] += 1
 			a["pace"] += r.get("pace_rel", 0.0)
 			if r.has("top_rel"):
@@ -291,20 +312,23 @@ func car_rows(cls: String) -> Array:
 			if r.has("wear_rel"):
 				a["wear"] += r["wear_rel"]
 				a["nw"] += 1
-			acc[r["car"]] = a
+			acc[ck] = a
 		for nm in day["quali"].get("drivers", {}):
 			var q: Dictionary = day["quali"]["drivers"][nm]
 			if q["cls"] != cls:
 				continue
-			var a2: Dictionary = acc.get(q["car"], {"n": 0, "pace": 0.0, "top": 0.0, "nt": 0, "fuel": 0.0, "nf": 0, "wear": 0.0, "nw": 0, "q": 0.0, "nq": 0})
+			var ck2 := DriverGrades.car_key(str(q["car"]))
+			if not shown.has(ck2):
+				shown[ck2] = q["car"]
+			var a2: Dictionary = acc.get(ck2, {"n": 0, "pace": 0.0, "top": 0.0, "nt": 0, "fuel": 0.0, "nf": 0, "wear": 0.0, "nw": 0, "q": 0.0, "nq": 0})
 			a2["q"] += q.get("rel", 0.0)
 			a2["nq"] += 1
-			acc[q["car"]] = a2
+			acc[ck2] = a2
 	var rows := []
 	for car in acc:
 		var a: Dictionary = acc[car]
 		rows.append({
-			"car": car, "n": a["n"],
+			"car": shown[car], "n": a["n"],
 			"pace": a["pace"] / maxf(a["n"], 1),
 			"qpace": a["q"] / maxf(a["nq"], 1),
 			"top": a["top"] / maxf(a["nt"], 1),

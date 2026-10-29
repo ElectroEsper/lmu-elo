@@ -248,6 +248,12 @@ static func build() -> Theme:
 	t.set_stylebox("panel", "TooltipPanel", pop)
 	t.set_color("font_color", "TooltipLabel", TEXT)
 
+	# ---------- Progress bar (status bar, while files are read) ----------
+	t.set_stylebox("background", "ProgressBar", _box(SURFACE_2, 4))
+	t.set_stylebox("fill", "ProgressBar", _box(ACCENT, 4))
+	t.set_color("font_color", "ProgressBar", TEXT)
+	t.set_font_size("font_size", "ProgressBar", 12)
+
 	# ---------- Scroll bars, separators ----------
 	for type in ["VScrollBar", "HScrollBar"]:
 		var track := StyleBoxFlat.new()

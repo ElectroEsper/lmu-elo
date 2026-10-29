@@ -31,7 +31,7 @@ func refresh() -> void:
 	profiles = TrackStore.list()
 	picker.clear()
 	for p in profiles:
-		picker.add_item("%s - %s" % [p["course"], p["class"]])
+		picker.add_item(LeagueSettings.label("%s - %s" % [p["course"], p["class"]]))
 	for i in picker.item_count:
 		if picker.get_item_text(i) == keep:
 			picker.select(i)
@@ -71,7 +71,7 @@ func _show() -> void:
 	var box := VBoxContainer.new()
 	var title := Label.new()
 	title.text = "%s, %s: %.3f km, lap %s, average %.1f km/h, top %d km/h, %d corners" % [
-		p["course"], p["class"], float(lap["length_m"]) / 1000.0, _lap_text(float(lap["time_s"])),
+		p["course"], LeagueSettings.label(str(p["class"])), float(lap["length_m"]) / 1000.0, _lap_text(float(lap["time_s"])),
 		float(lap["avg_kmh"]), int(lap["top_kmh"]), p["corners"].size()]
 	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	title.custom_minimum_size = Vector2(480, 0)
@@ -113,7 +113,7 @@ func _grades_panel(p: Dictionary) -> Control:
 	scroll.add_child(box)
 	var note := Label.new()
 	note.text = "Each grade compares %s with the other tracks known for %s: 5 = the most (most time at full throttle, hardest braking, thirstiest...). Tracks with nearly equal values share a grade (Basis shows which). With fewer than %d tracks for the class, a fixed scale is used instead. Hover a characteristic for what it measures." % [
-		p["course"], p["class"], TrackGrades.MIN_RANKED]
+		p["course"], LeagueSettings.label(str(p["class"])), TrackGrades.MIN_RANKED]
 	if not p.has("traits"):
 		note.text += " This profile was built by an older version: drop its CSV again to get the telemetry grades."
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART

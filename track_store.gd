@@ -29,13 +29,24 @@ static func save(profile: Dictionary) -> String:
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_string(JSON.stringify(profile))
 	f.close()
+	revision += 1
+	_list_cache = null
 	return verdict
 
 
 # All stored profiles, sorted by course and class
+static var revision := 0         # goes up whenever a profile is saved
+static var _list_cache = null    # the profiles as last read from disk
+
+
+# All stored profiles, sorted by track and class. Read from disk once and kept until a profile
+# is saved (reading the 27 files took ~35 ms, and a driver profile asked for them dozens of times).
 static func list() -> Array:
+	if _list_cache != null:
+		return _list_cache
 	var out := []
 	if not DirAccess.dir_exists_absolute(DIR):
+		_list_cache = out
 		return out
 	for f in DirAccess.get_files_at(DIR):
 		if not f.ends_with(".json"):
@@ -44,4 +55,5 @@ static func list() -> Array:
 		if p is Dictionary and p.has("map") and p.has("course"):
 			out.append(p)
 	out.sort_custom(func(a, b): return (str(a["course"]) + str(a["class"])) < (str(b["course"]) + str(b["class"])))
+	_list_cache = out
 	return out

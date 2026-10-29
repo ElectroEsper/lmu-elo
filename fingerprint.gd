@@ -19,7 +19,7 @@ extends RefCounted
 ## tl = track-limit events per lap, con = contacts with other cars per lap,
 ## cons = lap-time spread in % of the median clean lap, wear_km / fuel_km are % per km.
 
-const VERSION := 3
+const VERSION := 5   # 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
 const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5 median are not "clean"
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
@@ -62,7 +62,7 @@ static func extract(path: String, training := false) -> Dictionary:
 				if session == "" and tag in SESSION_TAGS:
 					session = tag
 					session_depth = depth
-					cur = {"drivers": [], "minutes": 0, "tl": {}, "con": {}, "pens": {}}
+					cur = {"drivers": [], "minutes": 0, "tl": {}, "con": {}, "con_ev": [], "pens": {}}
 					sessions[tag] = cur
 				elif session == "" and (tag == "TrackVenue" or tag == "TrackCourse" or tag == "TrackLength"):
 					header_field = tag
@@ -125,8 +125,7 @@ static func extract(path: String, training := false) -> Dictionary:
 						var who2 := m.get_string(1)
 						var key := who2 + "|" + m.get_string(3)
 						if incident_et - float(last_inc.get(key, -1000.0)) > INCIDENT_GAP:
-							var con: Dictionary = cur["con"]
-							con[who2] = con.get(who2, 0) + 1
+							cur["con_ev"].append([who2, incident_et])   # counted at the end of the session
 						last_inc[key] = incident_et
 			XMLParser.NODE_ELEMENT_END:
 				if in_lap and depth == driver_depth + 1:
@@ -135,6 +134,7 @@ static func extract(path: String, training := false) -> Dictionary:
 					cur["drivers"].append(driver)
 					driver_depth = -1
 				elif session != "" and depth == session_depth:
+					_drop_after_finish(cur)
 					session = ""
 					session_depth = -1
 					last_inc.clear()
@@ -174,6 +174,30 @@ static func extract(path: String, training := false) -> Dictionary:
 
 
 # Same rows without driver names.
+# Contacts and track-limit events after a driver has taken the chequered flag (celebrations,
+# crashing into walls on the cool-down lap) are not counted against them. Incidents come before
+# the drivers in the file, so this runs at the end of the session, once finish times are known.
+# Drivers who did not finish keep everything.
+static func _drop_after_finish(cur: Dictionary) -> void:
+	var fin := {}
+	for d in cur["drivers"]:
+		var ft := float(d.get("FinishTime", "0"))
+		if ft > 0.0 and d.has("Name"):
+			fin[d["Name"]] = ft
+	var con := {}
+	for ev in cur["con_ev"]:
+		if fin.has(ev[0]) and float(ev[1]) > fin[ev[0]]:
+			continue
+		con[ev[0]] = con.get(ev[0], 0) + 1
+	cur["con"] = con
+	for who in cur["tl"]:
+		if not fin.has(who):
+			continue
+		for et in cur["tl"][who].keys():
+			if float(et) > fin[who]:
+				cur["tl"][who].erase(et)
+
+
 static func _anonymous(rows: Dictionary) -> Dictionary:
 	var out := {}
 	var i := 1
@@ -257,7 +281,7 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		if wr >= 0.0:
 			x["wear"] = wr / km
 		if fuels.size() > MIN_LAPS:
-			x["fuel"] = _median(fuels) / km
+			x["fuel"] = _fuel_per_lap(fuels) / km
 		rows[nm] = m
 		raw[nm] = x
 
@@ -571,6 +595,21 @@ static func _wear_rate(series: Array) -> float:
 static func _attr(p: XMLParser, name: String) -> float:
 	var s := p.get_named_attribute_value_safe(name)
 	return s.to_float() if s.is_valid_float() else -1.0
+
+
+# The game logs fuel used per lap in coarse steps (in Hypercar, one step is about 7% of a lap's
+# fuel), so the median of a race snaps to one of two or three values and most drivers came out
+# at exactly the class median while a few landed a whole step away. The average of the normal
+# laps (refuels, pit laps and odd readings dropped) is far finer: 30 laps give 1/30 of a step.
+static func _fuel_per_lap(fuels: Array) -> float:
+	var mid := _median(fuels)
+	var sum := 0.0
+	var n := 0
+	for f in fuels:
+		if f >= 0.5 * mid and f <= 1.5 * mid:
+			sum += f
+			n += 1
+	return sum / n if n > 0 else mid
 
 
 static func _median(values: Array) -> float:

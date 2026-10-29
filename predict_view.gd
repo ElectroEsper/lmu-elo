@@ -198,19 +198,21 @@ func refresh() -> void:
 	if get_node_or_null("/root/Predict") == null or get_node_or_null("/root/Profiles") == null:
 		info.text = "The Predict / Profiles autoloads are not running. Check Project Settings > Globals > Autoload (names 'Profiles' and 'Predict', below 'Elo') and the Output panel for errors."
 		return
-	Profiles.rebuild()
+	Profiles.ensure()
 	var keep := _current_class()
 	class_pick.clear()
 	var seen := {}
 	for c in Profiles.classes():
 		seen[c] = true
-		class_pick.add_item(c)
+		class_pick.add_item(LeagueSettings.label(c))
+		class_pick.set_item_metadata(class_pick.item_count - 1, c)
 	for b in Elo.boards():
 		if b[1] == "race" and not seen.has(b[0]):
 			seen[b[0]] = true
-			class_pick.add_item(b[0])
+			class_pick.add_item(LeagueSettings.label(b[0]))
+			class_pick.set_item_metadata(class_pick.item_count - 1, b[0])
 	for i in class_pick.item_count:
-		if class_pick.get_item_text(i) == keep:
+		if str(class_pick.get_item_metadata(i)) == keep:
 			class_pick.select(i)
 	var keep_track := track_pick.get_item_text(track_pick.selected) if track_pick.item_count > 0 and track_pick.selected >= 0 else ""
 	track_pick.clear()
@@ -231,7 +233,7 @@ func refresh() -> void:
 func _current_class() -> String:
 	if class_pick.item_count == 0 or class_pick.selected < 0:
 		return ""
-	return class_pick.get_item_text(class_pick.selected)
+	return str(class_pick.get_item_metadata(class_pick.selected))   # the real class, not its label
 
 
 func _label(text: String) -> Label:

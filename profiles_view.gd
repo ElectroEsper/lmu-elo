@@ -203,13 +203,14 @@ func refresh() -> void:
 	if get_node_or_null("/root/Profiles") == null:
 		legend.text = "The Profiles autoload is not running. Check Project Settings > Globals > Autoload (name 'Profiles', below 'Elo')."
 		return
-	Profiles.rebuild()
-	var keep := class_pick.get_item_text(class_pick.selected) if class_pick.selected >= 0 and class_pick.item_count > 0 else ""
+	Profiles.ensure()
+	var keep := str(class_pick.get_item_metadata(class_pick.selected)) if class_pick.selected >= 0 and class_pick.item_count > 0 else ""
 	class_pick.clear()
 	for c in Profiles.classes():
-		class_pick.add_item(c)
+		class_pick.add_item(LeagueSettings.label(c))
+		class_pick.set_item_metadata(class_pick.item_count - 1, c)   # the real class
 	for i in class_pick.item_count:
-		if class_pick.get_item_text(i) == keep:
+		if str(class_pick.get_item_metadata(i)) == keep:
 			class_pick.select(i)
 	_fill()
 
@@ -221,7 +222,7 @@ func _fill() -> void:
 			_render(t)
 		legend.text = "No lap-data fingerprints yet. Drop result XMLs (or a whole folder) on the window and choose League results or Training data; files imported earlier are completed automatically."
 		return
-	var cls := class_pick.get_item_text(class_pick.selected)
+	var cls := str(class_pick.get_item_metadata(class_pick.selected))
 	legend.text = "Percent columns compare with the class median (negative pace = quicker). Few-race drivers are pulled toward the field, so early numbers are cautious. Click a column header to sort. Hover a header or a tag to see what it means. Cars and tracks also use training data."
 	_fill_drivers(cls)
 	_fill_cars(cls)

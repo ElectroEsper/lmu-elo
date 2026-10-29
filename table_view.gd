@@ -16,7 +16,7 @@ static func build(t: Dictionary) -> Control:
 
 	if t.get("note", "") != "":
 		var note := Label.new()
-		note.text = t["note"]
+		note.text = LeagueSettings.label(t["note"])
 		note.theme_type_variation = "Muted"
 		note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		note.custom_minimum_size = Vector2(480, 0)
@@ -50,6 +50,7 @@ static func build(t: Dictionary) -> Control:
 	table.custom_minimum_size = Vector2(0, 180)
 	table.grade_col = int(t.get("grade_col", -1))
 	table.cell_tips = t.get("cell_tips", {})
+	table.cell_colors = t.get("cell_colors", {})
 	table.set_table(t["headers"], t["rows"], t.get("tips", []))
 	box.add_child(table)
 	return box

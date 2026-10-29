@@ -41,7 +41,8 @@ const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track te
 const B_WEAR := 0.1    # % pace per (tyre-wear z of driver x tyre-wear z of track): hard-on-tyres drivers lose at tyre-killer tracks
 const B_TOP := -0.1    # high-top-speed drivers gain at top-speed tracks
 const B_FUEL := 0.1    # thirsty drivers lose at fuel-hungry tracks
-const ELO_TO_PACE := -0.03   # fallback when a driver has no lap data: % pace per Elo point above 1500
+const ELO_TO_PACE := -0.009  # fallback when a driver has no lap data: % pace per Elo point above 1500
+                             # (was -0.03 before the rating model change spread ratings ~3.4x wider)
 const N_SIMS := 4000
 const BACKTEST_SIMS := 300
 const STRENGTHS := [0.5, 1.5]    # extra strengths tried for a kept upgrade (1.0 is the first test)
@@ -388,9 +389,14 @@ func run_backtest() -> Dictionary:
 		out["note"] = "Need at least 4 past races with lap data. Drop your XML folder to backfill fingerprints."
 		last_backtest = out
 		return out
+	# fixed random draws, so pressing Backtest twice gives the same numbers and settings compare fairly
+	rng.seed = 20261028
+	pit_rng.seed = 7
 	out["modes"]["Actual grid"] = await _score(races, Mode.ACTUAL_GRID, BACKTEST_SIMS, {})
 	out["modes"]["Predicted quali, then race"] = await _score(races, Mode.PREDICTED_QUALI, BACKTEST_SIMS, {})
 	out["modes"]["Race only (no grid)"] = await _score(races, Mode.RACE_ONLY, BACKTEST_SIMS, {})
+	rng.randomize()
+	pit_rng.randomize()
 	last_backtest = out
 	return out
 
@@ -435,7 +441,7 @@ func test_upgrades() -> Dictionary:
 			prm[u[0]] = v
 			var sc := await _score_both(races, prm, cache)
 			out["rows"].append({"name": "  %s at %.1f" % [u[1], v], "brier": sc["brier"], "ll": sc["ll"]})
-			if sc["brier"] < best_b:
+			if sc["brier"] < best_b - UPGRADE_MARGIN:   # 1.0 stays unless another strength is clearly better
 				best_b = sc["brier"]
 				best_v = v
 		keep[u[0]] = best_v
