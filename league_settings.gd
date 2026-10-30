@@ -29,6 +29,15 @@ const DEFAULTS := {
 	# own, and each driver's worst rounds are dropped (a missed round counts as 0 and is dropped first).
 	"drop_rounds": 1,
 	"series_names": {"sc": "Sprint", "mc": "Multiclass"},
+	# Race rules per series, from a season on (a later row for the same series takes over from its
+	# season): fuel / virtual-energy use and tyre wear multipliers set on the server, whether
+	# routine pit stops are part of the race, and stops the rules make compulsory.
+	# Used to put past races on the same x1 footing and for the pit-stop forecast.
+	"race_rules": [
+		{"series": "sc", "from": 1, "fuel": 1.0, "tyre": 1.0, "pits": false, "min_stops": 0},
+		{"series": "mc", "from": 1, "fuel": 2.0, "tyre": 2.0, "pits": true, "min_stops": 0},
+		{"series": "mc", "from": 4, "fuel": 2.0, "tyre": 1.0, "pits": true, "min_stops": 0},
+	],
 }
 
 # Rating model 2 spreads ratings about 3.4x wider around 1500 than model 1. Settings saved for
@@ -146,6 +155,23 @@ static func _escape(s: String) -> String:
 	for ch in s:
 		out += ("\\" + ch) if ch in "\\.^$|?*+()[]{}" else ch
 	return out
+
+
+# The rules a race of this series and season ran under: {"fuel", "tyre", "pits", "min_stops"}.
+# season 0 = the series' current rules (its latest row). A series without rules: x1, no stops.
+static func rules_for(series: String, season: int) -> Dictionary:
+	var best := {}
+	for r in get_value("race_rules"):
+		if not (r is Dictionary) or str(r.get("series", "")) != series:
+			continue
+		var from := int(r.get("from", 1))
+		if season > 0 and from > season:
+			continue
+		if best.is_empty() or from >= int(best.get("from", 1)):
+			best = r
+	return {"fuel": float(best.get("fuel", 1.0)), "tyre": float(best.get("tyre", 1.0)),
+		"pits": bool(best.get("pits", false)), "min_stops": int(best.get("min_stops", 0)),
+		"known": not best.is_empty()}
 
 
 static func points() -> Array:

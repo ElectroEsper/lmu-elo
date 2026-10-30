@@ -20,6 +20,9 @@ const VIEWS := [
 
 # frame
 var status := Label.new()
+var clear_btn := Button.new()   # empties the status bar
+var drop_note := ""             # files that could not be read at drop time, repeated in the summary
+const STATUS_LINES := 6         # the bar shows at most this many lines; hover it for the rest
 var confirm_dialog := ConfirmationDialog.new()
 var nav_buttons := {}               # view key -> sidebar Button
 var progress := ProgressBar.new()   # status bar, shown while files are being read
@@ -70,7 +73,7 @@ var auto_btn := Button.new()
 var pending: Array = []        # dropped files waiting for the league / training answer
 var queue: Array = []          # league files still to review in this batch
 var batch_active := false
-var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": []}
+var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": [], "unreadable": [], "empty": []}
 
 
 func _ready() -> void:
@@ -163,6 +166,7 @@ func _ready() -> void:
 	status.theme_type_variation = "Muted"
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	status.text = "Ready." if Elo.load_error == "" else Elo.load_error
+	_update_lap_data.call_deferred()
 	status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var status_row := HBoxContainer.new()
 	status_row.add_theme_constant_override("separation", 16)
@@ -172,6 +176,15 @@ func _ready() -> void:
 	progress.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	progress.visible = false
 	status_row.add_child(progress)
+	status.max_lines_visible = STATUS_LINES
+	status.mouse_filter = Control.MOUSE_FILTER_PASS
+	clear_btn.text = "Clear"
+	clear_btn.theme_type_variation = "SmallButton"
+	clear_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	clear_btn.tooltip_text = "Clear these messages."
+	clear_btn.visible = false
+	clear_btn.pressed.connect(func(): status.text = "")
+	status_row.add_child(clear_btn)
 
 	# review view
 	review_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -401,10 +414,63 @@ func _on_files_dropped(files: PackedStringArray) -> void:
 		status.text = "No .xml or .csv files found in what you dropped."
 		return
 	paths.sort_custom(func(a, b): return str(a).get_file() < str(b).get_file())
+	# Copied in right away: files dragged straight out of a .zip (or from a cloud folder) can be
+	# temporary copies that are gone by the time League / Training is picked.
+	var staged := _stage(paths)
+	paths = staged["paths"]
+	drop_note = _unreadable_note(staged["unreadable"]) if not staged["unreadable"].is_empty() else ""
+	if paths.is_empty():
+		status.text = _unreadable_note(staged["unreadable"])
+		return
+	if not staged["unreadable"].is_empty():
+		status.text = _unreadable_note(staged["unreadable"])
 	pending = paths
 	type_dialog.dialog_text = "%d file(s) dropped (%s to %s).\n\nLeague results are rated: their drivers feed ratings, profiles and predictions.\nTraining data only feeds track and car-model data: no driver is rated or stored." % [
 		paths.size(), str(paths[0]).get_file(), str(paths[paths.size() - 1]).get_file()]
 	type_dialog.popup_centered()
+
+
+const INCOMING := "user://incoming"
+
+
+# Copies dropped result files into user://incoming (cleared first). Returns {"paths": copies,
+# "unreadable": [file names that could not be read]}. Same-named files from different folders
+# each get their own subfolder, so none overwrites another.
+func _stage(paths: Array) -> Dictionary:
+	if DirAccess.dir_exists_absolute(INCOMING):
+		_clear_dir(INCOMING)
+	DirAccess.make_dir_recursive_absolute(INCOMING)
+	var out := []
+	var bad := []
+	var used := {}
+	for src in paths:
+		var fname: String = str(src).get_file()
+		var dir := INCOMING
+		var n := 2
+		while used.has(dir + "/" + fname):
+			dir = "%s/%d" % [INCOMING, n]
+			n += 1
+		DirAccess.make_dir_recursive_absolute(dir)
+		var dst := dir + "/" + fname
+		if not FileAccess.file_exists(str(src)) or DirAccess.copy_absolute(str(src), dst) != OK:
+			bad.append(fname)
+			continue
+		used[dst] = true
+		out.append(dst)
+	return {"paths": out, "unreadable": bad}
+
+
+func _clear_dir(path: String) -> void:
+	for sub in DirAccess.get_directories_at(path):
+		_clear_dir(path + "/" + sub)
+		DirAccess.remove_absolute(path + "/" + sub)
+	for f in DirAccess.get_files_at(path):
+		DirAccess.remove_absolute(path + "/" + f)
+
+
+func _unreadable_note(names: Array) -> String:
+	return "Could not read %d file(s): %s. If they were dragged straight out of a .zip, extract the zip first and drop the extracted files; files in a cloud folder (OneDrive...) must be downloaded to the computer." % [
+		names.size(), ", ".join(PackedStringArray(names))]
 
 
 # ---------- MoTeC telemetry: track profiles ----------
@@ -583,7 +649,7 @@ func _start_batch(kind: String) -> void:
 		_import_training(paths)
 		return
 	queue = paths
-	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": []}
+	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": [], "unreadable": [], "empty": []}
 	batch_active = true
 	_next_in_queue()
 
@@ -594,6 +660,7 @@ func _import_training(paths: Array) -> void:
 	var known := 0
 	var unusable := PackedStringArray()
 	var practice := PackedStringArray()
+	var unreadable := []
 	for i in paths.size():
 		_progress(i, paths.size(), "Reading training file %d of %d..." % [i + 1, paths.size()])
 		var path: String = paths[i]
@@ -605,13 +672,20 @@ func _import_training(paths: Array) -> void:
 				known += 1
 			"practice only":
 				practice.append(str(paths[i]).get_file())
+			"unreadable":
+				unreadable.append(str(paths[i]).get_file())
 			_:
 				unusable.append(str(paths[i]).get_file())
 	var text := "Training data: %d added, %d already imported." % [added, known]
 	if not unusable.is_empty():
-		text += " No usable lap data in: " + ", ".join(unusable)
+		text += "\nNo usable lap data (too few laps): " + ", ".join(unusable)
 	if not practice.is_empty():
-		text += " Skipped, practice or warm-up only: " + ", ".join(practice)
+		text += "\nSkipped, practice or warm-up only: " + ", ".join(practice)
+	if not unreadable.is_empty():
+		text += "\n" + _unreadable_note(unreadable)
+	if drop_note != "":
+		text += "\n" + drop_note
+		drop_note = ""
 	_progress_done()
 	status.text = text
 	_data_changed()
@@ -625,8 +699,11 @@ func _next_in_queue() -> void:
 		_progress(batch["total"] - queue.size() - 1, batch["total"], "Checking %s (%d left)..." % [path.get_file(), queue.size()])
 		var grid_q := grid_check.button_pressed
 		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path, grid_q))
-		if not Elo.has_sessions(d):   # practice / warm-up only: never rated
-			batch["practice"].append(path.get_file())
+		if d.get("unreadable", false):
+			batch["unreadable"].append(path.get_file())
+			continue
+		if not Elo.has_sessions(d):   # practice / warm-up only (or no usable session): never rated
+			batch["practice" if d.get("practice_only", false) else "empty"].append(path.get_file())
 			continue
 		if d["duplicate"]:
 			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
@@ -657,6 +734,11 @@ func _skip_current() -> void:
 # of the batch without stopping for review.
 func _auto_confirm_rest() -> void:
 	if not draft.is_empty():
+		if draft.has("league_name"):
+			var err := Elo.rename_draft(draft, _league_file_name())
+			if err != "":
+				status.text = err + " Pick another round or series."
+				return
 		_note_suspects(draft)
 		Elo.confirm_draft(draft)
 		batch["rated"] += 1
@@ -669,8 +751,11 @@ func _auto_confirm_rest() -> void:
 		_progress(batch["total"] - queue.size() - 1, batch["total"], "Rating %s (%d left)..." % [path.get_file(), queue.size()])
 		var grid_q := grid_check.button_pressed
 		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path, grid_q))
-		if not Elo.has_sessions(d):   # practice / warm-up only: never rated
-			batch["practice"].append(path.get_file())
+		if d.get("unreadable", false):
+			batch["unreadable"].append(path.get_file())
+			continue
+		if not Elo.has_sessions(d):   # practice / warm-up only (or no usable session): never rated
+			batch["practice" if d.get("practice_only", false) else "empty"].append(path.get_file())
 			continue
 		if d["duplicate"]:
 			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
@@ -678,6 +763,16 @@ func _auto_confirm_rest() -> void:
 			else:
 				batch["skipped"] += 1
 			continue
+		if not Elo.is_league_name(d["file"]):
+			# needs a league name: stop here and ask, as the review screen does
+			busy = false
+			draft = d
+			_show_view("review")
+			_rebuild()
+			skip_btn.visible = true
+			auto_btn.visible = not queue.is_empty()
+			status.text = "File %d of %d: %s needs a league name before it is rated." % [batch["total"] - queue.size(), batch["total"], d["file"]]
+			return
 		_note_suspects(d)
 		Elo.confirm_draft(d)
 		batch["rated"] += 1
@@ -694,7 +789,14 @@ func _finish_batch() -> void:
 	status.text = "Batch done: %d rated, %d old event(s) completed with stats and lap data, %d skipped or already complete. If any file was older than events you had already rated, press Recompute all." % [
 		batch["rated"], batch["updated"], batch["skipped"]]
 	if not batch.get("practice", []).is_empty():
-		status.text += "\nSkipped, no race or qualifying session (practice and warm-up are not used): " + ", ".join(PackedStringArray(batch["practice"]))
+		status.text += "\nSkipped, practice or warm-up only (those sessions are not used): " + ", ".join(PackedStringArray(batch["practice"]))
+	if not batch.get("empty", []).is_empty():
+		status.text += "\nSkipped, no race or qualifying result in the file: " + ", ".join(PackedStringArray(batch["empty"]))
+	if not batch.get("unreadable", []).is_empty():
+		status.text += "\n" + _unreadable_note(batch["unreadable"])
+	if drop_note != "":
+		status.text += "\n" + drop_note
+		drop_note = ""
 	var sus: Dictionary = batch.get("suspects", {})
 	if not sus.is_empty():
 		var parts := PackedStringArray()
@@ -706,6 +808,12 @@ func _finish_batch() -> void:
 
 
 func _on_confirm() -> void:
+	if draft.has("league_name"):
+		var nm := _league_file_name()
+		var err := Elo.rename_draft(draft, nm)
+		if err != "":
+			status.text = err + " Pick another round or series."
+			return
 	var done: String = draft["file"]
 	Elo.confirm_draft(draft)
 	draft = {}
@@ -808,8 +916,87 @@ func _show_warnings() -> void:
 			row.add_child(_btn("Merge into " + s, _merge.bind(n, s)))
 		row.add_child(_btn("Keep as new", _keep_new.bind(n)))
 		warnings.add_child(row)
+	if not draft["duplicate"] and not Elo.is_league_name(str(draft["file"])):
+		warnings.add_child(_league_name_row())
+	else:
+		confirm_btn.text = "Confirm and rate"
 	# Confirm stays disabled for duplicates and unresolved name suspicions
 	confirm_btn.disabled = draft["duplicate"] or not draft["new_drivers"].is_empty()
+
+
+# ---------- League name for files named another way ----------
+# The file is saved under "s<season>-<series><round>[-r].xml", the name that gives it its season
+# and championship (Standings). Choices live in the draft, so they survive the row being rebuilt.
+func _league_name_row() -> Control:
+	if not draft.has("league_name"):
+		draft["league_name"] = Elo.suggest_league_name(draft)
+	var ln: Dictionary = draft["league_name"]
+	var box := VBoxContainer.new()
+	var intro := Label.new()
+	intro.text = "%s does not follow the league naming, so its season and series are unknown. Pick them (suggested from the events around it); the file is saved under the league name." % draft["file"]
+	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	intro.add_theme_color_override("font_color", UiTheme.ACCENT_SOFT)
+	box.add_child(intro)
+	var row := HFlowContainer.new()
+	row.add_theme_constant_override("h_separation", 8)
+	box.add_child(row)
+	var preview := Label.new()
+	row.add_child(_small_label("Season"))
+	var season := SpinBox.new()
+	season.min_value = 1
+	season.max_value = 99
+	season.value = int(ln["season"])
+	season.value_changed.connect(func(v):
+		ln["season"] = int(v)
+		_update_league_name(preview))
+	row.add_child(season)
+	row.add_child(_small_label("Series"))
+	var series := OptionButton.new()
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	var codes := names.keys()
+	if not codes.has(ln["code"]):
+		codes.append(ln["code"])
+	for c in codes:
+		series.add_item("%s (%s)" % [str(names.get(c, str(c).to_upper())), c])
+		series.set_item_metadata(series.item_count - 1, str(c))
+		if str(c) == str(ln["code"]):
+			series.select(series.item_count - 1)
+	series.item_selected.connect(func(i):
+		ln["code"] = str(series.get_item_metadata(i))
+		_update_league_name(preview))
+	row.add_child(series)
+	row.add_child(_small_label("Round"))
+	var rnd := SpinBox.new()
+	rnd.min_value = 1
+	rnd.max_value = 99
+	rnd.value = int(ln["round"])
+	rnd.value_changed.connect(func(v):
+		ln["round"] = int(v)
+		_update_league_name(preview))
+	row.add_child(rnd)
+	row.add_child(preview)
+	_update_league_name(preview)
+	return box
+
+
+func _league_file_name() -> String:
+	var ln: Dictionary = draft["league_name"]
+	return Elo.league_name(int(ln["season"]), str(ln["code"]), int(ln["round"]), draft["orders"].has("race"))
+
+
+func _update_league_name(preview: Label) -> void:
+	var nm := _league_file_name()
+	var taken := Elo.name_taken(nm)
+	preview.text = "-> %s%s" % [nm, "  (already used by another event)" if taken else ""]
+	preview.add_theme_color_override("font_color", UiTheme.driver_grade_color(1) if taken else UiTheme.TEXT)
+	confirm_btn.text = "Confirm as %s" % nm
+
+
+func _small_label(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.theme_type_variation = "Muted"
+	return l
 
 
 func _move(order: Array, from: int, to: int) -> void:
@@ -939,7 +1126,16 @@ static func _write_backup(path: String) -> Array:
 	return [OK, count]
 
 
-func _reread() -> void:
+# On start: if the lap-data reader was improved since the events were saved, re-read the
+# archived results once in the background (nothing is rated again).
+func _update_lap_data() -> void:
+	var n := Elo.stale_fingerprints()
+	if n == 0 or busy:
+		return
+	await _reread("Lap data updated for %d events (new measurements from your archived results)." % n)
+
+
+func _reread(done_text := "") -> void:
 	if busy:
 		return
 	var files := []
@@ -955,7 +1151,7 @@ func _reread() -> void:
 		if Elo.attach_stats(d):   # saving stays on the main thread
 			n += 1
 	_progress_done()
-	status.text = "Refreshed %d events." % n
+	status.text = done_text if done_text != "" else "Refreshed %d events." % n
 	_data_changed()
 
 
@@ -1081,3 +1277,15 @@ func _export() -> void:
 		OS.shell_open(dir)   # opens the Documents folder
 	else:
 		status.text = "Export failed (error %d)" % err
+
+
+# Status bar upkeep: the Clear button shows only when there is something to clear, and a message
+# longer than the bar can show is readable in full by hovering it.
+var _status_seen := ""
+
+func _process(_delta: float) -> void:
+	if status.text == _status_seen:
+		return
+	_status_seen = status.text
+	clear_btn.visible = status.text != "" and status.text != "Ready."
+	status.tooltip_text = status.text if status.get_line_count() > STATUS_LINES else ""

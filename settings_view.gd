@@ -17,6 +17,7 @@ var points_edit := LineEdit.new()
 var grade_spin := SpinBox.new()
 var drop_spin := SpinBox.new()
 var class_rows := GridContainer.new()   # game class name -> name shown on screen
+var rule_rows := VBoxContainer.new()     # race rules: one row per series and starting season
 var preview := Label.new()
 
 const BASES := [["average", "Average of race and quali rating"], ["race", "Race rating only"], ["quali", "Quali rating only"]]
@@ -74,6 +75,21 @@ func _ready() -> void:
 	_form_row(st_form, "Points for P1, P2, P3...", points_edit, "Separated by commas. Places after the last number score nothing.")
 	drop_spin.max_value = 10
 	_form_row(st_form, "Dropped rounds per season", drop_spin, "Each driver's worst rounds of a season championship are not counted. A missed round counts as 0, so it is dropped first. Each series (Sprint, Multiclass...) is its own championship.")
+
+	# race rules
+	var rr := _card("RACE RULES")
+	rr.add_child(_note("The fuel / energy and tyre wear multipliers each series runs with, whether routine pit stops are part of its races, and stops the rules make compulsory. A rule applies from its season on, until a later rule for the same series takes over. Past races are scaled back to x1 with the rule they ran under (so Sprint and Multiclass fuel and tyre figures compare), and the Predict screen starts from each series' latest rule."))
+	var rhead := HBoxContainer.new()
+	for h in [["Series", 150], ["From season", 110], ["Fuel / energy x", 120], ["Tyre wear x", 110], ["Pit stops", 90], ["Min. stops", 100]]:
+		var l := _label(h[0])
+		l.theme_type_variation = "TableHeader"
+		l.custom_minimum_size = Vector2(h[1], 0)
+		rhead.add_child(l)
+	rr.add_child(rhead)
+	rr.add_child(rule_rows)
+	var add_rule := _btn("Add rule", func(): _add_rule_row({"series": "mc", "from": 1, "fuel": 1.0, "tyre": 1.0, "pits": false, "min_stops": 0}))
+	add_rule.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	rr.add_child(add_rule)
 
 	# class names
 	var cn := _card("CLASS NAMES")
@@ -139,7 +155,51 @@ func refresh() -> void:
 		e.custom_minimum_size = Vector2(200, 0)
 		e.set_meta("class", c)
 		class_rows.add_child(e)
+	for c in rule_rows.get_children():
+		rule_rows.remove_child(c)
+		c.queue_free()
+	for r in LeagueSettings.get_value("race_rules"):
+		if r is Dictionary:
+			_add_rule_row(r)
 	_show_preview()
+
+
+func _add_rule_row(r: Dictionary) -> void:
+	var row := HBoxContainer.new()
+	var series := OptionButton.new()
+	series.custom_minimum_size = Vector2(150, 0)
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	var codes := names.keys()
+	if not codes.has(str(r.get("series", ""))):
+		codes.append(str(r.get("series", "")))
+	for c in codes:
+		series.add_item("%s (%s)" % [str(names.get(c, str(c).to_upper())), c])
+		series.set_item_metadata(series.item_count - 1, str(c))
+		if str(c) == str(r.get("series", "")):
+			series.select(series.item_count - 1)
+	row.add_child(series)
+	var spins := []
+	for spec in [["from", 1.0, 99.0, 1.0, 110], ["fuel", 0.1, 10.0, 0.1, 120], ["tyre", 0.1, 10.0, 0.1, 110]]:
+		var sb := SpinBox.new()
+		sb.min_value = spec[1]
+		sb.max_value = spec[2]
+		sb.step = spec[3]
+		sb.value = float(r.get(spec[0], spec[1]))
+		sb.custom_minimum_size = Vector2(spec[4], 0)
+		row.add_child(sb)
+	var pits := CheckBox.new()
+	pits.button_pressed = bool(r.get("pits", false))
+	pits.custom_minimum_size = Vector2(90, 0)
+	row.add_child(pits)
+	var mins := SpinBox.new()
+	mins.max_value = 5
+	mins.value = int(r.get("min_stops", 0))
+	mins.custom_minimum_size = Vector2(100, 0)
+	row.add_child(mins)
+	var remove := _btn("Remove", func(): row.queue_free())
+	remove.theme_type_variation = "SmallButton"
+	row.add_child(remove)
+	rule_rows.add_child(row)
 
 
 func _add_rank_row(rank_name: String, from: float, colour: Color) -> void:
@@ -195,6 +255,22 @@ func _collect() -> Dictionary:
 		if c is LineEdit and (c as LineEdit).text.strip_edges() != "":
 			labels[str(c.get_meta("class"))] = (c as LineEdit).text.strip_edges()
 	values["class_labels"] = labels
+	var rules := []
+	for row in rule_rows.get_children():
+		if row.is_queued_for_deletion():
+			continue
+		var sp := row.get_child(0) as OptionButton
+		rules.append({"series": str(sp.get_item_metadata(maxi(sp.selected, 0))),
+			"from": int((row.get_child(1) as SpinBox).value),
+			"fuel": snappedf((row.get_child(2) as SpinBox).value, 0.01),
+			"tyre": snappedf((row.get_child(3) as SpinBox).value, 0.01),
+			"pits": (row.get_child(4) as CheckBox).button_pressed,
+			"min_stops": int((row.get_child(5) as SpinBox).value)})
+	rules.sort_custom(func(a, b):
+		if a["series"] != b["series"]:
+			return str(a["series"]) < str(b["series"])
+		return int(a["from"]) < int(b["from"]))
+	values["race_rules"] = rules
 	return values
 
 

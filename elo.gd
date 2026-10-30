@@ -67,6 +67,18 @@ func season_of(ev: Dictionary) -> String:
 var _series_rx := RegEx.create_from_string("(?i)^s\\d+[-_ ]([a-z]+)\\d")
 
 
+# The season number from the file name ("s5-mc2-r.xml" -> 5), 0 when the name has none.
+func season_number(file_name: String) -> int:
+	var m := _season_rx.search(file_name)
+	return int(m.get_string(1)) if m != null else 0
+
+
+# The series code from the file name ("s5-mc2-r.xml" -> "mc"), "" when the name has none.
+func series_code(file_name: String) -> String:
+	var m := _series_rx.search(file_name)
+	return m.get_string(1).to_lower() if m != null else ""
+
+
 func series_of(ev: Dictionary) -> String:
 	var m := _series_rx.search(str(ev.get("file", "")))
 	if m == null:
@@ -161,6 +173,7 @@ func parse_results(path: String) -> Dictionary:
 	var p := XMLParser.new()
 	if p.open(path) != OK:
 		push_error("Can't open " + path)
+		out["error"] = "unreadable"   # missing, locked or not a file: never mistaken for a practice file
 		return out
 
 	var inc_rx := RegEx.new()
@@ -175,6 +188,7 @@ func parse_results(path: String) -> Dictionary:
 	var field := ""
 	var in_incident := false
 	var incident_et := 0.0
+	var in_lap := false
 
 	while p.read() == OK:
 		match p.get_node_type():
@@ -186,6 +200,8 @@ func parse_results(path: String) -> Dictionary:
 				if session == "" and (tag == "Race" or tag == "Qualify"):
 					session = tag
 					session_depth = depth
+				elif session == "" and (tag.begins_with("Practice") or tag == "Warmup"):
+					out["practice"] = true   # the file does hold a session, just not one that is used
 				elif session != "" and driver_depth == -1 and tag == "Driver":
 					driver = {"_laps": []}
 					driver_depth = depth
@@ -194,6 +210,7 @@ func parse_results(path: String) -> Dictionary:
 						driver["_laps"].append([
 							int(p.get_named_attribute_value_safe("num")),
 							float(p.get_named_attribute_value_safe("et"))])
+						in_lap = true
 					else:
 						field = tag
 				elif session != "" and driver_depth == -1:
@@ -205,7 +222,11 @@ func parse_results(path: String) -> Dictionary:
 						var penalised := p.get_named_attribute_value_safe("Driver")
 						pens[penalised] = pens.get(penalised, 0) + 1
 			XMLParser.NODE_TEXT:
-				if field != "":
+				if in_lap:
+					var lt := p.get_node_data().strip_edges()
+					if lt.is_valid_float() and lt.to_float() > 0.0:
+						driver["_best"] = minf(float(driver.get("_best", INF)), lt.to_float())
+				elif field != "":
 					driver[field] = p.get_node_data().strip_edges()
 				elif in_incident:
 					var m := inc_rx.search(p.get_node_data().strip_edges())
@@ -219,6 +240,9 @@ func parse_results(path: String) -> Dictionary:
 						last_inc[k] = incident_et
 			XMLParser.NODE_ELEMENT_END:
 				if driver_depth != -1 and depth == driver_depth:
+					# older files (season 1) leave BestLapTime at 0: use the driver's fastest lap
+					if float(driver.get("BestLapTime", "0")) <= 0.0 and driver.has("_best"):
+						driver["BestLapTime"] = "%.4f" % float(driver["_best"])
 					out[session].append(driver)
 					driver_depth = -1
 				elif session != "" and depth == session_depth:
@@ -228,6 +252,7 @@ func parse_results(path: String) -> Dictionary:
 					last_inc.clear()
 				field = ""
 				in_incident = false
+				in_lap = false
 				depth -= 1
 	return out
 
@@ -356,6 +381,8 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 		var g := _orders(parsed["Race"], "Race", "ClassGridPos")
 		if not g.is_empty():
 			draft["orders"]["quali"] = g
+	draft["unreadable"] = parsed.has("error")
+	draft["practice_only"] = parsed.get("practice", false) and draft["orders"].is_empty()
 	draft["track"] = _read_track(path)
 	draft["ids"] = session_ids(parsed, str(draft["track"].get("TrackCourse", "")))
 	if _name_time(draft["file"]) < 0:
@@ -436,6 +463,8 @@ func confirm_draft(draft: Dictionary) -> void:
 	var saved := draft.duplicate(true)
 	saved.erase("duplicate")
 	saved.erase("duplicate_of")
+	saved.erase("unreadable")
+	saved.erase("practice_only")
 	saved.erase("replaces_training")
 	saved.erase("new_drivers")
 	saved.erase("path")
@@ -1007,6 +1036,22 @@ func _read_track(path: String) -> Dictionary:
 	return out
 
 
+# Saved events whose lap data was read by an older version of fingerprint.gd (re-read them from
+# the archive to bring in what the new version measures).
+func stale_fingerprints() -> int:
+	if not DirAccess.dir_exists_absolute("user://events"):
+		return 0
+	var n := 0
+	for f in DirAccess.get_files_at("user://events"):
+		if not f.ends_with(".json"):
+			continue
+		var saved = JSON.parse_string(FileAccess.get_file_as_string("user://events/" + f))
+		if saved is Dictionary and saved.get("fp") is Dictionary and not saved["fp"].is_empty() \
+				and int(saved["fp"].get("v", 0)) < Fingerprint.VERSION and stored_xml_path(str(saved.get("file", ""))) != "":
+			n += 1
+	return n
+
+
 # True if the saved event file already holds a lap-data fingerprint.
 func _saved_has_fp(file_name: String) -> bool:
 	var path := "user://events/%s.json" % file_name
@@ -1044,8 +1089,10 @@ func import_training(path: String) -> String:
 	if processed.has(file_hash):
 		return "duplicate"
 	var parsed := parse_results(path)
+	if parsed.has("error"):
+		return "unreadable"
 	if parsed["Race"].is_empty() and parsed["Qualify"].is_empty():
-		return "practice only"
+		return "practice only" if parsed.get("practice", false) else "no data"
 	var track := _read_track(path)
 	var ids := session_ids(parsed, str(track.get("TrackCourse", "")))
 	if duplicate_of({"hash": file_hash, "ids": ids}) != "":
@@ -1185,3 +1232,77 @@ func _backfill_sessions() -> void:
 		load_error = ("" if load_error == "" else load_error + " ") + \
 			"%d training file(s) repeated an event that was already imported and were removed: %s." % [
 				backfill_removed.size(), ", ".join(backfill_removed)]
+
+
+# ---------- League file names ("s6-sc3-r.xml") ----------
+# Season, series and round come from the file name. A league file named any other way (the
+# game's own "2025_03_12_21_04_56-55R1.xml") is given a league name at import: the review screen
+# asks for season, series and round, suggested from the events around it.
+var _league_rx := RegEx.create_from_string("(?i)^s(\\d+)[-_ ]([a-z]+)(\\d+)")
+
+
+func is_league_name(file_name: String) -> bool:
+	return _league_rx.search(file_name) != null
+
+
+# "s6-sc3-r.xml" for a race file, "s6-sc3.xml" for a qualifying-only file
+func league_name(season: int, code: String, round: int, race: bool) -> String:
+	return "s%d-%s%d%s.xml" % [season, code.to_lower(), round, "-r" if race else ""]
+
+
+# True if a saved event (or its archived XML) already uses this file name.
+func name_taken(file_name: String) -> bool:
+	for h in history:
+		if str(h["file"]) == file_name:
+			return true
+	return FileAccess.file_exists("user://events/%s.json" % file_name)
+
+
+# Best guess of {"season", "code", "round"} for a draft without a league name:
+# 1. the other session of the same event (same day and track) already has a league name: same one;
+# 2. otherwise the season and series of the latest league-named event before it, next round;
+#    before any league-named event: the season before the first one, round 1.
+func suggest_league_name(draft: Dictionary) -> Dictionary:
+	var t := event_time(draft)
+	var day := event_date(draft)
+	var course := str(draft.get("track", {}).get("TrackCourse", ""))
+	var latest := {}       # the league-named event closest before this one
+	var latest_t := -1
+	var first_season := 0
+	var rounds := {}       # "season|code" -> highest round
+	for h in history:
+		var m := _league_rx.search(str(h["file"]))
+		if m == null:
+			continue
+		var s := int(m.get_string(1))
+		var code := m.get_string(2).to_lower()
+		var r := int(m.get_string(3))
+		var ht := int(h.get("time", -1))
+		var k := "%d|%s" % [s, code]
+		rounds[k] = maxi(int(rounds.get(k, 0)), r)
+		first_season = s if first_season == 0 else mini(first_season, s)
+		if ht >= 0 and day != "" and str(h.get("course", "")) == course \
+				and Time.get_datetime_string_from_unix_time(ht).left(10).replace("-", "_") == day:
+			return {"season": s, "code": code, "round": r}
+		if ht >= 0 and t >= 0 and ht <= t and ht > latest_t:
+			latest_t = ht
+			latest = {"season": s, "code": code}
+	var codes: Dictionary = LeagueSettings.get_value("series_names")
+	var default_code: String = str(codes.keys()[0]) if not codes.is_empty() else "sc"
+	if latest.is_empty():
+		return {"season": maxi(first_season - 1, 1), "code": default_code, "round": 1}
+	var key := "%d|%s" % [latest["season"], latest["code"]]
+	return {"season": latest["season"], "code": latest["code"], "round": int(rounds.get(key, 0)) + 1}
+
+
+# Gives a draft its league name before it is confirmed. The event keeps its real date (taken
+# from the old name or the XML first, as the new name carries none). "" on success, or why not.
+func rename_draft(draft: Dictionary, new_name: String) -> String:
+	if new_name == str(draft["file"]):
+		return ""
+	if name_taken(new_name):
+		return "%s is already used by another event." % new_name
+	draft["event_time"] = event_time(draft)
+	draft["original_file"] = draft["file"]
+	draft["file"] = new_name
+	return ""

@@ -30,15 +30,22 @@ func _ready() -> void:
 # Rebuilds only if the ratings data changed since the last build (screens call this on every
 # visit; a full rebuild takes ~0.15 s on four seasons of results).
 func ensure() -> void:
-	if _built_for != Elo.revision:
+	if _built_for != Elo.revision or _built_settings != LeagueSettings.revision:
 		rebuild()
 
 
-var _built_for := -1   # Elo.revision the current build was made from
+var _built_for := -1        # Elo.revision the current build was made from
+var _built_settings := -1   # LeagueSettings.revision (race rules scale fuel and tyre figures)
+
+# Share of the tread a set of tyres can use before a change is forced: in league races tyres were
+# changed with about 80% left and at only 4-28% of stops, so wear rarely forces one; half the
+# tread is the assumption for when it would.
+const TYRE_USABLE := 50.0
 
 
 func rebuild() -> void:
 	_built_for = Elo.revision
+	_built_settings = LeagueSettings.revision
 	revision += 1
 	days.clear()
 	hist.clear()
@@ -91,6 +98,19 @@ func rebuild() -> void:
 		day["course"] = fp["track"].get("course", "")
 		if fp.has("race"):
 			day["race"] = _resolved(fp["race"])
+			day["series"] = Elo.series_code(str(draft["file"]))   # "sc", "mc"... ("" if the name has none)
+			day["season"] = Elo.season_number(str(draft["file"]))
+			# fuel, energy and tyre figures back to x1, so races run under different multipliers
+			# (Sprint x1, Multiclass x2...) compare; the rules are set in Settings > Race rules
+			var rules := LeagueSettings.rules_for(day["series"], day["season"])
+			day["rules"] = rules
+			for c in day["race"].get("classes", {}):
+				var cs: Dictionary = day["race"]["classes"][c]
+				for k in ["fuel_km", "ve_km"]:
+					if float(cs.get(k, 0.0)) > 0.0:
+						cs[k] = float(cs[k]) / maxf(rules["fuel"], 0.01)
+				if float(cs.get("wear_km", 0.0)) > 0.0:
+					cs["wear_km"] = float(cs["wear_km"]) / maxf(rules["tyre"], 0.01)
 		if fp.has("quali"):
 			day["quali"] = _resolved(fp["quali"])
 	var dates := by_date.keys()
@@ -385,6 +405,7 @@ func _course_stats(course: String, cls: String, before: String, quali_day: Strin
 			_add(acc, cnt, "ref_s", c.get("ref_s", 0.0))
 			_add(acc, cnt, "wear_km", c.get("wear_km", 0.0))
 			_add(acc, cnt, "fuel_km", c.get("fuel_km", 0.0))
+			_add(acc, cnt, "ve_km", c.get("ve_km", 0.0))
 			_add(acc, cnt, "tl", c.get("tl", 0.0))
 			_add(acc, cnt, "kmh_r", c.get("kmh", 0.0))
 			_add(acc, cnt, "minutes", day["race"].get("minutes", 0.0))
@@ -438,8 +459,14 @@ func track_info(course: String, cls: String, before := "", quali_day := "") -> D
 	# pit stops: typical loss per routine stop, and how many laps a full tank lasts
 	if t.has("pit_loss"):
 		out["pit_loss"] = t["pit_loss"]
-	if float(t.get("fuel_km", 0.0)) > 0.0 and float(t.get("length", 0.0)) > 0.0:
-		out["tank_laps"] = 100.0 / (float(t["fuel_km"]) * float(t["length"]) / 1000.0)
+	# at x1: laps on a full tank (or a full energy allowance, which usually runs out first) and
+	# laps before the tyres are worn far enough to be changed
+	var energy_km := maxf(float(t.get("fuel_km", 0.0)), float(t.get("ve_km", 0.0)))
+	if energy_km > 0.0 and float(t.get("length", 0.0)) > 0.0:
+		out["tank_laps"] = 100.0 / (energy_km * float(t["length"]) / 1000.0)
+		out["energy_limit"] = "virtual energy" if float(t.get("ve_km", 0.0)) > float(t.get("fuel_km", 0.0)) else "fuel"
+	if float(t.get("wear_km", 0.0)) > 0.0 and float(t.get("length", 0.0)) > 0.0:
+		out["tyre_laps"] = TYRE_USABLE / (float(t["wear_km"]) * float(t["length"]) / 1000.0)
 	# z-scores against every track seen so far (needs a few tracks to mean anything)
 	var norms := _norms(cls, before, quali_day)
 	for pair in [["top", "top_z"], ["wear_km", "wear_z"], ["fuel_km", "fuel_z"]]:

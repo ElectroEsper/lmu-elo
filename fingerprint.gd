@@ -19,7 +19,7 @@ extends RefCounted
 ## tl = track-limit events per lap, con = contacts with other cars per lap,
 ## cons = lap-time spread in % of the median clean lap, wear_km / fuel_km are % per km.
 
-const VERSION := 5   # 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
+const VERSION := 6   # 6: virtual energy per km ("ve_km") for the pit-stop forecast. 5: 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
 const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5 median are not "clean"
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
@@ -80,6 +80,7 @@ static func extract(path: String, training := false) -> Dictionary:
 							"t": -1.0,
 							"top": _attr(p, "topspeed"),
 							"fu": _attr(p, "fuelUsed"),
+							"ve": _attr(p, "veUsed"),   # virtual energy (GT3, Hyper): often runs out before the fuel
 							"tw": tw / 4.0,
 							"s1": _attr(p, "s1"), "s2": _attr(p, "s2"), "s3": _attr(p, "s3"),
 							"p": int(_attr(p, "p")),   # race position at the end of the lap
@@ -227,6 +228,7 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		var times := []
 		var tops := []
 		var fuels := []
+		var ves := []
 		var wear_series := []
 		for l in d["laps"]:
 			if l["n"] > 1 and l["t"] > 0.0:
@@ -235,6 +237,8 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 				tops.append(l["top"])
 			if l["fu"] > 0.0:
 				fuels.append(l["fu"])
+			if l.get("ve", 0.0) > 0.0:
+				ves.append(l["ve"])
 			wear_series.append(l["tw"])
 		if times.size() < MIN_LAPS:
 			continue
@@ -282,6 +286,8 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			x["wear"] = wr / km
 		if fuels.size() > MIN_LAPS:
 			x["fuel"] = _fuel_per_lap(fuels) / km
+		if ves.size() > MIN_LAPS:
+			x["ve"] = _fuel_per_lap(ves) / km
 		rows[nm] = m
 		raw[nm] = x
 
@@ -299,6 +305,7 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		var tops := []
 		var wears := []
 		var fuels := []
+		var ves := []
 		var tls := 0.0
 		var cons := 0.0
 		for nm in names:
@@ -311,6 +318,8 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 				wears.append(raw[nm]["wear"])
 			if raw[nm].has("fuel"):
 				fuels.append(raw[nm]["fuel"])
+			if raw[nm].has("ve"):
+				ves.append(raw[nm]["ve"])
 		var med_pace := _median(paces)
 		var ratios_c := []
 		for nm in names:
@@ -357,6 +366,7 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			"top": _r(_median(t5_top)) if not t5_top.is_empty() else 0.0,
 			"wear_km": _r(med_wear * 100.0, 0.0001),
 			"fuel_km": _r(med_fuel * 100.0, 0.0001),
+			"ve_km": _r(_median(ves) * 100.0, 0.0001) if not ves.is_empty() else 0.0,   # % of the energy allowance per km
 			"tl": _r(tls / names.size()),
 			"con": _r(cons / names.size()),
 			"n": names.size(),

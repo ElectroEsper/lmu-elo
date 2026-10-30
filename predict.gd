@@ -33,16 +33,31 @@ const DEFAULTS := {
 	"sq": 0.8,         # quali noise, % of lap time
 	"p_track": 0.0,    # strength of the driver's own history at this track (0 = off, 1 = full)
 	"p_tend": 0.0,     # strength of the driver's track tendencies (0 = off, 1 = full)
-	"pits": 0.0,       # pit stops simulated (0 = off, 1 = on)
+	"pits": 0.0,       # no longer used: pit stops follow the race rules (kept so old settings files load)
+	"traffic": 0.0,    # strength of multiclass traffic (0 = off, 1 = as measured)
 }
 const K_TRACK := 2.0   # sessions at a track before the driver's own history there gets half weight
 const PIT_SD := 3.0    # seconds of scatter per pit stop
-const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track tendencies"], ["pits", "Pit stops"]]
+# Pit stops are not an upgrade any more: they follow the race rules (Settings > Race rules, or the
+# Predict screen), and the backtest replays every past race under its own rules.
+const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track tendencies"],
+	["traffic", "Traffic (multiclass)"]]
+const DEFAULT_PIT_LOSS := 60.0   # s per stop when neither the track nor the class has a measured one
+# Multiclass traffic. Encounters per lap with another class (passing it, or being passed by it)
+# = cars of that class x |1 - own lap time / their lap time|: checked on the league's races, this
+# matches the passes counted lap by lap from the sector times (correlation 0.93, within 1% on
+# average). Each encounter costs a random amount of time; these are its typical size, in % of the
+# lap time, measured as the extra lap-to-lap scatter on laps with encounters (autumn 2026). No
+# driver was found to be reliably better or worse in traffic, so it is the same for everyone:
+# traffic makes multiclass races less predictable, it does not favour anyone.
+const TRAFFIC_PASS := 0.35     # lapping a slower car
+const TRAFFIC_PASSED := 0.10   # being lapped by a faster one
+const SERIES_RACES := 6        # recent races of a series used for its length and its other classes
 const B_WEAR := 0.1    # % pace per (tyre-wear z of driver x tyre-wear z of track): hard-on-tyres drivers lose at tyre-killer tracks
 const B_TOP := -0.1    # high-top-speed drivers gain at top-speed tracks
 const B_FUEL := 0.1    # thirsty drivers lose at fuel-hungry tracks
 const ELO_TO_PACE := -0.009  # fallback when a driver has no lap data: % pace per Elo point above 1500
-                             # (was -0.03 before the rating model change spread ratings ~3.4x wider)
+							 # (was -0.03 before the rating model change spread ratings ~3.4x wider)
 const N_SIMS := 4000
 const BACKTEST_SIMS := 300
 const STRENGTHS := [0.5, 1.5]    # extra strengths tried for a kept upgrade (1.0 is the first test)
@@ -160,6 +175,258 @@ func _poisson(lam: float) -> int:
 	return k
 
 
+# Time lost to n_mean expected encounters (Poisson), each an exponential loss of mean s seconds;
+# for many encounters the sum is drawn from its normal approximation.
+func _traffic_loss(n_mean: float, s: float) -> float:
+	if n_mean <= 0.0 or s <= 0.0:
+		return 0.0
+	var n := _poisson(n_mean)
+	if n == 0:
+		return 0.0
+	if n > 20:
+		return maxf(0.0, n * s + sqrt(n) * s * rng.randfn())
+	var t := 0.0
+	for k in n:
+		t += -s * log(maxf(rng.randf(), 1e-9))
+	return t
+
+
+# Encounters per lap for one class: {"pass", "passed", "text"}. others = {class: {"n": cars,
+# "ratio": their lap time / ours}}.
+func traffic_rates(others: Dictionary) -> Dictionary:
+	var out := {"pass": 0.0, "passed": 0.0, "text": ""}
+	var parts := PackedStringArray()
+	for c in others:
+		var n := float(others[c]["n"])
+		var ratio := float(others[c]["ratio"])
+		if n <= 0.0 or ratio <= 0.0:
+			continue
+		var rate := n * absf(1.0 - 1.0 / ratio)
+		if ratio > 1.0:
+			out["pass"] += rate     # they are slower: we lap them
+		else:
+			out["passed"] += rate   # they are quicker: they lap us
+		parts.append("%d %s (%s, about %.1f per lap)" % [roundi(n), LeagueSettings.label(str(c)), "lapping them" if ratio > 1.0 else "being lapped", rate])
+	out["text"] = ", ".join(parts)
+	return out
+
+
+# For a track where the class has no race yet: energy range and tyre life from the class's use per
+# km at its other tracks (x1, median), scaled to this track's length. Marks the track "estimated".
+func fill_pit_data(track: Dictionary, cls: String, course: String, before := "") -> void:
+	if track.has("tank_laps") and track.has("tyre_laps"):
+		return
+	var length := 0.0
+	var energy := []
+	var wear := []
+	var limit := {"fuel": 0, "virtual energy": 0}
+	for day in Profiles.days:
+		if str(day["course"]) == course and float(day["track"].get("length", 0.0)) > 0.0:
+			length = float(day["track"]["length"])
+		if day["race"].is_empty() or (before != "" and str(day["date"]) >= before):
+			continue
+		var c: Dictionary = day["race"].get("classes", {}).get(cls, {})
+		var f := float(c.get("fuel_km", 0.0))
+		var v := float(c.get("ve_km", 0.0))
+		if maxf(f, v) > 0.0:
+			energy.append(maxf(f, v))
+			limit["virtual energy" if v > f else "fuel"] += 1
+		if float(c.get("wear_km", 0.0)) > 0.0:
+			wear.append(float(c["wear_km"]))
+	if length <= 0.0:
+		return
+	if not track.has("tank_laps") and not energy.is_empty():
+		energy.sort()
+		track["tank_laps"] = 100.0 / (float(energy[energy.size() / 2]) * length / 1000.0)
+		track["energy_limit"] = "virtual energy" if limit["virtual energy"] > limit["fuel"] else "fuel"
+		track["pit_estimated"] = true
+	if not track.has("tyre_laps") and not wear.is_empty():
+		wear.sort()
+		track["tyre_laps"] = Profiles.TYRE_USABLE / (float(wear[wear.size() / 2]) * length / 1000.0)
+		track["pit_estimated"] = true
+
+
+# Typical pit-stop loss of a class over all its races (before a date, for backtests), for tracks
+# without a measured one.
+func class_pit_loss(cls: String, before := "") -> float:
+	var xs := []
+	for day in Profiles.days:
+		if day["race"].is_empty() or (before != "" and str(day["date"]) >= before):
+			continue
+		var c: Dictionary = day["race"].get("classes", {}).get(cls, {})
+		if float(c.get("pit_loss", 0.0)) > 0.0:
+			xs.append(float(c["pit_loss"]))
+	if xs.is_empty():
+		return DEFAULT_PIT_LOSS
+	xs.sort()
+	return xs[xs.size() / 2]
+
+
+func _plan_note(track: Dictionary, plan: Dictionary, minutes: int) -> String:
+	var parts := PackedStringArray()
+	if float(track.get("tank_laps", 0.0)) > 0.0:
+		parts.append("%s lasts about %.0f laps at x%.1f" % [str(track.get("energy_limit", "fuel")).capitalize(),
+			float(track["tank_laps"]) / maxf(float(plan.get("fuel", 1.0)), 0.01), float(plan.get("fuel", 1.0))])
+	else:
+		parts.append("no fuel data for this track yet")
+	if float(track.get("tyre_laps", 0.0)) > 0.0:
+		parts.append("tyres about %.0f laps at x%.1f" % [float(track["tyre_laps"]) / maxf(float(plan.get("tyre", 1.0)), 0.01), float(plan.get("tyre", 1.0))])
+	if int(plan.get("min_stops", 0)) > 0:
+		parts.append("at least %d stop%s by the rules" % [int(plan["min_stops"]), "" if int(plan["min_stops"]) == 1 else "s"])
+	return "Pit stops expected: %s; about %.0f s lost per stop." % ["; ".join(parts), float(track.get("pit_loss", 0.0))]
+
+
+# Typical lap time of class `other` divided by that of `cls` (> 1: the other class is slower).
+# From the series' own races if the two classes met there; else from every race where they met;
+# else from both classes' laps at this track (race laps, or quali laps scaled to race pace);
+# else from both classes' average speed over all their races. 0 if nothing is known.
+func class_ratio(cls: String, other: String, course: String, ctx := {}) -> float:
+	if ctx.get("others", {}).has(other):
+		return float(ctx["others"][other]["ratio"])
+	var met := _met_ratio(cls, other)
+	if met > 0.0:
+		return met
+	# through a class both have raced with (LMP3 -> GT3 -> Hyper)
+	var classes := {}
+	for day in Profiles.days:
+		if not day["race"].is_empty():
+			for c in day["race"].get("classes", {}):
+				classes[c] = true
+	var chain := []
+	for x in classes:
+		if x == cls or x == other:
+			continue
+		var a := _met_ratio(cls, x)
+		var b := _met_ratio(x, other)
+		if a > 0.0 and b > 0.0:
+			chain.append(a * b)
+	if not chain.is_empty():
+		return _avg(chain)
+	if course != "":
+		var a := Profiles.track_info(course, cls)
+		var b := Profiles.track_info(course, other)
+		if a["ref_s"] != Profiles.DEFAULT_LAP_S and b["ref_s"] != Profiles.DEFAULT_LAP_S and float(a["ref_s"]) > 0.0:
+			return float(b["ref_s"]) / float(a["ref_s"])
+	# average speed (km/h) of each class over all its races: slower class = higher lap time
+	var kmh := {cls: [], other: []}
+	for day in Profiles.days:
+		var cs: Dictionary = day["race"].get("classes", {}) if not day["race"].is_empty() else {}
+		for c in [cls, other]:
+			if cs.has(c) and float(cs[c].get("kmh", 0.0)) > 0.0:
+				kmh[c].append(float(cs[c]["kmh"]))
+	if kmh[cls].is_empty() or kmh[other].is_empty():
+		return 0.0
+	return _avg(kmh[cls]) / _avg(kmh[other])
+
+
+# Median lap-time ratio other / cls over the races where both classes ran, 0 if they never met.
+func _met_ratio(cls: String, other: String) -> float:
+	var ratios := []
+	for day in Profiles.days:
+		var cs: Dictionary = day["race"].get("classes", {}) if not day["race"].is_empty() else {}
+		if cs.has(cls) and cs.has(other) and float(cs[cls].get("ref_s", 0.0)) > 0.0 and float(cs[other].get("ref_s", 0.0)) > 0.0:
+			ratios.append(float(cs[other]["ref_s"]) / float(cs[cls]["ref_s"]))
+	if ratios.is_empty():
+		return 0.0
+	ratios.sort()
+	return ratios[ratios.size() / 2]
+
+
+func _avg(a: Array) -> float:
+	var s := 0.0
+	for x in a:
+		s += float(x)
+	return s / maxf(a.size(), 1)
+
+
+# The classes that regularly race in a series (in at least half of its last SERIES_RACES races),
+# fastest first. code "" = the series of the latest race.
+func series_classes(code: String) -> Array:
+	var seen := {}    # class -> [lap time / quickest class's lap time, per race]
+	var races := 0
+	for i in range(Profiles.days.size() - 1, -1, -1):
+		var day: Dictionary = Profiles.days[i]
+		if day.get("training", false) or day["race"].is_empty():
+			continue
+		if code == "":
+			code = str(day.get("series", ""))
+		if str(day.get("series", "")) != code:
+			continue
+		races += 1
+		var cs: Dictionary = day["race"].get("classes", {})
+		var quickest := INF
+		for c in cs:
+			if float(cs[c].get("ref_s", 0.0)) > 0.0:
+				quickest = minf(quickest, float(cs[c]["ref_s"]))
+		for c in cs:
+			if not seen.has(c):
+				seen[c] = []
+			seen[c].append(float(cs[c].get("ref_s", 0.0)) / quickest if quickest < INF and float(cs[c].get("ref_s", 0.0)) > 0.0 else 9.0)
+		if races >= SERIES_RACES:
+			break
+	var out := []
+	for c in seen:
+		if seen[c].size() * 2 >= races:
+			out.append(c)
+	out.sort_custom(func(a, b): return _avg(seen[a]) < _avg(seen[b]))
+	return out
+
+
+# What a series looks like for one class, from its last SERIES_RACES races with that class:
+# {"races", "minutes" (typical length, 0 = unknown), "others": {class: {"n", "ratio"}}}.
+# code "" = any series (the latest races of the class, whatever their series).
+func series_context(code: String, cls: String, before := "") -> Dictionary:
+	var mins := []
+	var others := {}   # class -> {"n": [], "ratio": []}
+	var races := 0
+	if code == "":
+		# any series: follow the series of the class's latest race (mixing series would put
+		# classes on track together that never meet)
+		for i in range(Profiles.days.size() - 1, -1, -1):
+			var d: Dictionary = Profiles.days[i]
+			if not d.get("training", false) and not d["race"].is_empty() and d["race"].get("classes", {}).has(cls) \
+					and (before == "" or str(d["date"]) < before):
+				code = str(d.get("series", ""))
+				break
+	for i in range(Profiles.days.size() - 1, -1, -1):
+		var day: Dictionary = Profiles.days[i]
+		if day.get("training", false) or day["race"].is_empty() or not day["race"].get("classes", {}).has(cls):
+			continue
+		if code != "" and str(day.get("series", "")) != code:
+			continue
+		if before != "" and str(day["date"]) >= before:
+			continue
+		races += 1
+		var cs: Dictionary = day["race"]["classes"]
+		if int(day["race"].get("minutes", 0)) > 0:
+			mins.append(int(day["race"]["minutes"]))
+		var ref := float(cs[cls].get("ref_s", 0.0))
+		for c in cs:
+			if c == cls or ref <= 0.0 or float(cs[c].get("ref_s", 0.0)) <= 0.0:
+				continue
+			if not others.has(c):
+				others[c] = {"n": [], "ratio": []}
+			others[c]["n"].append(float(cs[c].get("n", 0)))
+			others[c]["ratio"].append(float(cs[c]["ref_s"]) / ref)
+		if races >= SERIES_RACES:
+			break
+	var out := {"races": races, "minutes": 0, "others": {}, "series": code}
+	if not mins.is_empty():
+		mins.sort()
+		out["minutes"] = mins[mins.size() / 2]
+	for c in others:
+		# a class that ran in under half of these races is not a regular part of the series
+		if others[c]["n"].size() * 2 < races:
+			continue
+		var r: Array = others[c]["ratio"]
+		r.sort()
+		var n_sum := 0.0
+		for x in others[c]["n"]:
+			n_sum += x
+		out["others"][c] = {"n": n_sum / others[c]["n"].size(), "ratio": r[r.size() / 2]}
+	return out
+
+
 # inputs: driver_inputs(...) in GRID ORDER when mode is ACTUAL_GRID (pole first).
 # Returns arrays (same order as inputs): pole, front, exp_grid, win, podium, top10, exp_pos.
 func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dictionary = {}) -> Dictionary:
@@ -174,8 +441,17 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var tl_pen := []      # penalty rate over the race
 	var con_rate := []    # contacts over the race
 	var stops := []       # planned pit stops per driver
+	# pit stops: track["plan"] = {"pits": expected?, "fuel": x, "tyre": x, "min_stops": n}
+	var plan: Dictionary = track.get("plan", {})
 	var pit_loss := float(track.get("pit_loss", 0.0))
-	var tank_laps := float(track.get("tank_laps", 0.0))
+	var tank_laps := float(track.get("tank_laps", 0.0)) / maxf(float(plan.get("fuel", 1.0)), 0.01)
+	var tyre_laps := float(track.get("tyre_laps", 0.0)) / maxf(float(plan.get("tyre", 1.0)), 0.01)
+	var tr: Dictionary = track.get("traffic", {})
+	var tr_on := float(P.get("traffic", 0.0))
+	var n_pass := float(tr.get("pass", 0.0)) * laps     # expected encounters over the race
+	var n_passed := float(tr.get("passed", 0.0)) * laps
+	var s_pass := tr_on * TRAFFIC_PASS / 100.0 * t_ref       # seconds per encounter
+	var s_passed := tr_on * TRAFFIC_PASSED / 100.0 * t_ref
 	for d in inputs:
 		var adj: float = P["fit"] * (B_WEAR * d["wear_z"] * track["wear_z"]
 			+ B_TOP * d["top_z"] * track["top_z"] + B_FUEL * d["fuel_z"] * track["fuel_z"])
@@ -184,10 +460,16 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 		base.append(d["pace"] + adj + p_track * float(d.get("track_gap_r", 0.0)) + p_tend * float(d.get("tend", 0.0)))
 		qbase.append(d["qpace"] + p_track * float(d.get("track_gap_q", 0.0)) + p_tend * float(d.get("tend", 0.0)))
 		var n_stops := 0
-		if float(P.get("pits", 0.0)) > 0.0 and pit_loss > 0.0 and tank_laps > 0.0:
-			# a thirstier driver gets fewer laps out of a tank
-			var own_tank := tank_laps / maxf(1.0 + float(d.get("fuel_rel", 0.0)) / 100.0, 0.5)
-			n_stops = maxi(0, int(ceil(float(laps) / own_tank)) - 1)
+		if bool(plan.get("pits", false)) and pit_loss > 0.0:
+			# Everyone gets the class's number of stops: drivers save fuel to make the strategy rather
+			# than make an extra stop. Giving thirstier drivers their own (sometimes one more) stop made
+			# the backtest worse (autumn 2026: log-loss 1.55 -> 1.66 on races with planned stops);
+			# with the class count it improves slightly (Brier 0.2313 -> 0.2304).
+			if tank_laps > 0.0:
+				n_stops = maxi(n_stops, int(ceil(float(laps) / tank_laps)) - 1)
+			if tyre_laps > 0.0:
+				n_stops = maxi(n_stops, int(ceil(float(laps) / tyre_laps)) - 1)
+			n_stops = maxi(n_stops, int(plan.get("min_stops", 0)))
 		stops.append(n_stops)
 		lap_sd.append(d["cons"] * P["lap_noise"] / 100.0 * t_ref * sqrt(laps))
 		tl_cost.append(d["tl"] * laps * P["tl_cost"])
@@ -246,6 +528,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 				t += P["c0"] + t_ref * P["dmg"] / 100.0 * laps * (1.0 - rng.randf())
 			for k in stops[i]:
 				t += pit_loss + pit_rng.randfn(0.0, PIT_SD)
+			if tr_on > 0.0:
+				t += _traffic_loss(n_pass, s_pass) + _traffic_loss(n_passed, s_passed)
 			tot[i] = t
 		idx.sort_custom(by_total)
 		for k in m:
@@ -277,15 +561,45 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 # names: grid order (pole first) for ACTUAL_GRID, any order otherwise.
 # course "" = the most recent track in the data; minutes / lap_s of 0 = take them from the data.
 # Returns {"rows": [...sorted by expected finish...], "track": {...}, "laps": int, "notes": [...]}
-func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, lap_s := 0.0) -> Dictionary:
+# field: the other classes in the race and their car counts ({class: cars}), as set on the Predict
+# screen; empty = take them from the series' recent races.
+# plan: pit stops for this race, {"pits": expected?, "fuel": x, "tyre": x, "min_stops": n}, as set on
+# the Predict screen; empty = the series' current rules.
+func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, lap_s := 0.0, series := "",
+		field := {}, plan := {}) -> Dictionary:
 	var notes := []
 	if course == "":
 		course = Profiles.latest_course()
 	var track = Profiles.track_info(course, cls)
 	if lap_s > 0.0:
 		track["ref_s"] = lap_s
+	var ctx := series_context(series, cls)
+	var series_name := str(LeagueSettings.get_value("series_names").get(series, series.to_upper())) if series != "" else ""
 	if minutes > 0:
 		track["minutes"] = minutes
+	elif int(ctx["minutes"]) > 0:
+		track["minutes"] = int(ctx["minutes"])
+		notes.append("%d min: the usual length of %s races with %s." % [ctx["minutes"],
+			series_name if series_name != "" else "the latest", LeagueSettings.label(cls)])
+	if series != "" and int(ctx["races"]) == 0:
+		notes.append("No %s race with %s yet: series length and traffic unknown." % [series_name, LeagueSettings.label(cls)])
+	var others: Dictionary = ctx["others"]
+	if not field.is_empty() or field.has("_set"):
+		others = {}
+		for c in field:
+			if str(c) == "_set" or int(field[c]) <= 0:
+				continue
+			var ratio := class_ratio(cls, str(c), course, ctx)
+			if ratio <= 0.0:
+				notes.append("No lap times to compare %s with %s yet: left out of the traffic." % [LeagueSettings.label(str(c)), LeagueSettings.label(cls)])
+				continue
+			others[c] = {"n": float(field[c]), "ratio": ratio}
+	track["traffic"] = traffic_rates(others)
+	if float(params.get("traffic", 0.0)) > 0.0:
+		if str(track["traffic"]["text"]) != "":
+			notes.append("Traffic: %s." % track["traffic"]["text"])
+		else:
+			notes.append("Traffic: none (no other class in %s)." % ("these races" if series == "" else series_name + " races"))
 	if not Profiles.has_data():
 		notes.append("No lap-data fingerprints saved yet: drivers are rated from Elo only. Drop your XML folder to backfill them.")
 	elif not track["known_race"]:
@@ -297,9 +611,29 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 			on.append(u[1].to_lower())
 	if not on.is_empty():
 		notes.append("Upgrades on: " + ", ".join(PackedStringArray(on)) + ".")
-	if float(params.get("pits", 0.0)) > 0.0 and not (track.has("pit_loss") and track.has("tank_laps")):
-		notes.append("Pit stops are on, but this track has no measured pit loss or fuel range yet, so none are simulated.")
+	if plan.is_empty():
+		plan = LeagueSettings.rules_for(series if series != "" else str(ctx.get("series", "")), 0)
+	track["plan"] = plan
+	if bool(plan.get("pits", false)):
+		if not track.has("pit_loss"):
+			track["pit_loss"] = class_pit_loss(cls)
+		fill_pit_data(track, cls, course)
+		notes.append(_plan_note(track, plan, int(track["minutes"])))
+		if track.get("pit_estimated", false):
+			notes.append("No %s race at this track yet: fuel / energy and tyre use estimated from the class's other tracks." % LeagueSettings.label(cls))
+	else:
+		notes.append("No planned pit stops (as set for this race).")
 	var res := await simulate(inputs, track, mode, N_SIMS)
+	if bool(plan.get("pits", false)):
+		var counts := {}
+		for n in res["stops"]:
+			counts[n] = int(counts.get(n, 0)) + 1
+		var parts := PackedStringArray()
+		var ks := counts.keys()
+		ks.sort()
+		for k in ks:
+			parts.append("%d driver%s %d stop%s" % [counts[k], "" if counts[k] == 1 else "s", k, "" if k == 1 else "s"])
+		notes.append("Planned stops: " + ", ".join(parts) + ".")
 	var rows := []
 	for i in inputs.size():
 		var d: Dictionary = inputs[i]
@@ -345,7 +679,13 @@ func backtest_races() -> Array:
 			for r in rows:
 				names.append(r["name"])
 				pos.append(r["pos"])
-			races.append({"date": day["date"], "cls": cls, "course": day["course"], "names": names, "pos": pos})
+			var others := {}
+			var cs: Dictionary = day["race"]["classes"]
+			for c in cs:
+				if c != cls and float(cs[c].get("ref_s", 0.0)) > 0.0 and float(cs[cls].get("ref_s", 0.0)) > 0.0:
+					others[c] = {"n": float(cs[c].get("n", 0)), "ratio": float(cs[c]["ref_s"]) / float(cs[cls]["ref_s"])}
+			races.append({"date": day["date"], "cls": cls, "course": day["course"], "names": names, "pos": pos,
+				"others": others, "series": str(day.get("series", "")), "rules": day.get("rules", {})})
 	return races
 
 
@@ -362,6 +702,12 @@ func _score(races: Array, mode: int, sims: int, prm: Dictionary, cache := {}) ->
 				"inputs": driver_inputs(r["names"], r["cls"], r["date"], r["course"]),
 				"track": Profiles.track_info(r["course"], r["cls"], r["date"], r["date"]),
 			}
+			cache[ri]["track"]["traffic"] = traffic_rates(r.get("others", {}))
+			cache[ri]["track"]["plan"] = r.get("rules", {})
+			if bool(r.get("rules", {}).get("pits", false)):
+				if not cache[ri]["track"].has("pit_loss"):
+					cache[ri]["track"]["pit_loss"] = class_pit_loss(r["cls"], r["date"])
+				fill_pit_data(cache[ri]["track"], r["cls"], r["course"], r["date"])
 		var inputs: Array = cache[ri]["inputs"]
 		var track: Dictionary = cache[ri]["track"]
 		var res := await simulate(inputs, track, mode, sims, prm)
