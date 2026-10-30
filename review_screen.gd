@@ -787,11 +787,18 @@ func _show_warnings() -> void:
 	if draft["duplicate"]:
 		var row := HFlowContainer.new()
 		var l := Label.new()
-		l.text = "Already processed: %s" % Elo.processed[draft["hash"]]
+		var same: String = draft["duplicate_of"]
+		l.text = ("Already processed: %s" % same) if Elo.processed.get(draft["hash"], "") == same \
+			else ("Same event as %s, already processed under that name." % same)
 		row.add_child(l)
 		if Elo.event_lacks_stats(draft):
 			row.add_child(_btn("Attach stats to the saved event", _attach_stats))
 		warnings.add_child(row)
+	if draft.get("replaces_training", "") != "":
+		var t := Label.new()
+		t.text = "This event was imported as training data (%s). Confirming rates it and replaces that training copy." % draft["replaces_training"]
+		t.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		warnings.add_child(t)
 	for n in draft["new_drivers"]:
 		var row := HFlowContainer.new()
 		var l := Label.new()

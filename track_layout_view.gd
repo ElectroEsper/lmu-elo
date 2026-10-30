@@ -101,7 +101,32 @@ func _show() -> void:
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Straights")
 	tabs.add_child(TableView.build(_summary_table(p)))
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Summary")
+	tabs.add_child(TableView.build(_spots_table(p)))
+	tabs.set_tab_title(tabs.get_tab_count() - 1, "Drivers")
 	tabs.current_tab = clampi(last_tab, 0, tabs.get_tab_count() - 1)
+
+
+# Drivers for whom this track is a strong or weak spot (driver_track_fit.gd), in this class.
+func _spots_table(p: Dictionary) -> Dictionary:
+	var cls := str(p.get("class", ""))
+	var rows := []
+	var colours := []
+	for sp in DriverTrackFit.spots(str(p.get("course", "")), cls):
+		var flag: String = sp["flag"]
+		rows.append([sp["driver"], {"strong spot": "Strong spot", "weak spot": "Weak spot", "leaning strong": "Leaning strong", "leaning weak": "Leaning weak"}[flag],
+			"%+.2f%%" % float(sp["race_y"]) if sp["race_y"] != null else "-",
+			"%+.2f%%" % float(sp["quali_y"]) if sp["quali_y"] != null else "-",
+			int(sp["races"]), int(sp["quali"])])
+		var strong := flag.contains("strong")
+		var sure := flag.ends_with("spot")
+		colours.append(UiTheme.driver_grade_color((5 if sure else 4) if strong else (1 if sure else 2)))
+	var t := {"title": "Drivers", "headers": ["Driver", "This track is", "Race pace vs own average", "Quali pace vs own average", "Races here", "Qualis here"],
+		"rows": rows,
+		"note": ("%s drivers who are clearly quicker (strong spot) or slower (weak spot) here than at their usual tracks, measured against their OWN average, so a fast driver can have this as a weak spot. Negative = quicker than usual. Strong / weak spot = at least %.0f times the uncertainty and still clear without the single most extreme session; leaning = at least %.1f times, not certain yet. Dry sessions only. Same figures as each driver's Track fit tab." % [
+			cls, DriverTrackFit.STANDOUT, DriverTrackFit.LEAN_SPOT]) if not rows.is_empty()
+			else "No %s driver stands out here yet: everyone's pace at this track is within their normal variation." % cls}
+	t["cell_colors"] = {1: colours}
+	return t
 
 
 # Grades 1 to 5 against the other tracks of the same class. Hover a name for what it measures.

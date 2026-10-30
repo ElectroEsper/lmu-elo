@@ -227,7 +227,7 @@ static func _tendencies(pts: Dictionary, cls: String, sigma: Dictionary, values 
 		for c in values:
 			if values[c].has(key):
 				xs.append(float(values[c][key]))
-		var row := {"name": t["name"], "key": key, "src": t["src"], "race": {}, "quali": {},
+		var row := {"name": t.get("fit_name", t["name"]), "key": key, "src": t["src"], "race": {}, "quali": {},
 			"verdict": "no track data", "zvec": []}
 		if xs.size() >= MIN_COURSES:
 			var m := _mean(xs)
@@ -371,3 +371,54 @@ static func _mean(a: Array) -> float:
 	for x in a:
 		s += float(x)
 	return s / maxf(a.size(), 1)
+
+
+# ---------- Strong and weak spots, by track ----------
+static var _spots_cache := {}   # cls -> {"stamp", "by_course": {course: [rows]}}
+
+
+# Drivers of the class for whom this track is a strong or weak spot, or leaning that way:
+# [{"driver", "flag" ("strong spot" / "weak spot" / "leaning strong" / "leaning weak"), "z",
+#   "race_y", "quali_y", "races", "quali"}], strongest first, then the weak ones.
+static func spots(course: String, cls: String) -> Array:
+	Profiles.ensure()
+	var stamp := "%d|%d" % [Profiles.revision, Elo.revision]
+	var hit: Dictionary = _spots_cache.get(cls, {})
+	if hit.get("stamp", "") != stamp:
+		hit = {"stamp": stamp, "by_course": _all_spots(cls)}
+		_spots_cache[cls] = hit
+	return hit["by_course"].get(course, [])
+
+
+static func _all_spots(cls: String) -> Dictionary:
+	var values := TrackGrades.collect(cls)
+	var class_sig := {}
+	for s in SESSIONS:
+		class_sig[s[0]] = class_noise(cls, s[1], s[2], s[3])
+	var by_course := {}
+	for key in Profiles.hist:
+		if not str(key).begins_with(cls + "|"):
+			continue
+		var nm: String = str(key).substr(cls.length() + 1)
+		var f := fit(nm, cls, "", values, class_sig, true)
+		for t in f["tracks"]:
+			var flag: String = t["flag"]
+			if flag == "":
+				if float(t["z"]) <= -LEAN_SPOT:
+					flag = "leaning strong"
+				elif float(t["z"]) >= LEAN_SPOT:
+					flag = "leaning weak"
+				else:
+					continue
+			if not by_course.has(t["course"]):
+				by_course[t["course"]] = []
+			by_course[t["course"]].append({"driver": nm, "flag": flag, "z": float(t["z"]),
+				"race_y": t["race_y"], "quali_y": t["quali_y"], "races": t["races"], "quali": t["quali"]})
+	for c in by_course:
+		by_course[c].sort_custom(func(a, b):
+			var sa: bool = a["z"] < 0.0
+			var sb: bool = b["z"] < 0.0
+			if sa != sb:
+				return sa
+			return a["z"] < b["z"] if sa else a["z"] > b["z"])
+	return by_course

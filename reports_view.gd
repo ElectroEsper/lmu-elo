@@ -16,6 +16,7 @@ const REPORTS := [
 	{"name": "Rookies", "kind": "all", "fn": "rookies"},
 	{"name": "Standings", "kind": "all", "fn": "standings", "season": true},
 	{"name": "Ranks", "kind": "all", "fn": "ranks"},
+	{"name": "Wet weather", "kind": "all", "fn": "wet_weather"},
 	{"name": "Head to head", "kind": "pair", "fn": "head_to_head"},
 	{"name": "Profile", "kind": "single", "fn": "driver_profile"},
 ]

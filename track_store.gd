@@ -22,7 +22,9 @@ static func save(profile: Dictionary) -> String:
 	if FileAccess.file_exists(path):
 		var old = JSON.parse_string(FileAccess.get_file_as_string(path))
 		# a profile from an older version of the analysis is always rebuilt
+		# and one whose "lap" is only a fragment (a broken file) never blocks a real lap
 		if old is Dictionary and old.has("lap") and int(old.get("version", 1)) >= MotecProfile.VERSION \
+				and MotecProfile.is_full_lap(float(old["lap"].get("length_m", 0))) \
 				and float(old["lap"]["time_s"]) <= float(profile["lap"]["time_s"]):
 			return "kept"
 		verdict = "replaced"

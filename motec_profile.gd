@@ -299,6 +299,17 @@ static func _best_segment(ch: Dictionary) -> Array:
 		for i in range(a + 1, b):
 			t += (d[i] - d[i - 1]) / maxf((v[i] + v[i - 1]) / 7.2, 1.0)
 		segs.append({"a": a, "b": b, "len": d[b - 1] - d[a], "time": t})
+	# Pieces shorter than any real lap (the bit after the line before the recording stops, a
+	# pit exit...) are left out first: with only a few laps in a file they would drag the median
+	# down and then win as the "fastest lap" (Fuji Classic LMP3: a 199 m piece beat the real lap).
+	var full := segs.filter(func(s): return is_full_lap(s["len"]))
+	if full.is_empty():
+		var longest: Dictionary = segs[0]
+		for s in segs:
+			if s["len"] > longest["len"]:
+				longest = s
+		return [longest["a"], longest["b"], longest["time"]]   # analyze() reports it as too short
+	segs = full
 	var lens := []
 	for s in segs:
 		lens.append(s["len"])

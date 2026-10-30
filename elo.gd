@@ -26,6 +26,9 @@ const SECTIONS := {
 # ---------- State ----------
 var ratings := {}     # "name|class|session" -> {"r": rating, "d": duels fought}
 var processed := {}   # file sha256 -> file name
+# Session content id -> file name. Catches the same event arriving as another file: a renamed
+# copy, or another player's log of the same race (different bytes, clocks a few seconds apart).
+var sessions_seen := {}
 var history := []     # per event: {"file", "time", "changes": [...], "stats": {...}}
 var aliases := {}     # "John P" -> "John Peters"
 var revision := 0     # goes up on every save, so caches elsewhere know the data changed
@@ -33,10 +36,13 @@ var load_error := ""  # set when elo.json could not be read at start-up (shown o
 
 
 var _model_loaded := RATING_MODEL
+var _needs_backfill := false
 
 
 func _ready() -> void:
 	load_ratings()
+	if _needs_backfill:
+		_backfill_sessions()
 	if _model_loaded < RATING_MODEL and not history.is_empty() and DirAccess.dir_exists_absolute("user://events"):
 		rebuild_all()   # ratings from an older model: replay every event once with the new one
 		load_error = ("" if load_error == "" else load_error + " ") + "Ratings were recalculated with the updated rating model (bigger steps, so they spread wider than before)."
@@ -351,10 +357,13 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 		if not g.is_empty():
 			draft["orders"]["quali"] = g
 	draft["track"] = _read_track(path)
+	draft["ids"] = session_ids(parsed, str(draft["track"].get("TrackCourse", "")))
 	if _name_time(draft["file"]) < 0:
 		draft["event_time"] = _xml_time(path)   # no date in the file name: use the session's own
 	draft["fp"] = Fingerprint.extract(path)   # lap-data fingerprint, saved with the event for Profiles / Predict
-	draft["duplicate"] = processed.has(draft["hash"])
+	draft["duplicate_of"] = duplicate_of(draft)
+	draft["duplicate"] = draft["duplicate_of"] != ""
+	draft["replaces_training"] = _training_match(draft) if not draft["duplicate"] else ""
 	draft["new_drivers"] = _find_suspects(draft)
 	return draft
 
@@ -362,6 +371,10 @@ func build_draft(path: String, grid_fallback := false) -> Dictionary:
 func _apply(draft: Dictionary) -> void:
 	if processed.has(draft["hash"]):
 		return
+	if not draft.has("ids"):   # saved before session ids existed
+		draft["ids"] = _ids_from_archive(str(draft["file"]))
+	for id in draft["ids"]:
+		sessions_seen[id] = draft["file"]
 	if draft.get("kind", "league") == "training":
 		processed[draft["hash"]] = draft["file"]   # remembered so it is not imported twice, but never rated
 		return
@@ -413,12 +426,17 @@ func _resolved_stats(stats: Dictionary) -> Dictionary:
 
 # Call after the draft has been reviewed/edited
 func confirm_draft(draft: Dictionary) -> void:
-	if processed.has(draft["hash"]) or not has_sessions(draft):
+	if duplicate_of(draft) != "" or not has_sessions(draft):
 		return
+	var training := _training_match(draft)
+	if training != "":
+		_drop_training(training)   # the league copy takes over; its lap data is not counted twice
 	_apply(draft)
 	archive_xml(draft)
 	var saved := draft.duplicate(true)
 	saved.erase("duplicate")
+	saved.erase("duplicate_of")
+	saved.erase("replaces_training")
 	saved.erase("new_drivers")
 	saved.erase("path")
 	DirAccess.make_dir_recursive_absolute("user://events")
@@ -625,6 +643,7 @@ func rebuild_all() -> Dictionary:
 		DirAccess.copy_absolute(SAVE_PATH, "user://elo.backup.json")
 	ratings.clear()
 	processed.clear()
+	sessions_seen.clear()
 	history.clear()
 	for e in events:
 		_apply(e["draft"])
@@ -899,6 +918,7 @@ func save_ratings() -> void:
 	f.store_string(JSON.stringify({
 		"ratings": ratings,
 		"processed": processed,
+		"sessions_seen": sessions_seen,
 		"aliases": aliases,
 		"history": history,
 		"model": RATING_MODEL,
@@ -927,6 +947,8 @@ func load_ratings() -> void:
 	if data is Dictionary:
 		ratings = data.get("ratings", {})
 		processed = data.get("processed", {})
+		sessions_seen = data.get("sessions_seen", {})
+		_needs_backfill = not data.has("sessions_seen") and not processed.is_empty()
 		aliases = data.get("aliases", {})
 		history = data.get("history", [])
 		_model_loaded = int(data.get("model", 1))
@@ -1021,18 +1043,24 @@ func import_training(path: String) -> String:
 	var file_hash := FileAccess.get_sha256(path)
 	if processed.has(file_hash):
 		return "duplicate"
-	var fp := Fingerprint.extract(path, true)
 	var parsed := parse_results(path)
 	if parsed["Race"].is_empty() and parsed["Qualify"].is_empty():
 		return "practice only"
+	var track := _read_track(path)
+	var ids := session_ids(parsed, str(track.get("TrackCourse", "")))
+	if duplicate_of({"hash": file_hash, "ids": ids}) != "":
+		return "duplicate"   # same event already imported under another file name
+	var fp := Fingerprint.extract(path, true)
 	if not fp.has("race") and not fp.has("quali"):
 		return "no data"
 	var draft := {
 		"file": path.get_file(), "path": path, "hash": file_hash,
-		"kind": "training", "track": _read_track(path), "fp": fp,
+		"kind": "training", "track": track, "fp": fp, "ids": ids,
 	}
 	archive_xml(draft)
 	processed[file_hash] = draft["file"]
+	for id in ids:
+		sessions_seen[id] = draft["file"]
 	var saved := draft.duplicate(true)
 	saved.erase("path")
 	DirAccess.make_dir_recursive_absolute("user://events")
@@ -1041,3 +1069,119 @@ func import_training(path: String) -> String:
 	f.close()
 	save_ratings()
 	return "added"
+
+
+# ---------- Same event, different file ----------
+# One id per session (quali, race) from what every player's log of that session agrees on: track,
+# session, and each driver's name, class, class position, laps and best lap. Clock times, finish
+# times (they drift by a few milliseconds between logs) and incident timings are left out.
+func session_ids(parsed: Dictionary, course: String) -> Array:
+	var out := []
+	for section in ["Qualify", "Race"]:
+		var rows := PackedStringArray()
+		for d in parsed[section]:
+			if _valid(d, section):
+				rows.append("%s|%s|%s|%d|%.3f" % [d["Name"], d["CarClass"], d["ClassPosition"],
+					int(d.get("Laps", "0")), float(d.get("BestLapTime", "0"))])
+		if rows.is_empty():
+			continue
+		rows.sort()
+		out.append(("%s|%s|%s" % [course, section, ";".join(rows)]).sha256_text().left(20))
+	return out
+
+
+# The file this one repeats ("" if it is new): the same bytes, or every session already seen.
+# A league file is only blocked by a league event; one that repeats a training import replaces it.
+func duplicate_of(draft: Dictionary) -> String:
+	var earlier := _earlier_copy(draft)
+	if earlier == "":
+		return ""
+	if draft.get("kind", "league") == "training" or _is_rated(earlier):
+		return earlier
+	return ""
+
+
+# The training import this league file repeats, or "".
+func _training_match(draft: Dictionary) -> String:
+	var earlier := _earlier_copy(draft)
+	return earlier if earlier != "" and not _is_rated(earlier) else ""
+
+
+func _earlier_copy(draft: Dictionary) -> String:
+	if processed.has(draft.get("hash", "")):
+		return str(processed[draft["hash"]])
+	var ids: Array = draft.get("ids", [])
+	if ids.is_empty():
+		return ""
+	for id in ids:
+		if not sessions_seen.has(id):
+			return ""
+	return str(sessions_seen[ids[0]])
+
+
+func _is_rated(file_name: String) -> bool:
+	for h in history:
+		if h["file"] == file_name:
+			return true
+	return false
+
+
+# Removes a training import (its saved event and ids). Its archived XML stays.
+func _drop_training(file_name: String) -> void:
+	DirAccess.remove_absolute("user://events/%s.json" % file_name)
+	for id in sessions_seen.keys():
+		if sessions_seen[id] == file_name:
+			sessions_seen.erase(id)
+	for h in processed.keys():
+		if processed[h] == file_name:
+			processed.erase(h)
+
+
+func _ids_from_archive(file_name: String) -> Array:
+	var path := stored_xml_path(file_name)
+	if path == "":
+		return []
+	return session_ids(parse_results(path), str(_read_track(path).get("TrackCourse", "")))
+
+
+# Once, for data saved before session ids existed: works out the ids of every saved event from
+# its archived XML, and removes training imports that repeat a league event or an earlier
+# training import (they were counting the same laps twice).
+var backfill_removed := PackedStringArray()
+
+func _backfill_sessions() -> void:
+	if not DirAccess.dir_exists_absolute("user://events"):
+		return
+	var training := []
+	for f in DirAccess.get_files_at("user://events"):
+		if not f.ends_with(".json"):
+			continue
+		var path := "user://events/" + f
+		var ev = JSON.parse_string(FileAccess.get_file_as_string(path))
+		if not ev is Dictionary or not ev.has("file"):
+			continue
+		if not ev.has("ids"):
+			ev["ids"] = _ids_from_archive(str(ev["file"]))
+			var w := FileAccess.open(path, FileAccess.WRITE)
+			if w != null:
+				w.store_string(JSON.stringify(ev))
+				w.close()
+		if ev.get("kind", "league") == "training":
+			training.append(ev)
+		else:
+			for id in ev["ids"]:
+				sessions_seen[id] = ev["file"]
+	training.sort_custom(func(a, b): return str(a["file"]) < str(b["file"]))
+	for ev in training:
+		var ids: Array = ev["ids"]
+		if not ids.is_empty() and ids.all(func(id): return sessions_seen.has(id)):
+			_drop_training(str(ev["file"]))
+			backfill_removed.append(str(ev["file"]))
+			continue
+		for id in ids:
+			sessions_seen[id] = ev["file"]
+	save_ratings()
+	if not backfill_removed.is_empty():
+		load_error = ("" if load_error == "" else load_error + " ") + \
+			"%d training file(s) repeated an event that was already imported and were removed: %s." % [
+				backfill_removed.size(), ", ".join(backfill_removed)]

@@ -457,6 +457,56 @@ func ranks() -> Array:
 	return tables
 
 
+# ---------- Wet weather (wet_weather.gd) ----------
+func wet_weather() -> Array:
+	var tables := []
+	var inf := WetWeather.info()
+	for cls in WetWeather.classes():
+		var all := WetWeather.all(cls)
+		var rows := []
+		for d in all:
+			var e: Dictionary = all[d]
+			rows.append([d, e["verdict"], "%+.2f%%" % float(e["effect"]), "%.2f%%" % float(e["se"]),
+				"%+.2f%%" % float(e["raw"]), int(e["n_wet"]), int(e["n_dry"]), e])
+		if rows.is_empty():
+			continue
+		# drivers with an estimate first (quickest in the wet to slowest), then those with too few wet sessions
+		rows.sort_custom(func(a, b):
+			var ea := int(a[7]["n_wet"]) >= WetWeather.MIN_WET
+			var eb := int(b[7]["n_wet"]) >= WetWeather.MIN_WET
+			if ea != eb:
+				return ea
+			return float(a[7]["effect"]) < float(b[7]["effect"]))
+		var colours := []
+		var tips := []
+		for i in rows.size():
+			var e: Dictionary = rows[i][7]
+			colours.append(wet_colour(e))
+			tips.append("Wet sessions:\n" + "\n".join(PackedStringArray(e["wet_sessions"])))
+			rows[i] = rows[i].slice(0, 7)
+		var t := _table(str(cls), ["Driver", "In the wet", "Estimate", "Uncertainty", "Raw gap", "Wet sessions", "Dry sessions"], rows,
+			("Pace in wet sessions (at least half the laps on wet tyres) against the driver's own dry pace, race and quali together. Negative = quicker in the wet than usual. "
+			+ "Raw gap = the plain difference; Estimate = the same pulled towards 0 until enough wet sessions back it up (true wet-weather differences between drivers in this league are about ±%.1f%% of lap time, so a 2%% raw gap from three races is mostly read as luck). "
+			+ "Needs %d wet sessions and %d dry ones of the same kind. Hover the wet sessions for the list.") % [float(inf["tau"]), WetWeather.MIN_WET, WetWeather.MIN_DRY])
+		t["cell_colors"] = {1: colours}
+		t["cell_tips"] = {5: tips}
+		tables.append(t)
+	if tables.is_empty():
+		tables.append(_table("Wet weather", [], [], "No wet sessions yet (sessions with at least half the laps on wet tyres)."))
+	return tables
+
+
+# Colour for a wet-weather verdict: green = quicker in the wet, red = slower, none = no call.
+func wet_colour(e: Dictionary) -> Variant:
+	var v := str(e.get("verdict", ""))
+	if not v.contains("in the wet"):
+		return null
+	var quick := float(e["effect"]) < 0.0
+	if v.begins_with("early sign"):
+		return UiTheme.driver_grade_color(4 if quick else 2)
+	return UiTheme.driver_grade_color(5 if quick else 1)
+
+
 func standings() -> Array:
 	if season == "":
 		return _standings_all_time()
@@ -872,6 +922,15 @@ func _profile_overview(driver_name: String, rows: Array) -> Dictionary:
 		["Duels fought (all ratings)", duels],
 		["Also known as", ", ".join(PackedStringArray(akas)) if not akas.is_empty() else "-"],
 	])
+	for cls in cls_list:
+		var wet := WetWeather.of(driver_name, cls)
+		var txt := WetWeather.verdict(wet)
+		if not wet.is_empty() and int(wet["n_wet"]) >= WetWeather.MIN_WET:
+			txt += " (%d wet sessions, raw gap %+.1f%%)" % [int(wet["n_wet"]), float(wet["raw"])]
+		out.append(["Wet weather" + (" (%s)" % cls if cls_list.size() > 1 else ""), txt])
+		while colours.size() < out.size() - 1:
+			colours.append(null)
+		colours.append(wet_colour(wet))
 	var t := _table("Overview", ["Stat", "Value"], out,
 		"Rank comes from the rating in each class (names and limits in Settings). Laps figures only count events that have stored stats.")
 	t["cell_colors"] = {1: colours}

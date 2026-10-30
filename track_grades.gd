@@ -35,8 +35,11 @@ const TRAITS := [
 		"tip": "Litres per minute of driving, which is what decides pit stops in a timed race."},
 	{"id": "bumps", "unit": "G (typical 50 m)", "name": "Bumpiness", "src": "tel", "key": "bump_g", "cuts": [0.065, 0.085, 0.105, 0.13],
 		"tip": "Fast up-and-down motion (vertical G) where the car is going straight, so kerbs do not count: the typical 50 m section, so one big hit does not decide it. High = bumpy surface."},
-	{"id": "overtake", "unit": "passes per car per 10 laps", "name": "Overtaking", "src": "res", "key": "passes_10", "cuts": [0.6, 1.0, 1.5, 2.2],
-		"tip": "From league races: on-track passes, i.e. two cars of the class swapping places between the end of one lap and the next. Passes on the opening lap and swaps caused by pit stops are not counted. Per car, per 10 laps. High = lots of overtaking."},
+	# graded the other way round ("invert"): fewer passes = harder to overtake = higher grade.
+	# "fit_name" is what the driver track-fit report calls it, as that works on the raw pass count.
+	{"id": "overtake", "unit": "passes per car per 10 laps", "name": "Overtaking difficulty", "src": "res", "key": "passes_10", "cuts": [0.6, 1.0, 1.5, 2.2],
+		"invert": true, "fit_name": "Overtaking (many passes)",
+		"tip": "How hard it is to pass, from league races: on-track passes, i.e. two cars of the class swapping places between the end of one lap and the next. Passes on the opening lap and swaps caused by pit stops are not counted. Per car, per 10 laps. High grade = few passes, hard to overtake; low grade = lots of overtaking."},
 	{"id": "incidents", "unit": "per driver per 10 laps", "name": "Incident risk", "src": "res", "key": "incidents_10", "cuts": [0.5, 1.0, 2.0, 3.5],
 		"tip": "From league races: contacts plus track-limit warnings per driver per 10 laps."},
 ]
@@ -74,6 +77,8 @@ static func grade(course: String, cls: String) -> Array:
 			else:
 				row["grade"] = _fixed(x, cuts)
 				row["basis"] = "fixed scale (%d track%s known)" % [pool.size(), "" if pool.size() == 1 else "s"]
+			if t.get("invert", false) and int(row["grade"]) > 0:
+				row["grade"] = 6 - int(row["grade"])
 		out.append(row)
 	return out
 
