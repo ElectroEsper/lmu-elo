@@ -1,11 +1,13 @@
+class_name MainScreen
 extends Control
-## Main screen: review/edit a result file, view ratings, run reports, recompute, export.
-## Attach to the root Control node of a new scene.
-## Needs elo.gd and reports.gd registered as autoloads named "Elo" and "Reports",
-## plus reports_view.gd and rating_chart.gd in the project.
-## Drag a result XML onto the window to start.
-
-var draft := {}
+## The app's main window: sidebar, the screens, the status bar with its progress bar, and the
+## data actions (recompute, export, re-read, backup). Each screen lives in its own script:
+##   import_view.gd (Review: dropped result files), ratings_view.gd, profile_view.gd (Drivers),
+##   reports_view.gd, profiles_view.gd, predict_view.gd, settings_view.gd; telemetry drops go to
+##   motec_import.gd. They talk back through the public functions below: set_status, progress,
+##   progress_done, in_background, show_view, data_changed, refresh_profiles.
+## Attach to the root Control node of the main scene. Needs the autoloads Elo, Reports, Profiles
+## and Predict.
 
 # screens: [key, sidebar label, one line shown under the title]
 const VIEWS := [
@@ -21,59 +23,23 @@ const VIEWS := [
 # frame
 var status := Label.new()
 var clear_btn := Button.new()   # empties the status bar
-var drop_note := ""             # files that could not be read at drop time, repeated in the summary
 const STATUS_LINES := 6         # the bar shows at most this many lines; hover it for the rest
 var confirm_dialog := ConfirmationDialog.new()
 var nav_buttons := {}               # view key -> sidebar Button
-var progress := ProgressBar.new()   # status bar, shown while files are being read
+var progress_bar := ProgressBar.new()   # status bar, shown while files are being read
 var busy := false                   # an import is running: further drops wait
 var view_title := Label.new()
 var view_sub := Label.new()
-var drop_hint := VBoxContainer.new()   # shown on Review while no file is loaded
 
-# review view
-var review_box := VBoxContainer.new()
-var grid_check := CheckBox.new()
-var warnings := VBoxContainer.new()
-var tabs := TabContainer.new()
-var confirm_btn := Button.new()
-
-# ratings view
-var ratings_box := VBoxContainer.new()
-var ratings_view := TabContainer.new()
-var merge_dialog := ConfirmationDialog.new()   # makes two driver names one driver
-var merge_from := OptionButton.new()
-var merge_into := OptionButton.new()
-var merge_new := LineEdit.new()
-var merge_list := VBoxContainer.new()          # merges made so far, each with an Undo button
-
-# drivers view: pick any driver and see their profile (incl. track fit)
+# screens
+var import_view := ImportView.new()
+var ratings_view := RatingsView.new()
 var driver_view := ProfileView.new()
-
-# reports view
 var reports_view := ReportsView.new()
-var predict_view := PredictView.new()
 var profiles_view := ProfilesView.new()
+var predict_view := PredictView.new()
 var settings_view := SettingsView.new()
-
-# batch import
-var type_dialog := AcceptDialog.new()
-
-# telemetry (MoTeC CSV) import
-var motec_items: Array = []        # {"path", "course", "class"}
-var motec_notes := ""
-var motec_dialog := ConfirmationDialog.new()   # asks which track and class each file belongs to
-var motec_rows_box := VBoxContainer.new()
-var motec_rows: Array = []         # {"path", "track": OptionButton, "class": OptionButton}
-var motec_courses: Array = []      # track names seen in result files, alphabetical (picker order)
-var motec_classes: Array = []
-var motec_info := AcceptDialog.new()
-var skip_btn := Button.new()
-var auto_btn := Button.new()
-var pending: Array = []        # dropped files waiting for the league / training answer
-var queue: Array = []          # league files still to review in this batch
-var batch_active := false
-var batch := {"total": 0, "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": [], "unreadable": [], "empty": []}
+var motec := MotecImport.new()
 
 
 func _ready() -> void:
@@ -122,7 +88,7 @@ func _ready() -> void:
 		b.toggle_mode = true
 		b.button_group = group
 		b.focus_mode = Control.FOCUS_NONE
-		b.pressed.connect(_show_view.bind(v[0]))
+		b.pressed.connect(show_view.bind(v[0]))
 		nav.add_child(b)
 		nav_buttons[v[0]] = b
 	var push := Control.new()
@@ -172,10 +138,10 @@ func _ready() -> void:
 	status_row.add_theme_constant_override("separation", 16)
 	status_bar.add_child(status_row)
 	status_row.add_child(status)
-	progress.custom_minimum_size = Vector2(260, 0)
-	progress.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	progress.visible = false
-	status_row.add_child(progress)
+	progress_bar.custom_minimum_size = Vector2(260, 0)
+	progress_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	progress_bar.visible = false
+	status_row.add_child(progress_bar)
 	status.max_lines_visible = STATUS_LINES
 	status.mouse_filter = Control.MOUSE_FILTER_PASS
 	clear_btn.text = "Clear"
@@ -186,169 +152,50 @@ func _ready() -> void:
 	clear_btn.pressed.connect(func(): status.text = "")
 	status_row.add_child(clear_btn)
 
-	# review view
-	review_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_child(review_box)
-	drop_hint.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	drop_hint.alignment = BoxContainer.ALIGNMENT_CENTER
-	var hint_big := Label.new()
-	hint_big.text = "Drop result files here"
-	hint_big.theme_type_variation = "HeaderMedium"
-	hint_big.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	drop_hint.add_child(hint_big)
-	var hint_small := Label.new()
-	hint_small.text = "Result XMLs or whole folders: you will be asked whether they are league results or training data.\nMoTeC CSV exports become track profiles."
-	hint_small.theme_type_variation = "Muted"
-	hint_small.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	drop_hint.add_child(hint_small)
-	review_box.add_child(drop_hint)
-	grid_check.text = "No quali file: use grid positions as quali"
-	review_box.add_child(grid_check)
-	review_box.add_child(warnings)
-	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	review_box.add_child(tabs)
-	var confirm_row := HFlowContainer.new()
-	review_box.add_child(confirm_row)
-	confirm_btn.text = "Confirm and rate"
-	confirm_btn.theme_type_variation = "AccentButton"
-	confirm_btn.disabled = true
-	confirm_btn.pressed.connect(_on_confirm)
-	confirm_row.add_child(confirm_btn)
-	skip_btn.text = "Skip this file"
-	skip_btn.visible = false
-	skip_btn.pressed.connect(_skip_current)
-	confirm_row.add_child(skip_btn)
-	auto_btn.text = "Confirm this and all remaining without review"
-	auto_btn.visible = false
-	auto_btn.pressed.connect(_auto_confirm_rest)
-	confirm_row.add_child(auto_btn)
-
-	# ratings view, with the driver merge tool above the tables
-	ratings_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_child(ratings_box)
-	var ratings_bar := HFlowContainer.new()
-	ratings_bar.add_child(_btn("Merge drivers...", _open_merge))
-	ratings_box.add_child(ratings_bar)
-	ratings_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	ratings_box.add_child(ratings_view)
-	_build_merge_dialog()
-
-	# drivers view
-	driver_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	driver_view.notice.connect(_on_notice)
-	root.add_child(driver_view)
-
-	# reports view
-	reports_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	reports_view.notice.connect(_on_notice)
-	root.add_child(reports_view)
-	
-	# profiles view
-	profiles_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	profiles_view.notice.connect(_on_notice)
-	root.add_child(profiles_view)
-
-	# predict view
-	predict_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	predict_view.notice.connect(_on_notice)
-	root.add_child(predict_view)
-
-	# settings view
-	settings_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	settings_view.notice.connect(_on_notice)
-	settings_view.saved.connect(_data_changed)
-	root.add_child(settings_view)
+	# the screens, one at a time in the body
+	import_view.shell = self
+	ratings_view.shell = self
+	motec.shell = self
+	for v in [import_view, ratings_view, driver_view, reports_view, profiles_view, predict_view, settings_view]:
+		v.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		root.add_child(v)
+	for v in [driver_view, reports_view, profiles_view, predict_view, settings_view]:
+		v.notice.connect(set_status)
+	settings_view.saved.connect(data_changed)
+	add_child(motec)
 
 	# recompute confirmation
 	confirm_dialog.dialog_text = "Rebuild every rating from the saved events, oldest to newest?\nThe current ratings are backed up first."
 	confirm_dialog.confirmed.connect(_recompute)
 	add_child(confirm_dialog)
 
-	# league or training? asked every time files are dropped
-	type_dialog.title = "What are these files?"
-	type_dialog.ok_button_text = "League results"
-	type_dialog.add_button("Training data", false, "training")
-	type_dialog.add_cancel_button("Cancel")
-	type_dialog.confirmed.connect(_start_batch.bind("league"))
-	type_dialog.custom_action.connect(_on_type_action)
-	type_dialog.canceled.connect(func(): pending.clear())
-	add_child(type_dialog)
-
-	# telemetry files: which track and class?
-	motec_dialog.title = "Which track and class?"
-	motec_dialog.ok_button_text = "Import"
-	var motec_layout := VBoxContainer.new()
-	var motec_intro := Label.new()
-	motec_intro.text = "Pick the track and class of each telemetry file. Only tracks and classes seen in your result files are listed, so the profile is matched to the right track for predictions."
-	motec_intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	motec_intro.custom_minimum_size = Vector2(560, 0)
-	motec_layout.add_child(motec_intro)
-	var motec_scroll := ScrollContainer.new()
-	motec_scroll.custom_minimum_size = Vector2(560, 220)
-	motec_rows_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	motec_scroll.add_child(motec_rows_box)
-	motec_layout.add_child(motec_scroll)
-	motec_dialog.add_child(motec_layout)
-	motec_dialog.confirmed.connect(_finish_motec)
-	motec_dialog.canceled.connect(_cancel_motec)
-	add_child(motec_dialog)
-	motec_info.title = "Track not known yet"
-	add_child(motec_info)
-
-	_show_view("review")
-	_rebuild()
+	show_view("review")
 	get_window().files_dropped.connect(_on_files_dropped)
 
 
-# ---------- Views ----------
-func _show_view(view: String) -> void:
+# ---------- Screens ----------
+func show_view(view: String) -> void:
 	for v in VIEWS:
 		if v[0] == view:
 			view_title.text = v[1]
 			view_sub.text = v[2]
 			nav_buttons[v[0]].button_pressed = true   # the button group releases the others
-	review_box.visible = view == "review"
-	ratings_box.visible = view == "ratings"
-	driver_view.visible = view == "drivers"
-	reports_view.visible = view == "reports"
-	profiles_view.visible = view == "profiles"
-	predict_view.visible = view == "predict"
-	settings_view.visible = view == "settings"
-	if view == "settings":
-		settings_view.refresh()
-	if view == "ratings":
-		_draw_ratings()
-	elif view == "drivers":
-		driver_view.refresh()
-	elif view == "reports":
-		reports_view.refresh()
-	elif view == "profiles":
-		profiles_view.refresh()
-	elif view == "predict":                
-		predict_view.refresh()
+	var screens := {"review": import_view, "ratings": ratings_view, "drivers": driver_view, "reports": reports_view,
+		"profiles": profiles_view, "predict": predict_view, "settings": settings_view}
+	for key in screens:
+		screens[key].visible = key == view
+	if view != "review":
+		screens[view].refresh()
 
 
-func _on_notice(text: String) -> void:
+# ---------- Shared by the screens ----------
+func set_status(text: String) -> void:
 	status.text = text
 
 
-func _clear(container: Node) -> void:
-	for c in container.get_children():
-		container.remove_child(c)
-		c.queue_free()
-
-
-func _btn(text: String, action: Callable) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.pressed.connect(action)
-	return b
-
-
-# ---------- Work off the main thread ----------
 # Runs `work` (reading and analysing files) on a separate thread while the window keeps
 # redrawing, and returns its result. Saving and rating stay on the main thread.
-func _in_background(work: Callable) -> Variant:
+func in_background(work: Callable) -> Variant:
 	var t := Thread.new()
 	t.start(work)
 	while t.is_alive():
@@ -356,699 +203,52 @@ func _in_background(work: Callable) -> Variant:
 	return t.wait_to_finish()
 
 
-func _progress(done: int, total: int, text: String) -> void:
+func progress(done: int, total: int, text: String) -> void:
 	busy = true
-	progress.visible = true
-	progress.max_value = maxi(total, 1)
-	progress.value = done
+	progress_bar.visible = true
+	progress_bar.max_value = maxi(total, 1)
+	progress_bar.value = done
 	status.text = text
 
 
-func _progress_done() -> void:
+func progress_done() -> void:
 	busy = false
-	progress.visible = false
+	progress_bar.visible = false
 
 
-func _side_btn(text: String, action: Callable, tip: String) -> Button:
-	var b := _btn(text, action)
-	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	b.tooltip_text = tip
-	return b
+func refresh_profiles() -> void:
+	if profiles_view.visible:
+		profiles_view.refresh()
 
 
-func _section(text: String) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.theme_type_variation = "SectionLabel"
-	return l
+# After any change to the data: driver history (Profiles) is rebuilt and the screen on display
+# is redrawn, so profiles, track fit and predictions never show data from before an import,
+# merge or recompute.
+func data_changed() -> void:
+	Profiles.rebuild()
+	for v in [ratings_view, driver_view, reports_view, profiles_view, predict_view]:
+		if v.visible:
+			v.refresh()
 
 
-func _gap(height: int) -> Control:
-	var c := Control.new()
-	c.custom_minimum_size = Vector2(0, height)
-	return c
-
-
-func _margins(m: MarginContainer, left: int, top: int, right: int, bottom: int) -> void:
-	m.add_theme_constant_override("margin_left", left)
-	m.add_theme_constant_override("margin_top", top)
-	m.add_theme_constant_override("margin_right", right)
-	m.add_theme_constant_override("margin_bottom", bottom)
-
-
-# ---------- Loading and confirming ----------
-# One file, several files or whole folders can be dropped. Files are handled oldest first
-# (their names start with a timestamp), after asking whether they are league or training data.
+# ---------- Dropped files ----------
+# Result XMLs (files or whole folders) go to the Review screen's import; MoTeC CSV exports become
+# track profiles.
 func _on_files_dropped(files: PackedStringArray) -> void:
 	if busy:
 		status.text = "Still reading the previous files; drop these again when the progress bar is gone."
 		return
 	var csv_paths := Elo.collect_files(files, ".csv")
 	var paths := Elo.collect_xml(files)
-	if not csv_paths.is_empty():   # MoTeC telemetry exports become track profiles
-		_start_motec(csv_paths)
+	if not csv_paths.is_empty():
+		motec.start(csv_paths)
 		if not paths.is_empty():
 			status.text = "The .xml files were ignored: drop MoTeC .csv files and result .xml files separately."
 		return
 	if paths.is_empty():
 		status.text = "No .xml or .csv files found in what you dropped."
 		return
-	paths.sort_custom(func(a, b): return str(a).get_file() < str(b).get_file())
-	# Copied in right away: files dragged straight out of a .zip (or from a cloud folder) can be
-	# temporary copies that are gone by the time League / Training is picked.
-	var staged := _stage(paths)
-	paths = staged["paths"]
-	drop_note = _unreadable_note(staged["unreadable"]) if not staged["unreadable"].is_empty() else ""
-	if paths.is_empty():
-		status.text = _unreadable_note(staged["unreadable"])
-		return
-	if not staged["unreadable"].is_empty():
-		status.text = _unreadable_note(staged["unreadable"])
-	pending = paths
-	type_dialog.dialog_text = "%d file(s) dropped (%s to %s).\n\nLeague results are rated: their drivers feed ratings, profiles and predictions.\nTraining data only feeds track and car-model data: no driver is rated or stored." % [
-		paths.size(), str(paths[0]).get_file(), str(paths[paths.size() - 1]).get_file()]
-	type_dialog.popup_centered()
-
-
-const INCOMING := "user://incoming"
-
-
-# Copies dropped result files into user://incoming (cleared first). Returns {"paths": copies,
-# "unreadable": [file names that could not be read]}. Same-named files from different folders
-# each get their own subfolder, so none overwrites another.
-func _stage(paths: Array) -> Dictionary:
-	if DirAccess.dir_exists_absolute(INCOMING):
-		_clear_dir(INCOMING)
-	DirAccess.make_dir_recursive_absolute(INCOMING)
-	var out := []
-	var bad := []
-	var used := {}
-	for src in paths:
-		var fname: String = str(src).get_file()
-		var dir := INCOMING
-		var n := 2
-		while used.has(dir + "/" + fname):
-			dir = "%s/%d" % [INCOMING, n]
-			n += 1
-		DirAccess.make_dir_recursive_absolute(dir)
-		var dst := dir + "/" + fname
-		if not FileAccess.file_exists(str(src)) or DirAccess.copy_absolute(str(src), dst) != OK:
-			bad.append(fname)
-			continue
-		used[dst] = true
-		out.append(dst)
-	return {"paths": out, "unreadable": bad}
-
-
-func _clear_dir(path: String) -> void:
-	for sub in DirAccess.get_directories_at(path):
-		_clear_dir(path + "/" + sub)
-		DirAccess.remove_absolute(path + "/" + sub)
-	for f in DirAccess.get_files_at(path):
-		DirAccess.remove_absolute(path + "/" + f)
-
-
-func _unreadable_note(names: Array) -> String:
-	return "Could not read %d file(s): %s. If they were dragged straight out of a .zip, extract the zip first and drop the extracted files; files in a cloud folder (OneDrive...) must be downloaded to the computer." % [
-		names.size(), ", ".join(PackedStringArray(names))]
-
-
-# ---------- MoTeC telemetry: track profiles ----------
-# Every telemetry file is confirmed by hand: the track is picked from the tracks seen in result
-# files (so the profile is attached to the course the predictor uses), and the class from the
-# known classes. Both are preselected from the file name when it makes that possible.
-func _norm(s: String) -> String:
-	return s.replace("_", " ").replace("-", " ").strip_edges().to_lower()
-
-
-func _guess_track(file_name: String, courses: Array) -> String:
-	var info := MotecProfile.guess_from_name(file_name)
-	for c in courses:
-		if _norm(str(c)) == _norm(str(info.get("track", ""))):
-			return str(c)
-	var base := _norm(file_name.get_basename())
-	for c in courses:   # e.g. "Brno" inside "GO_..._LMP3_Brno_Q"
-		if _norm(str(c)).length() >= 3 and base.contains(_norm(str(c))):
-			return str(c)
-	return ""
-
-
-func _guess_class(file_name: String, classes: Array) -> String:
-	var info := MotecProfile.guess_from_name(file_name)
-	for c in classes:
-		if _norm(str(c)) == _norm(str(info.get("class", ""))):
-			return str(c)
-	for token in file_name.get_basename().split("_"):   # any part of the name that is a class
-		for c in classes:
-			if _norm(str(c)) == _norm(token):
-				return str(c)
-	return ""
-
-
-func _start_motec(paths: Array) -> void:
-	motec_courses = Profiles.courses().duplicate()
-	motec_classes = Profiles.classes().duplicate()
-	motec_courses.erase("")
-	# alphabetical, ignoring case
-	var by_name := func(a, b): return str(a).to_lower() < str(b).to_lower()
-	motec_courses.sort_custom(by_name)
-	motec_classes.sort_custom(by_name)
-	if motec_courses.is_empty() or motec_classes.is_empty():
-		motec_info.dialog_text = "No track is known yet.\n\nImport at least one result file (.xml) for this track first, then drop the telemetry again. Telemetry can only be attached to tracks and classes seen in your results."
-		motec_info.popup_centered()
-		status.text = "Telemetry not imported: no result files yet."
-		return
-	for c in motec_rows_box.get_children():
-		motec_rows_box.remove_child(c)
-		c.queue_free()
-	motec_rows = []
-	for p in paths:
-		var file_name := str(p).get_file()
-		var row := VBoxContainer.new()
-		var label := Label.new()
-		label.text = file_name
-		row.add_child(label)
-		var picks := HBoxContainer.new()
-		var track_pick := OptionButton.new()
-		track_pick.add_item("Choose the track...")
-		var guess := _guess_track(file_name, motec_courses)
-		for i in motec_courses.size():
-			track_pick.add_item(str(motec_courses[i]))
-			if str(motec_courses[i]) == guess:
-				track_pick.select(i + 1)
-		track_pick.add_item("Not in the list")
-		track_pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		track_pick.item_selected.connect(func(_i: int): _validate_motec())
-		picks.add_child(track_pick)
-		var class_pick := OptionButton.new()
-		class_pick.add_item("Choose the class...")
-		var cls_guess := _guess_class(file_name, motec_classes)
-		for i in motec_classes.size():
-			class_pick.add_item(LeagueSettings.label(str(motec_classes[i])))
-			if str(motec_classes[i]) == cls_guess:
-				class_pick.select(i + 1)
-		class_pick.item_selected.connect(func(_i: int): _validate_motec())
-		picks.add_child(class_pick)
-		row.add_child(picks)
-		row.add_child(HSeparator.new())
-		motec_rows_box.add_child(row)
-		motec_rows.append({"path": p, "track": track_pick, "class": class_pick})
-	_validate_motec()
-	motec_dialog.popup_centered()
-
-
-# "Not in the list" sits after the known tracks
-func _is_not_listed(pick: OptionButton) -> bool:
-	return pick.selected == motec_courses.size() + 1
-
-
-# Import stays disabled until every file has a track (or "Not in the list") and a class
-func _validate_motec() -> void:
-	var complete := not motec_rows.is_empty()
-	for r in motec_rows:
-		var track_pick: OptionButton = r["track"]
-		var class_pick: OptionButton = r["class"]
-		if track_pick.selected <= 0:
-			complete = false
-		elif not _is_not_listed(track_pick) and class_pick.selected <= 0:
-			complete = false
-	motec_dialog.get_ok_button().disabled = not complete
-
-
-func _cancel_motec() -> void:
-	motec_rows.clear()
-	status.text = "Telemetry import cancelled."
-
-
-func _finish_motec() -> void:
-	motec_items = []
-	var refused := PackedStringArray()
-	for r in motec_rows:
-		var track_pick: OptionButton = r["track"]
-		var class_pick: OptionButton = r["class"]
-		if _is_not_listed(track_pick):
-			refused.append(str(r["path"]).get_file())
-			continue
-		motec_items.append({
-			"path": r["path"],
-			"course": str(motec_courses[track_pick.selected - 1]),
-			"class": str(motec_classes[class_pick.selected - 1]),
-		})
-	motec_rows.clear()
-	motec_notes = ""
-	if not refused.is_empty():
-		motec_notes = " Not imported (track not in your results yet): " + ", ".join(refused) + "."
-		motec_info.dialog_text = "Telemetry needs a track that appears in your result files:\n\n%s\n\nImport a result file (.xml) for that track first, then drop the telemetry again." % "\n".join(refused)
-		motec_info.popup_centered()
-	if motec_items.is_empty():
-		status.text = "No telemetry imported." + motec_notes
-		return
-	_import_motec()
-
-
-func _import_motec() -> void:
-	var saved := 0
-	var kept := 0
-	var failed := PackedStringArray()
-	for i in motec_items.size():
-		var item: Dictionary = motec_items[i]
-		_progress(i, motec_items.size(), "Reading telemetry %d of %d: %s" % [i + 1, motec_items.size(), str(item["path"]).get_file()])
-		var path: String = item["path"]
-		var prof: Dictionary = await _in_background(func(): return MotecProfile.analyze(path))
-		if prof.has("error"):
-			failed.append("%s (%s)" % [str(item["path"]).get_file(), prof["error"]])
-			continue
-		prof["course"] = item["course"]
-		prof["class"] = item["class"]
-		if TrackStore.save(prof) == "kept":
-			kept += 1
-		else:
-			saved += 1
-	motec_items.clear()
-	_progress_done()
-	var text := "Track profiles: %d saved, %d skipped because a faster lap was already stored." % [saved, kept]
-	if not failed.is_empty():
-		text += " Could not use: " + ", ".join(failed) + "."
-	status.text = text + motec_notes
-	if profiles_view.visible:
-		profiles_view.refresh()
-
-
-func _on_type_action(action: StringName) -> void:
-	if action == "training":
-		type_dialog.hide()
-		_start_batch("training")
-
-
-func _start_batch(kind: String) -> void:
-	var paths := pending.duplicate()
-	pending.clear()
-	if paths.is_empty():
-		return
-	if kind == "training":
-		_import_training(paths)
-		return
-	queue = paths
-	batch = {"total": paths.size(), "rated": 0, "updated": 0, "skipped": 0, "suspects": {}, "practice": [], "unreadable": [], "empty": []}
-	batch_active = true
-	_next_in_queue()
-
-
-# Training files: track and car-model data only, saved without any driver information.
-func _import_training(paths: Array) -> void:
-	var added := 0
-	var known := 0
-	var unusable := PackedStringArray()
-	var practice := PackedStringArray()
-	var unreadable := []
-	for i in paths.size():
-		_progress(i, paths.size(), "Reading training file %d of %d..." % [i + 1, paths.size()])
-		var path: String = paths[i]
-		var verdict: String = await _in_background(func(): return Elo.import_training(path))
-		match verdict:
-			"added":
-				added += 1
-			"duplicate":
-				known += 1
-			"practice only":
-				practice.append(str(paths[i]).get_file())
-			"unreadable":
-				unreadable.append(str(paths[i]).get_file())
-			_:
-				unusable.append(str(paths[i]).get_file())
-	var text := "Training data: %d added, %d already imported." % [added, known]
-	if not unusable.is_empty():
-		text += "\nNo usable lap data (too few laps): " + ", ".join(unusable)
-	if not practice.is_empty():
-		text += "\nSkipped, practice or warm-up only: " + ", ".join(practice)
-	if not unreadable.is_empty():
-		text += "\n" + _unreadable_note(unreadable)
-	if drop_note != "":
-		text += "\n" + drop_note
-		drop_note = ""
-	_progress_done()
-	status.text = text
-	_data_changed()
-
-
-# League files: each new file opens in the review screen. Files that were already rated are
-# not rated again; they only get their stats and lap data completed if those are missing.
-func _next_in_queue() -> void:
-	while not queue.is_empty():
-		var path: String = queue.pop_front()
-		_progress(batch["total"] - queue.size() - 1, batch["total"], "Checking %s (%d left)..." % [path.get_file(), queue.size()])
-		var grid_q := grid_check.button_pressed
-		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path, grid_q))
-		if d.get("unreadable", false):
-			batch["unreadable"].append(path.get_file())
-			continue
-		if not Elo.has_sessions(d):   # practice / warm-up only (or no usable session): never rated
-			batch["practice" if d.get("practice_only", false) else "empty"].append(path.get_file())
-			continue
-		if d["duplicate"]:
-			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
-				batch["updated"] += 1
-			else:
-				batch["skipped"] += 1
-			status.text = "Checking files... %d left." % queue.size()
-			await get_tree().process_frame
-			continue
-		busy = false   # waiting for the review: the bar stays as a batch counter
-		draft = d
-		_show_view("review")
-		_rebuild()
-		skip_btn.visible = true
-		auto_btn.visible = not queue.is_empty()
-		status.text = "File %d of %d: %s" % [batch["total"] - queue.size(), batch["total"], d["file"]]
-		return
-	_finish_batch()
-
-
-func _skip_current() -> void:
-	batch["skipped"] += 1
-	draft = {}
-	_next_in_queue()
-
-
-# Confirms the file on screen as it is (similar names stay separate drivers), then rates the rest
-# of the batch without stopping for review.
-func _auto_confirm_rest() -> void:
-	if not draft.is_empty():
-		if draft.has("league_name"):
-			var err := Elo.rename_draft(draft, _league_file_name())
-			if err != "":
-				status.text = err + " Pick another round or series."
-				return
-		_note_suspects(draft)
-		Elo.confirm_draft(draft)
-		batch["rated"] += 1
-		draft = {}
-	skip_btn.visible = false
-	auto_btn.visible = false
-	confirm_btn.disabled = true
-	while not queue.is_empty():
-		var path: String = queue.pop_front()
-		_progress(batch["total"] - queue.size() - 1, batch["total"], "Rating %s (%d left)..." % [path.get_file(), queue.size()])
-		var grid_q := grid_check.button_pressed
-		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path, grid_q))
-		if d.get("unreadable", false):
-			batch["unreadable"].append(path.get_file())
-			continue
-		if not Elo.has_sessions(d):   # practice / warm-up only (or no usable session): never rated
-			batch["practice" if d.get("practice_only", false) else "empty"].append(path.get_file())
-			continue
-		if d["duplicate"]:
-			if Elo.event_lacks_stats(d) and Elo.attach_stats(d):
-				batch["updated"] += 1
-			else:
-				batch["skipped"] += 1
-			continue
-		if not Elo.is_league_name(d["file"]):
-			# needs a league name: stop here and ask, as the review screen does
-			busy = false
-			draft = d
-			_show_view("review")
-			_rebuild()
-			skip_btn.visible = true
-			auto_btn.visible = not queue.is_empty()
-			status.text = "File %d of %d: %s needs a league name before it is rated." % [batch["total"] - queue.size(), batch["total"], d["file"]]
-			return
-		_note_suspects(d)
-		Elo.confirm_draft(d)
-		batch["rated"] += 1
-	_finish_batch()
-
-
-func _finish_batch() -> void:
-	_progress_done()
-	batch_active = false
-	skip_btn.visible = false
-	auto_btn.visible = false
-	draft = {}
-	_rebuild()
-	status.text = "Batch done: %d rated, %d old event(s) completed with stats and lap data, %d skipped or already complete. If any file was older than events you had already rated, press Recompute all." % [
-		batch["rated"], batch["updated"], batch["skipped"]]
-	if not batch.get("practice", []).is_empty():
-		status.text += "\nSkipped, practice or warm-up only (those sessions are not used): " + ", ".join(PackedStringArray(batch["practice"]))
-	if not batch.get("empty", []).is_empty():
-		status.text += "\nSkipped, no race or qualifying result in the file: " + ", ".join(PackedStringArray(batch["empty"]))
-	if not batch.get("unreadable", []).is_empty():
-		status.text += "\n" + _unreadable_note(batch["unreadable"])
-	if drop_note != "":
-		status.text += "\n" + drop_note
-		drop_note = ""
-	var sus: Dictionary = batch.get("suspects", {})
-	if not sus.is_empty():
-		var parts := PackedStringArray()
-		for n in sus:
-			parts.append("%s (like %s)" % [n, " / ".join(PackedStringArray(sus[n]))])
-		status.text += "\nThese new names look like existing drivers and were kept separate: %s. If any are the same person, use Ratings > Merge drivers." % ", ".join(parts)
-	batch["suspects"] = {}
-	_data_changed()
-
-
-func _on_confirm() -> void:
-	if draft.has("league_name"):
-		var nm := _league_file_name()
-		var err := Elo.rename_draft(draft, nm)
-		if err != "":
-			status.text = err + " Pick another round or series."
-			return
-	var done: String = draft["file"]
-	Elo.confirm_draft(draft)
-	draft = {}
-	if batch_active:
-		batch["rated"] += 1
-		_next_in_queue()
-		return
-	_rebuild()
-	_data_changed()
-	var l := Label.new()
-	l.text = "Rated and saved: " + done
-	warnings.add_child(l)
-
-
-func _attach_stats() -> void:
-	if Elo.attach_stats(draft):
-		status.text = "Stats attached to the saved event."
-	else:
-		status.text = "Could not attach stats. Press Recompute all first, then try again."
-	_show_warnings()
-
-
-# ---------- Review view ----------
-func _rebuild() -> void:
-	var keep := tabs.current_tab
-	_clear(tabs)
-	var empty := draft.is_empty()
-	drop_hint.visible = empty and not batch_active
-	tabs.visible = not empty
-	grid_check.visible = not empty
-	confirm_btn.visible = not empty
-	if empty:
-		_show_warnings()
-		return
-	for sess in draft["orders"]:
-		for cls in draft["orders"][sess]:
-			var order: Array = draft["orders"][sess][cls]
-			var scroll := ScrollContainer.new()
-			var list := VBoxContainer.new()
-			list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			scroll.add_child(list)
-			for i in order.size():
-				list.add_child(_row(order, i))
-			tabs.add_child(scroll)
-			tabs.set_tab_title(tabs.get_tab_count() - 1, "%s %s" % [sess, cls])
-	tabs.current_tab = clampi(keep, 0, maxi(tabs.get_tab_count() - 1, 0))
-	_show_warnings()
-
-
-func _row(order: Array, i: int) -> HBoxContainer:
-	var row := HBoxContainer.new()
-	var pos := Label.new()
-	pos.text = "P%d" % (i + 1)
-	pos.theme_type_variation = "Muted"
-	pos.custom_minimum_size = Vector2(44, 0)
-	pos.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(pos)
-	var label := Label.new()
-	label.text = str(order[i])
-	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(label)
-	var up := _btn("Up", _move.bind(order, i, i - 1))
-	var down := _btn("Down", _move.bind(order, i, i + 1))
-	var drop := _btn("Drop", _drop.bind(order, i))
-	up.disabled = i == 0
-	down.disabled = i == order.size() - 1
-	for btn in [up, down, drop]:
-		btn.theme_type_variation = "SmallButton"
-		btn.focus_mode = Control.FOCUS_NONE
-		row.add_child(btn)
-	return row
-
-
-func _show_warnings() -> void:
-	_clear(warnings)
-	if draft.is_empty():
-		confirm_btn.disabled = true
-		return
-	if draft["duplicate"]:
-		var row := HFlowContainer.new()
-		var l := Label.new()
-		var same: String = draft["duplicate_of"]
-		l.text = ("Already processed: %s" % same) if Elo.processed.get(draft["hash"], "") == same \
-			else ("Same event as %s, already processed under that name." % same)
-		row.add_child(l)
-		if Elo.event_lacks_stats(draft):
-			row.add_child(_btn("Attach stats to the saved event", _attach_stats))
-		warnings.add_child(row)
-	if draft.get("replaces_training", "") != "":
-		var t := Label.new()
-		t.text = "This event was imported as training data (%s). Confirming rates it and replaces that training copy." % draft["replaces_training"]
-		t.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		warnings.add_child(t)
-	for n in draft["new_drivers"]:
-		var row := HFlowContainer.new()
-		var l := Label.new()
-		l.text = "New driver '%s'. Same as:" % n
-		row.add_child(l)
-		for s in draft["new_drivers"][n]:
-			row.add_child(_btn("Merge into " + s, _merge.bind(n, s)))
-		row.add_child(_btn("Keep as new", _keep_new.bind(n)))
-		warnings.add_child(row)
-	if not draft["duplicate"] and not Elo.is_league_name(str(draft["file"])):
-		warnings.add_child(_league_name_row())
-	else:
-		confirm_btn.text = "Confirm and rate"
-	# Confirm stays disabled for duplicates and unresolved name suspicions
-	confirm_btn.disabled = draft["duplicate"] or not draft["new_drivers"].is_empty()
-
-
-# ---------- League name for files named another way ----------
-# The file is saved under "s<season>-<series><round>[-r].xml", the name that gives it its season
-# and championship (Standings). Choices live in the draft, so they survive the row being rebuilt.
-func _league_name_row() -> Control:
-	if not draft.has("league_name"):
-		draft["league_name"] = Elo.suggest_league_name(draft)
-	var ln: Dictionary = draft["league_name"]
-	var box := VBoxContainer.new()
-	var intro := Label.new()
-	intro.text = "%s does not follow the league naming, so its season and series are unknown. Pick them (suggested from the events around it); the file is saved under the league name." % draft["file"]
-	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	intro.add_theme_color_override("font_color", UiTheme.ACCENT_SOFT)
-	box.add_child(intro)
-	var row := HFlowContainer.new()
-	row.add_theme_constant_override("h_separation", 8)
-	box.add_child(row)
-	var preview := Label.new()
-	row.add_child(_small_label("Season"))
-	var season := SpinBox.new()
-	season.min_value = 1
-	season.max_value = 99
-	season.value = int(ln["season"])
-	season.value_changed.connect(func(v):
-		ln["season"] = int(v)
-		_update_league_name(preview))
-	row.add_child(season)
-	row.add_child(_small_label("Series"))
-	var series := OptionButton.new()
-	var names: Dictionary = LeagueSettings.get_value("series_names")
-	var codes := names.keys()
-	if not codes.has(ln["code"]):
-		codes.append(ln["code"])
-	for c in codes:
-		series.add_item("%s (%s)" % [str(names.get(c, str(c).to_upper())), c])
-		series.set_item_metadata(series.item_count - 1, str(c))
-		if str(c) == str(ln["code"]):
-			series.select(series.item_count - 1)
-	series.item_selected.connect(func(i):
-		ln["code"] = str(series.get_item_metadata(i))
-		_update_league_name(preview))
-	row.add_child(series)
-	row.add_child(_small_label("Round"))
-	var rnd := SpinBox.new()
-	rnd.min_value = 1
-	rnd.max_value = 99
-	rnd.value = int(ln["round"])
-	rnd.value_changed.connect(func(v):
-		ln["round"] = int(v)
-		_update_league_name(preview))
-	row.add_child(rnd)
-	row.add_child(preview)
-	_update_league_name(preview)
-	return box
-
-
-func _league_file_name() -> String:
-	var ln: Dictionary = draft["league_name"]
-	return Elo.league_name(int(ln["season"]), str(ln["code"]), int(ln["round"]), draft["orders"].has("race"))
-
-
-func _update_league_name(preview: Label) -> void:
-	var nm := _league_file_name()
-	var taken := Elo.name_taken(nm)
-	preview.text = "-> %s%s" % [nm, "  (already used by another event)" if taken else ""]
-	preview.add_theme_color_override("font_color", UiTheme.driver_grade_color(1) if taken else UiTheme.TEXT)
-	confirm_btn.text = "Confirm as %s" % nm
-
-
-func _small_label(text: String) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.theme_type_variation = "Muted"
-	return l
-
-
-func _move(order: Array, from: int, to: int) -> void:
-	if to < 0 or to >= order.size():
-		return
-	order.insert(to, order.pop_at(from))
-	_rebuild()
-
-
-func _drop(order: Array, i: int) -> void:
-	order.remove_at(i)
-	_rebuild()
-
-
-func _merge(driver_name: String, into: String) -> void:
-	Elo.merge_driver(draft, driver_name, into)
-	_rebuild()
-
-
-func _keep_new(driver_name: String) -> void:
-	draft["new_drivers"].erase(driver_name)
-	_rebuild()
-
-
-# ---------- Ratings view ----------
-func _draw_ratings() -> void:
-	var keep := ratings_view.current_tab
-	_clear(ratings_view)
-	for b in Elo.boards():
-		var rows := []
-		var colours := []
-		var rank := 1
-		for row in Elo.leaderboard(b[0], b[1]):
-			var rk := Ranks.of(row["name"], b[0])
-			rows.append([rank, row["name"], roundi(row["r"]), int(row["d"]), rk["label"],
-				"Settling" if row["d"] < Elo.SETTLED_DUELS else ""])
-			colours.append(rk["color"])
-			rank += 1
-		ratings_view.add_child(TableView.build({
-			"note": "Settling = fewer than %d duels so far, so the rating still moves quickly. Rank is for the whole class (race and quali together, see Reports > Ranks and Settings)." % int(Elo.SETTLED_DUELS),
-			"headers": ["#", "Driver", "Rating", "Duels", "Rank", "Status"],
-			"rows": rows,
-			"tips": ["Place on the leaderboard.", "", "Elo rating.", "Head-to-head comparisons counted so far.", "League rank in this class.", ""],
-			"cell_colors": {4: colours},
-		}))
-		ratings_view.set_tab_title(ratings_view.get_tab_count() - 1, LeagueSettings.label("%s %s" % [b[0], b[1]]))
-	if ratings_view.get_tab_count() == 0:
-		var empty := Label.new()
-		empty.text = "No ratings yet. Confirm a result file first."
-		ratings_view.add_child(empty)
-		ratings_view.set_tab_title(0, "Empty")
-	ratings_view.current_tab = clampi(keep, 0, maxi(ratings_view.get_tab_count() - 1, 0))
+	import_view.start_files(paths)
 
 
 # ---------- Recompute ----------
@@ -1061,24 +261,7 @@ func _recompute() -> void:
 	if not s["undated"].is_empty():
 		text += " No date in file name, used save time: " + ", ".join(s["undated"])
 	status.text = text
-	_data_changed()
-
-
-# ---------- After any change to the data ----------
-# Driver history (Profiles) is rebuilt and the screen on display is redrawn, so profiles,
-# track fit and predictions never show data from before an import, merge or recompute.
-func _data_changed() -> void:
-	Profiles.rebuild()
-	if ratings_box.visible:
-		_draw_ratings()
-	if driver_view.visible:
-		driver_view.refresh()
-	if reports_view.visible:
-		reports_view.refresh()
-	if profiles_view.visible:
-		profiles_view.refresh()
-	if predict_view.visible:
-		predict_view.refresh()
+	data_changed()
 
 
 # ---------- Backup ----------
@@ -1089,9 +272,9 @@ func _backup() -> void:
 		return
 	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
 	var path := "%s/lmu_elo_backup_%s.zip" % [dir, Time.get_datetime_string_from_system().replace(":", "-")]
-	_progress(0, 1, "Backing up...")
-	var result: Array = await _in_background(func(): return _write_backup(path))
-	_progress_done()
+	progress(0, 1, "Backing up...")
+	var result: Array = await in_background(func(): return _write_backup(path))
+	progress_done()
 	if result[0] == OK:
 		status.text = "Backed up %d files to %s" % [result[1], path]
 		OS.shell_open(dir)
@@ -1145,122 +328,14 @@ func _reread(done_text := "") -> void:
 				files.append("%s/%s" % [Elo.XML_DIR, f])
 	var n := 0
 	for i in files.size():
-		_progress(i, files.size(), "Re-reading archived results %d of %d..." % [i + 1, files.size()])
+		progress(i, files.size(), "Re-reading archived results %d of %d..." % [i + 1, files.size()])
 		var path: String = files[i]
-		var d: Dictionary = await _in_background(func(): return Elo.build_draft(path))
+		var d: Dictionary = await in_background(func(): return Elo.build_draft(path))
 		if Elo.attach_stats(d):   # saving stays on the main thread
 			n += 1
-	_progress_done()
+	progress_done()
 	status.text = done_text if done_text != "" else "Refreshed %d events." % n
-	_data_changed()
-
-
-# Batch auto-confirm keeps similar names separate; remember them for the end-of-batch message
-func _note_suspects(d: Dictionary) -> void:
-	for n in d["new_drivers"]:
-		if not batch.has("suspects"):
-			batch["suspects"] = {}
-		batch["suspects"][n] = d["new_drivers"][n]
-	d["new_drivers"].clear()
-
-
-# ---------- Driver merge ----------
-func _build_merge_dialog() -> void:
-	merge_dialog.title = "Merge drivers"
-	merge_dialog.ok_button_text = "Merge"
-	var box := VBoxContainer.new()
-	box.custom_minimum_size = Vector2(520, 0)
-	var intro := Label.new()
-	intro.text = "Use this when one person appears under two names, or to rename a driver. All ratings are rebuilt from the saved events afterwards (the current ratings are backed up first), so every past result counts for the merged driver."
-	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	box.add_child(intro)
-	var grid := GridContainer.new()
-	grid.columns = 2
-	var l1 := Label.new()
-	l1.text = "Merge this name:"
-	grid.add_child(l1)
-	grid.add_child(merge_from)
-	var l2 := Label.new()
-	l2.text = "into this driver:"
-	grid.add_child(l2)
-	grid.add_child(merge_into)
-	var l3 := Label.new()
-	l3.text = "or rename to:"
-	grid.add_child(l3)
-	merge_new.placeholder_text = "new name (leave empty to use the driver above)"
-	merge_new.custom_minimum_size = Vector2(280, 0)
-	grid.add_child(merge_new)
-	box.add_child(grid)
-	var made := Label.new()
-	made.text = "Merges made so far:"
-	box.add_child(made)
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(520, 140)
-	merge_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.add_child(merge_list)
-	box.add_child(scroll)
-	merge_dialog.add_child(box)
-	merge_dialog.confirmed.connect(_do_merge)
-	add_child(merge_dialog)
-
-
-func _open_merge() -> void:
-	var names := Elo.known_names()
-	names.sort_custom(func(a, b): return str(a).to_lower() < str(b).to_lower())
-	merge_from.clear()
-	merge_into.clear()
-	for n in names:
-		merge_from.add_item(str(n))
-		merge_into.add_item(str(n))
-	if merge_into.item_count > 1:
-		merge_into.select(1)
-	merge_new.text = ""
-	_fill_merge_list()
-	merge_dialog.popup_centered()
-
-
-func _fill_merge_list() -> void:
-	_clear(merge_list)
-	var keys := Elo.aliases.keys()
-	keys.sort_custom(func(a, b): return str(a).to_lower() < str(b).to_lower())
-	if keys.is_empty():
-		var none := Label.new()
-		none.text = "none"
-		merge_list.add_child(none)
-	for a in keys:
-		var row := HBoxContainer.new()
-		var l := Label.new()
-		l.text = "%s  ->  %s" % [a, Elo.aliases[a]]
-		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row.add_child(l)
-		row.add_child(_btn("Undo", _undo_merge.bind(str(a))))
-		merge_list.add_child(row)
-
-
-func _do_merge() -> void:
-	if merge_from.selected < 0:
-		status.text = "No drivers to merge yet."
-		return
-	var from_name := merge_from.get_item_text(merge_from.selected)
-	var into := merge_new.text.strip_edges()
-	if into == "" and merge_into.selected >= 0:
-		into = merge_into.get_item_text(merge_into.selected)
-	var s := Elo.merge_drivers(from_name, into)
-	if s.has("error"):
-		status.text = "Merge not done: " + str(s["error"])
-		return
-	status.text = "%s is now %s. Ratings rebuilt from %d events." % [from_name, Elo.resolve(from_name), int(s["count"])]
-	_data_changed()
-
-
-func _undo_merge(alias_name: String) -> void:
-	var s := Elo.unmerge_driver(alias_name)
-	if s.has("error"):
-		status.text = str(s["error"])
-		return
-	status.text = "%s is a separate driver again. Ratings rebuilt from %d events." % [alias_name, int(s["count"])]
-	_fill_merge_list()
-	_data_changed()
+	data_changed()
 
 
 # ---------- Excel export (current ratings) ----------
@@ -1277,6 +352,41 @@ func _export() -> void:
 		OS.shell_open(dir)   # opens the Documents folder
 	else:
 		status.text = "Export failed (error %d)" % err
+
+
+# ---------- Small builders ----------
+func _btn(text: String, action: Callable) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.pressed.connect(action)
+	return b
+
+
+func _side_btn(text: String, action: Callable, tip: String) -> Button:
+	var b := _btn(text, action)
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.tooltip_text = tip
+	return b
+
+
+func _section(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.theme_type_variation = "SectionLabel"
+	return l
+
+
+func _gap(height: int) -> Control:
+	var c := Control.new()
+	c.custom_minimum_size = Vector2(0, height)
+	return c
+
+
+func _margins(m: MarginContainer, left: int, top: int, right: int, bottom: int) -> void:
+	m.add_theme_constant_override("margin_left", left)
+	m.add_theme_constant_override("margin_top", top)
+	m.add_theme_constant_override("margin_right", right)
+	m.add_theme_constant_override("margin_bottom", bottom)
 
 
 # Status bar upkeep: the Clear button shows only when there is something to clear, and a message

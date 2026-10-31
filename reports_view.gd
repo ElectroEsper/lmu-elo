@@ -18,7 +18,6 @@ const REPORTS := [
 	{"name": "Ranks", "kind": "all", "fn": "ranks"},
 	{"name": "Wet weather", "kind": "all", "fn": "wet_weather"},
 	{"name": "Head to head", "kind": "pair", "fn": "head_to_head"},
-	{"name": "Profile", "kind": "single", "fn": "driver_profile"},
 ]
 
 var report_picker := OptionButton.new()
@@ -27,7 +26,6 @@ var pair_box := HFlowContainer.new()
 var board_picker := OptionButton.new()
 var driver_a := OptionButton.new()
 var driver_b := OptionButton.new()
-var single_pick := OptionButton.new()   # any driver, for the Profile report
 var season_pick := OptionButton.new()   # season filter for the season-aware reports
 var out_tabs := TabContainer.new()
 
@@ -46,9 +44,6 @@ func _ready() -> void:
 	bar.add_child(event_picker)
 	season_pick.item_selected.connect(_on_param_changed)
 	bar.add_child(season_pick)
-	single_pick.custom_minimum_size = Vector2(240, 0)
-	single_pick.item_selected.connect(_on_param_changed)
-	bar.add_child(single_pick)
 	var export_btn := Button.new()
 	export_btn.text = "Export report to Excel"
 	export_btn.pressed.connect(_export)
@@ -92,14 +87,6 @@ func refresh() -> void:
 	for i in season_pick.item_count:
 		if season_pick.get_item_text(i) == keep_season:
 			season_pick.select(i)
-	var keep := single_pick.get_item_text(single_pick.selected) if single_pick.selected >= 0 else ""
-	single_pick.clear()
-	var names := Elo.known_names()
-	names.sort_custom(func(a, b): return a.to_lower() < b.to_lower())
-	for n in names:
-		single_pick.add_item(n)
-		if n == keep:
-			single_pick.select(single_pick.item_count - 1)
 	_run()
 
 
@@ -148,7 +135,6 @@ func _run() -> void:
 	var rep: Dictionary = REPORTS[report_picker.selected]
 	event_picker.visible = rep["kind"] == "event"
 	pair_box.visible = rep["kind"] == "pair"
-	single_pick.visible = rep["kind"] == "single"
 	season_pick.visible = rep.get("season", false)
 	Reports.season = ""
 	if season_pick.visible and season_pick.selected >= 0 and season_pick.get_item_text(season_pick.selected) != "All seasons":
@@ -169,11 +155,6 @@ func _run() -> void:
 			tables = Reports.head_to_head(b[0], b[1],
 				driver_a.get_item_text(driver_a.selected),
 				driver_b.get_item_text(driver_b.selected))
-		"single":
-			if single_pick.selected < 0:
-				_message("No drivers yet. Confirm a result file first.")
-				return
-			tables = Reports.driver_profile(single_pick.get_item_text(single_pick.selected))
 		_:
 			tables = Reports.call(rep["fn"])
 
