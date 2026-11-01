@@ -29,7 +29,7 @@ func refresh() -> void:
 		var rank := 1
 		for row in Elo.leaderboard(b[0], b[1]):
 			var rk := Ranks.of(row["name"], b[0])
-			rows.append([rank, row["name"], roundi(row["r"]), int(row["d"]), rk["label"],
+			rows.append([rank, Elo.pretty(row["name"]), roundi(row["r"]), int(row["d"]), rk["label"],
 				"Settling" if row["d"] < Elo.SETTLED_DUELS else ""])
 			colours.append(rk["color"])
 			rank += 1

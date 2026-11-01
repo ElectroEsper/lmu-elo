@@ -1,0 +1,7 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# tests: local result files (driver names) and the data-folder switch used while tests run
+tests/data/
+/override.cfg

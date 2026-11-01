@@ -17,6 +17,7 @@ const VIEWS := [
 	["reports", "Reports", "League reports. Each one can be exported to Excel."],
 	["profiles", "Profiles", "Lap-data fingerprints of drivers, cars and tracks, and the telemetry track layouts."],
 	["predict", "Predict", "Monte Carlo forecast of qualifying and the race."],
+	["penalties", "Penalties", "Steward decisions after a race was rated: time penalties, dropped positions, disqualifications. Ratings, ranks and standings are recomputed."],
 	["graphics", "Graphics", "Images for social media and the stream: race forecasts, standings, ranks and driver cards. Saved as PNG in Documents."],
 	["settings", "Settings", "League settings: rank names and limits, standings points, grading. Saved in league_settings.json in the app's data folder."],
 ]
@@ -41,6 +42,7 @@ var profiles_view := ProfilesView.new()
 var predict_view := PredictView.new()
 var settings_view := SettingsView.new()
 var graphics_view := GraphicsView.new()
+var penalties_view := PenaltiesView.new()
 var motec := MotecImport.new()
 
 
@@ -159,10 +161,11 @@ func _ready() -> void:
 	ratings_view.shell = self
 	motec.shell = self
 	graphics_view.shell = self
-	for v in [import_view, ratings_view, driver_view, reports_view, profiles_view, predict_view, graphics_view, settings_view]:
+	penalties_view.shell = self
+	for v in [import_view, ratings_view, driver_view, reports_view, profiles_view, predict_view, penalties_view, graphics_view, settings_view]:
 		v.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		root.add_child(v)
-	for v in [driver_view, reports_view, profiles_view, predict_view, graphics_view, settings_view]:
+	for v in [driver_view, reports_view, profiles_view, predict_view, penalties_view, graphics_view, settings_view]:
 		v.notice.connect(set_status)
 	settings_view.saved.connect(data_changed)
 	add_child(motec)
@@ -184,7 +187,7 @@ func show_view(view: String) -> void:
 			view_sub.text = v[2]
 			nav_buttons[v[0]].button_pressed = true   # the button group releases the others
 	var screens := {"review": import_view, "ratings": ratings_view, "drivers": driver_view, "reports": reports_view,
-		"profiles": profiles_view, "predict": predict_view, "graphics": graphics_view, "settings": settings_view}
+		"profiles": profiles_view, "predict": predict_view, "penalties": penalties_view, "graphics": graphics_view, "settings": settings_view}
 	for key in screens:
 		screens[key].visible = key == view
 	if view != "review":

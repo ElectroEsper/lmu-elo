@@ -100,6 +100,38 @@ func seasons() -> Array:
 	return out
 
 
+# A driver name as shown to people (screens and images), never as stored: Discord-style tags
+# dropped ("David Carter#4131" -> "David Carter") and names typed all in capitals or all in lower
+# case given normal capitals ("DAN POULIN" -> "Dan Poulin", "p thom" -> "P Thom", "jean-luc
+# o'neil" -> "Jean-Luc O'Neil", "MCDONALD" -> "McDonald"). Mixed case is left as typed (JD Bagnoli).
+static var _tag_rx := RegEx.create_from_string("\\s*#\\d+$")
+
+
+static func pretty(name: String) -> String:
+	var n := _tag_rx.sub(name.strip_edges(), "").strip_edges()
+	if n == "" or (n != n.to_upper() and n != n.to_lower()):
+		return n
+	var words := PackedStringArray()
+	for w in n.to_lower().split(" ", false):
+		words.append(_cap_word(w))
+	return " ".join(words)
+
+
+static func _cap_word(w: String) -> String:
+	for sep in ["-", "'"]:
+		if w.contains(sep):
+			var parts := PackedStringArray()
+			for part in w.split(sep):
+				parts.append(_cap_word(part))
+			return sep.join(parts)
+	if w.length() == 0:
+		return w
+	var out := w.left(1).to_upper() + w.substr(1)
+	if out.begins_with("Mc") and out.length() > 2:
+		out = "Mc" + out.substr(2, 1).to_upper() + out.substr(3)
+	return out
+
+
 # ---------- Elo core ----------
 func _key(driver: String, cls: String, sess: String) -> String:
 	return "%s|%s|%s" % [driver, cls, sess]
@@ -680,6 +712,136 @@ func rebuild_all() -> Dictionary:
 	summary["first"] = events[0]["draft"]["file"]
 	summary["last"] = events[-1]["draft"]["file"]
 	return summary
+
+
+# ---------- Penalties after the race (Penalties screen) ----------
+# A rated race can get steward penalties afterwards. The event file keeps the original result
+# ("orders_original", "stats_original") and the list of penalties; its "orders" / "stats" hold the
+# result with the penalties applied, so every rebuild (and so ratings, ranks, standings, grades and
+# reports) uses the corrected result. Lap data is not touched: a penalty does not change pace.
+# Penalty: {"id", "cls", "driver" (name as in the result), "type": "time" | "places" | "dsq",
+#           "value" (seconds or places), "reason", "at" (unix time)}
+
+static func _retired_status(status: Variant) -> bool:
+	var t := str(status).strip_edges().to_lower()
+	return t.begins_with("dnf") or t == "dq" or t.begins_with("disq")
+
+
+# The classification of one race class with penalties applied, in the given order.
+# order: names as stored; stats: that class's stats (name -> {"laps", "time", "status"...}).
+# Returns {"order": [names], "dsq": {name: true}, "skipped": [penalties that could not apply]}
+static func penalised_order(order: Array, stats: Dictionary, pens: Array) -> Dictionary:
+	var out: Array = order.duplicate()
+	var adj := {}      # name -> seconds added
+	var dsq := {}
+	var skipped := []
+	var st := func(n: String) -> Dictionary: return stats.get(n, {})
+	var classified := func(n: String) -> bool:   # still in the fight for places: finished, not DQ'd
+		return not dsq.has(n) and not _retired_status(st.call(n).get("status", ""))
+	for p in pens:
+		var n := str(p["driver"])
+		if n not in out:
+			skipped.append(p)
+			continue
+		match str(p["type"]):
+			"time":
+				var t0 := float(st.call(n).get("time", 0.0))
+				if t0 <= 0.0 or not classified.call(n):
+					skipped.append(p)   # no finishing time (retired or missing): nothing to add to
+					continue
+				adj[n] = float(adj.get(n, 0.0)) + float(p["value"])
+				out.erase(n)
+				var my_laps := int(st.call(n).get("laps", 0))
+				var my_time := t0 + float(adj[n])
+				var at := out.size()
+				for i in out.size():
+					var m: String = out[i]
+					if not classified.call(m):
+						at = i   # ahead of the retired / disqualified cars, behind every finisher who beat them
+						break
+					var ml := int(st.call(m).get("laps", 0))
+					var mt := float(st.call(m).get("time", 0.0)) + float(adj.get(m, 0.0))
+					if ml < my_laps or (ml == my_laps and mt > my_time):
+						at = i
+						break
+				out.insert(at, n)
+			"places":
+				if not classified.call(n):
+					skipped.append(p)
+					continue
+				var i0 := out.find(n)
+				var last := i0
+				for i in range(i0, out.size()):
+					if classified.call(out[i]):
+						last = i
+				out.remove_at(i0)
+				out.insert(mini(i0 + int(p["value"]), last), n)
+			"dsq":
+				out.erase(n)
+				out.append(n)
+				dsq[n] = true
+			_:
+				skipped.append(p)
+	return {"order": out, "dsq": dsq, "skipped": skipped}
+
+
+func event_penalties(file: String) -> Array:
+	var d = JSON.parse_string(FileAccess.get_file_as_string("user://events/%s.json" % file)) if FileAccess.file_exists("user://events/%s.json" % file) else null
+	return d.get("penalties", []) if d is Dictionary else []
+
+
+# The original (as imported) race result of an event: {"orders": {cls: [names]}, "stats": {cls: {...}}}
+func original_race(file: String) -> Dictionary:
+	var path := "user://events/%s.json" % file
+	if not FileAccess.file_exists(path):
+		return {}
+	var d = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if not (d is Dictionary):
+		return {}
+	var orders: Dictionary = d.get("orders_original", d.get("orders", {}))
+	var stats: Dictionary = d.get("stats_original", d.get("stats", {}))
+	return {"orders": orders.get("race", {}), "stats": stats.get("race", {})}
+
+
+# Saves the race's penalty list, rewrites its result from the original, and rebuilds every rating.
+# Returns "" or a message for penalties that could not be applied.
+func set_race_penalties(file: String, pens: Array) -> String:
+	var path := "user://events/%s.json" % file
+	var d = JSON.parse_string(FileAccess.get_file_as_string(path)) if FileAccess.file_exists(path) else null
+	if not (d is Dictionary) or not d.get("orders", {}).has("race"):
+		return "That event has no race result."
+	if not d.has("orders_original"):
+		d["orders_original"] = d["orders"].duplicate(true)
+		d["stats_original"] = d.get("stats", {}).duplicate(true)
+	var orders: Dictionary = d["orders_original"].duplicate(true)
+	var stats: Dictionary = d["stats_original"].duplicate(true)
+	var problems := PackedStringArray()
+	for cls in orders.get("race", {}):
+		var mine := pens.filter(func(p): return str(p["cls"]) == str(cls))
+		if mine.is_empty():
+			continue
+		var cls_stats: Dictionary = stats.get("race", {}).get(cls, {})
+		var r := penalised_order(orders["race"][cls], cls_stats, mine)
+		orders["race"][cls] = r["order"]
+		for n in r["dsq"]:
+			if cls_stats.has(n):
+				cls_stats[n]["status"] = "DQ"
+		for p in r["skipped"]:
+			problems.append("%s (%s): could not apply %s" % [p["driver"], cls, p["type"]])
+	d["orders"] = orders
+	d["stats"] = stats
+	d["penalties"] = pens
+	if pens.is_empty():   # back to the result as imported
+		d["orders"] = d["orders_original"]
+		d["stats"] = d["stats_original"]
+		d.erase("orders_original")
+		d.erase("stats_original")
+		d.erase("penalties")
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(JSON.stringify(d))
+	f.close()
+	rebuild_all()
+	return "; ".join(problems)
 
 
 # ---------- Names and aliases ----------

@@ -40,6 +40,7 @@ func _ready() -> void:
 		_test_profiles_and_grades()
 		await _test_predict()
 		await _test_forecast_record()
+		_test_penalties()
 		await _test_screens()
 	print("\n%d passed, %d failed, %d skipped" % [passed, failed, skipped])
 	get_tree().quit(1 if failed > 0 else 0)
@@ -116,6 +117,12 @@ func _test_settings() -> void:
 	r = LeagueSettings.rules_for("zz", 2)
 	check(r["fuel"] == 1.0 and not r["pits"] and not r["known"], "Unknown series: x1, no stops")
 	check(LeagueSettings.label("LMP2_ELMS") == "LMP2+", "Class label LMP2_ELMS -> LMP2+")
+	var names_ok := Elo.pretty("DAN POULIN") == "Dan Poulin" and Elo.pretty("p thom") == "P Thom" \
+		and Elo.pretty("David Carter#4131") == "David Carter" and Elo.pretty("JD Bagnoli") == "JD Bagnoli" \
+		and Elo.pretty("MCDONALD") == "McDonald" and Elo.pretty("jean-luc o'neil") == "Jean-Luc O'Neil"
+	check(names_ok, "Driver names shown with normal capitals, without #tags")
+	var ret := Predict.expected_dnfs([0.5, 0.5])
+	check(is_equal_approx(float(ret["expected"]), 1.0) and is_equal_approx(float(ret["p_none"]), 0.25) and ret["range"] == "0 to 2", "Expected retirements: count and range", str(ret))
 	check(LeagueSettings.label("Ligier LMGT3 car") == "Ligier LMGT3 car", "Class labels only replace whole words")
 	check(Elo.league_name(6, "SC", 3, true) == "s6-sc3-r.xml" and Elo.league_name(2, "mc", 1, false) == "s2-mc1.xml", "League file names")
 	check(Elo.season_number("s5-mc2-r.xml") == 5 and Elo.series_code("s5-mc2-r.xml") == "mc", "Season and series from the file name")
@@ -393,6 +400,61 @@ func _test_forecast_record() -> void:
 	check(tables.size() == 2 and tables[0]["note"].contains("Waiting for results"), "The Forecast record report shows the summary, the forecasts and the waiting one")
 
 
+func _test_penalties() -> void:
+	_section("Penalties after the race")
+	# the latest race with at least 4 classified finishers on the lead lap, in some class
+	var file := ""
+	var cls := ""
+	for i in range(Elo.history.size() - 1, -1, -1):
+		var orig := Elo.original_race(str(Elo.history[i]["file"]))
+		for c in orig.get("orders", {}):
+			var o: Array = orig["orders"][c]
+			if o.size() >= 6 and float(orig["stats"].get(c, {}).get(o[1], {}).get("time", 0.0)) > 0.0:
+				file = str(Elo.history[i]["file"])
+				cls = c
+				break
+		if file != "":
+			break
+	if file == "":
+		_skip("penalties", "no race with finishing times")
+		return
+	var orig := Elo.original_race(file)
+	var order: Array = orig["orders"][cls]
+	var st: Dictionary = orig["stats"][cls]
+	var before := Elo.ratings.duplicate(true)
+	# a time penalty just bigger than the gap to the car behind costs exactly one place
+	var gap := float(st[order[2]]["time"]) - float(st[order[1]]["time"])
+	var same_lap := int(st[order[2]]["laps"]) == int(st[order[1]]["laps"])
+	var pen := {"id": "t", "cls": cls, "driver": order[1], "type": "time", "value": ceili(gap + 0.5), "reason": "", "at": 0}
+	var r := Elo.penalised_order(order, st, [pen])
+	if same_lap:
+		check(r["order"][2] == order[1] and r["order"][1] == order[2], "Time penalty bigger than the gap behind costs a place")
+	var small := pen.duplicate()
+	small["value"] = maxi(1, floori(gap - 0.5)) if gap > 1.5 else 0
+	if int(small["value"]) > 0 and same_lap:
+		check(Elo.penalised_order(order, st, [small])["order"] == order, "Time penalty smaller than the gap behind changes nothing")
+	r = Elo.penalised_order(order, st, [{"id": "p", "cls": cls, "driver": order[0], "type": "places", "value": 2, "reason": "", "at": 0}])
+	check(r["order"][2] == order[0], "Drop 2 positions: P1 becomes P3")
+	r = Elo.penalised_order(order, st, [{"id": "d", "cls": cls, "driver": order[0], "type": "dsq", "value": 0, "reason": "", "at": 0}])
+	check(r["order"][-1] == order[0] and r["dsq"].has(order[0]), "Disqualified: to the back")
+	# applied for real: the result, ratings and file change; undone: everything back
+	Elo.set_race_penalties(file, [{"id": "d", "cls": cls, "driver": order[0], "type": "dsq", "value": 0, "reason": "", "at": 0}])
+	var winner := ""
+	for h in Elo.history:
+		if h["file"] == file:
+			for c in h["changes"]:
+				if c["sess"] == "race" and c["cls"] == cls and int(c["pos"]) == 1:
+					winner = c["driver"]
+	check(winner == Elo.resolve(order[1]), "After a DSQ of the winner the 2nd is rated as the winner", winner)
+	check(Elo.event_penalties(file).size() == 1 and Elo.original_race(file)["orders"][cls] == order, "The penalty is saved, the original result kept")
+	Elo.set_race_penalties(file, [])
+	var same := true
+	for k in before:
+		if not Elo.ratings.has(k) or absf(float(before[k]["r"]) - float(Elo.ratings[k]["r"])) > 1e-9:
+			same = false
+	check(same and Elo.event_penalties(file).is_empty(), "Undoing every penalty restores every rating exactly")
+
+
 func _test_screens() -> void:
 	_section("Screens")
 	var screen = load("res://control.tscn").instantiate()
@@ -400,7 +462,7 @@ func _test_screens() -> void:
 	for i in 5:
 		await get_tree().process_frame
 	var ok := true
-	for v in ["ratings", "drivers", "reports", "profiles", "predict", "graphics", "settings", "review"]:
+	for v in ["ratings", "drivers", "reports", "profiles", "predict", "penalties", "graphics", "settings", "review"]:
 		screen.show_view(v)
 		await get_tree().process_frame
 		ok = ok and screen.has_method("show_view")

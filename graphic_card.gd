@@ -112,7 +112,6 @@ func _build() -> void:
 			_build_driver(body)
 		"track":
 			_build_track(body)
-	col.add_child(_footer())
 
 
 func _header() -> Control:
@@ -171,15 +170,6 @@ func _fit(l: Label) -> Label:
 	return l
 
 
-func _footer() -> Control:
-	var row := HBoxContainer.new()
-	var left := _fit(_label(str(spec.get("footer", "")), 24, MUTED, "regular"))
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(left)
-	row.add_child(_label(Time.get_date_string_from_system(), 24, MUTED, "regular"))
-	return row
-
-
 # ---------- forecast ----------
 # spec["classes"] = [{"cls", "rows": [{"name", "win", "podium", "exp_pos", "grid"?}]}], expected finishing order
 func _build_forecast(body: VBoxContainer) -> void:
@@ -220,10 +210,10 @@ func _build_forecast(body: VBoxContainer) -> void:
 # after quali, the driver who took it. Race-only forecasts have no quali, so no strip.
 func _pole_strip(body: VBoxContainer, classes: Array) -> void:
 	var mode := int(spec.get("mode", -1))
-	if mode == Predict.Mode.RACE_ONLY:
-		return
 	var entries := []   # [class, driver, text under it]
 	for c in classes:
+		if mode == Predict.Mode.RACE_ONLY:
+			break   # no quali: no pole
 		var best := {}
 		for r in c["rows"]:
 			if int(r.get("grid", 0)) == 1:
@@ -235,24 +225,30 @@ func _pole_strip(body: VBoxContainer, classes: Array) -> void:
 			entries.append([c["cls"], best["name"], best["note"]])
 	if entries.is_empty():
 		return
+	# bottom row: the pole box and, beside it, its own box for the expected retirements
+	var bottom := HBoxContainer.new()
+	bottom.add_theme_constant_override("separation", int(16 * s))
+	body.add_child(bottom)
 	var known := mode == Predict.Mode.ACTUAL_GRID
-	var panel := _panel(Color(accent, 0.14), accent)
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", int(6 * s))
-	panel.add_child(box)
-	box.add_child(_label("POLE POSITION" if known else "PREDICTED POLE", 24, accent, "bold", 2))
-	var row: Container = HBoxContainer.new() if landscape else VBoxContainer.new()   # portrait: one class per line
-	row.add_theme_constant_override("separation", int((36 if landscape else 4) * s))
-	box.add_child(row)
-	for e in entries:
-		var item := HBoxContainer.new()
-		item.add_theme_constant_override("separation", int(14 * s))
-		item.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		item.add_child(_label(LeagueSettings.label(str(e[0])).to_upper(), 28, HEAD.lightened(0.25), "title", 0, 0.0 if landscape else 110))
-		item.add_child(_label(str(e[1]), 32, TEXT, "bold"))
-		item.add_child(_label(str(e[2]), 24, MUTED, "regular"))
-		row.add_child(item)
-	body.add_child(panel)
+	if not entries.is_empty():
+		var panel := _panel(Color(accent, 0.14), accent)
+		panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var box := VBoxContainer.new()
+		box.add_theme_constant_override("separation", int(6 * s))
+		panel.add_child(box)
+		box.add_child(_label("POLE POSITION" if known else "PREDICTED POLE", 24, accent, "bold", 2))
+		var row: Container = HBoxContainer.new() if landscape else VBoxContainer.new()   # portrait: one class per line
+		row.add_theme_constant_override("separation", int((36 if landscape else 4) * s))
+		box.add_child(row)
+		for e in entries:
+			var item := HBoxContainer.new()
+			item.add_theme_constant_override("separation", int(14 * s))
+			item.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			item.add_child(_label(LeagueSettings.label(str(e[0])).to_upper(), 28, HEAD.lightened(0.25), "title", 0, 0.0 if landscape else 110))
+			item.add_child(_fit(_label(str(e[1]), 32, TEXT, "bold")))
+			item.add_child(_label(str(e[2]), 24, MUTED, "regular"))
+			row.add_child(item)
+		bottom.add_child(panel)
 
 
 func _forecast_row(i: int, r: Dictionary, top_win: float) -> Control:

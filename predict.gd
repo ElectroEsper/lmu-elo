@@ -726,7 +726,41 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 			"track_gap": d["track_gap_r"], "tend": d["tend"],
 		})
 	rows.sort_custom(func(a, b): return a["exp_pos"] < b["exp_pos"])
-	return {"rows": rows, "track": track, "laps": res["laps"], "notes": notes}
+	var ret := expected_dnfs(inputs.map(func(d): return float(d.get("dnf", 0.0))) if float(params.get("dnf", 0.0)) > 0.0 else [])
+	return {"rows": rows, "track": track, "laps": res["laps"], "notes": notes, "dnf": ret}
+
+
+# How many drivers retire, from each one's retirement chance: the exact distribution of the count
+# (each driver retires or not, independently). {"expected", "lo", "hi", "range", "p_none"}, the
+# range holding 80% of the outcomes; {} without chances.
+static func expected_dnfs(chances: Array) -> Dictionary:
+	if chances.is_empty():
+		return {}
+	var dist := [1.0]   # dist[k] = chance that k drivers have retired so far
+	var total := 0.0
+	for p in chances:
+		var q := clampf(float(p), 0.0, 1.0)
+		total += q
+		var nxt := []
+		nxt.resize(dist.size() + 1)
+		nxt.fill(0.0)
+		for k in dist.size():
+			nxt[k] += dist[k] * (1.0 - q)
+			nxt[k + 1] += dist[k] * q
+		dist = nxt
+	var cum := 0.0
+	var lo := -1
+	var hi := 0
+	for k in dist.size():
+		cum += float(dist[k])
+		if lo < 0 and cum > 0.1:
+			lo = k
+		if cum >= 0.9:
+			hi = k
+			break
+	lo = maxi(lo, 0)
+	return {"expected": total, "lo": lo, "hi": hi, "p_none": float(dist[0]),
+		"range": ("%d" % lo) if lo == hi else "%d to %d" % [lo, hi]}
 
 
 # ---------- Backtest ----------
@@ -957,7 +991,7 @@ func save_forecast(res: Dictionary, cls: String, series: String, mode: int, made
 		rows.append({"name": r["name"], "win": r["win"], "podium": r["podium"], "top10": r["top10"],
 			"exp_pos": r["exp_pos"], "pole": r.get("pole", 0.0), "exp_grid": r.get("exp_grid", 0.0),
 			"grid": r.get("grid", 0)})
-	var data := {"made_at": t, "class": cls, "series": series, "mode": mode,
+	var data := {"made_at": t, "class": cls, "series": series, "mode": mode, "dnf": res.get("dnf", {}),
 		"course": str(res.get("track", {}).get("course", "")), "rows": rows}
 	var path := "%s/%d_%s.json" % [FORECAST_DIR, t, cls.validate_filename()]
 	var f := FileAccess.open(path, FileAccess.WRITE)

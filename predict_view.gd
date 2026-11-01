@@ -804,7 +804,7 @@ func _show_all(results: Array, mode: int) -> void:
 			by_grid.sort_custom(func(a, b): return a["exp_grid"] < b["exp_grid"])
 			var top := []
 			for i in mini(5 if not multi else 3, by_grid.size()):
-				top.append("%d. %s (%.0f%% pole)" % [i + 1, by_grid[i]["name"], 100.0 * by_grid[i]["pole"]])
+				top.append("%d. %s (%.0f%% pole)" % [i + 1, Elo.pretty(by_grid[i]["name"]), 100.0 * by_grid[i]["pole"]])
 			grid_parts.append(((LeagueSettings.label(cls) + ": ") if multi else "") + ", ".join(top))
 	out_label.text = "\n".join(lines)
 	grid_line.text = ("Predicted front of the grid: " + "  |  ".join(grid_parts)) if not grid_parts.is_empty() else ""
@@ -832,7 +832,7 @@ func _add_rows(root: TreeItem, rows: Array, mode: int, overall_offset: int) -> v
 			for c in tree.columns:
 				it.set_custom_bg_color(c, Color(tint, 0.16))
 			it.set_custom_color(1, tint.lightened(0.25))
-			it.set_tooltip_text(1, "Predicted P%d in class: %s (expected finish %.1f)." % [place + 1, r["name"], float(r["exp_pos"])])
+			it.set_tooltip_text(1, "Predicted P%d in class: %s (expected finish %.1f). In the results files: %s" % [place + 1, Elo.pretty(r["name"]), float(r["exp_pos"]), r["name"]])
 		place += 1
 		if r["grid"] > 0:
 			it.set_text(0, str(r["grid"]))
@@ -841,9 +841,9 @@ func _add_rows(root: TreeItem, rows: Array, mode: int, overall_offset: int) -> v
 			it.set_tooltip_text(0, "Predicted starting place in class: ranked by expected grid place (%.1f)." % float(r["exp_grid"]))
 		else:
 			it.set_text(0, "-")
-		it.set_text(1, r["name"] + ("" if r["known"] else " (new)"))
+		it.set_text(1, Elo.pretty(r["name"]) + ("" if r["known"] else " (new)"))
 		if place > podium.size():   # podium rows already carry their own tooltip
-			it.set_tooltip_text(1, str(r["name"]))
+			it.set_tooltip_text(1, "In the results files: %s" % r["name"])
 		it.set_text(2, "%.1f" % (100.0 * r["pole"]) if has_quali else "-")
 		it.set_text(3, "%.1f" % (100.0 * r["front"]) if has_quali else "-")
 		it.set_text(4, "%.1f" % r["exp_grid"] if has_quali else "-")
