@@ -16,6 +16,7 @@ var idle_spin := SpinBox.new()
 var points_edit := LineEdit.new()
 var grade_spin := SpinBox.new()
 var drop_spin := SpinBox.new()
+var drop_after_spin := SpinBox.new()
 var class_rows := GridContainer.new()   # game class name -> name shown on screen
 var rule_rows := VBoxContainer.new()     # race rules: one row per series and starting season
 var brand_name := LineEdit.new()
@@ -81,9 +82,16 @@ func _ready() -> void:
 	st_form.columns = 2
 	st.add_child(st_form)
 	points_edit.custom_minimum_size = Vector2(320, 0)
-	_form_row(st_form, "Points for P1, P2, P3...", points_edit, "Separated by commas. Places after the last number score nothing.")
+	var pts_row := HBoxContainer.new()
+	pts_row.add_child(points_edit)
+	pts_row.add_child(_btn("League scale", func():
+		points_edit.text = ", ".join(PackedStringArray(LeagueSettings.DEFAULTS["points"].map(func(p): return str(p))))))
+	_form_row(st_form, "Points for P1, P2, P3...", pts_row, "Separated by commas. Places after the last number score nothing. League scale: 50, 47, 44, 41, 38, 35, then one less per place down to 1.")
 	drop_spin.max_value = 10
 	_form_row(st_form, "Dropped rounds per season", drop_spin, "Each driver's worst rounds of a season championship are not counted. A missed round counts as 0, so it is dropped first. Each series (Sprint, Multiclass...) is its own championship.")
+	drop_after_spin.min_value = 0
+	drop_after_spin.max_value = 20
+	_form_row(st_form, "Drops apply after round", drop_after_spin, "No round is dropped until this many rounds of the season are done (2 = the first drop shows in the standings after round 3).")
 
 	# race rules
 	var rr := _card("RACE RULES")
@@ -188,6 +196,7 @@ func refresh() -> void:
 	points_edit.text = ", ".join(PackedStringArray(LeagueSettings.points().map(func(p): return str(p))))
 	grade_spin.value = float(LeagueSettings.get_value("grade_min_sessions"))
 	drop_spin.value = float(LeagueSettings.get_value("drop_rounds"))
+	drop_after_spin.value = float(LeagueSettings.get_value("drop_after"))
 	for c in class_rows.get_children():
 		class_rows.remove_child(c)
 		c.queue_free()
@@ -327,6 +336,7 @@ func _collect() -> Dictionary:
 	values["points"] = pts
 	values["grade_min_sessions"] = int(grade_spin.value)
 	values["drop_rounds"] = int(drop_spin.value)
+	values["drop_after"] = int(drop_after_spin.value)
 	var labels := {}
 	for c in class_rows.get_children():
 		if c is LineEdit and (c as LineEdit).text.strip_edges() != "":

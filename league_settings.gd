@@ -19,7 +19,9 @@ const DEFAULTS := {
 	"rank_settle_duels": 120,      # duels (race + quali together) before a driver gets a rank
 	"rank_buffer": 30,             # promoted on reaching a rank's minimum, demoted only this far below it
 	"rank_inactive_days": 180,     # no race in the class for this long (before the latest event): "inactive"; 0 = never
-	"points": [25, 18, 15, 12, 10, 8, 6, 4, 2, 1],   # standings points for P1, P2, ...
+	# standings points for P1, P2, ... (OOFS Racing: 50, 47, 44, 41, 38, 35, then one less per place)
+	"points": [50, 47, 44, 41, 38, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21,
+		20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
 	"grade_min_sessions": 3,       # sessions a driver needs before getting driver grades
 	# Names shown on screen for classes (the data keeps the game's own class name, so specs
 	# that really differ, like ELMS-spec and WEC-spec LMP2, stay separate)
@@ -28,6 +30,8 @@ const DEFAULTS := {
 	# Season championships: each series (from the file name, "s5-sc3" = Sprint) is scored on its
 	# own, and each driver's worst rounds are dropped (a missed round counts as 0 and is dropped first).
 	"drop_rounds": 1,
+	"drop_after": 2,   # dropped rounds only count once this many rounds of the season are done
+
 	"series_names": {"sc": "Sprint", "mc": "Multiclass"},
 	# Race rules per series, from a season on (a later row for the same series takes over from its
 	# season): fuel / virtual-energy use and tyre wear multipliers set on the server, whether
@@ -187,6 +191,15 @@ static func series_color(series: String) -> Color:
 	var cols: Dictionary = get_value("series_colors")
 	var fallback := Color.from_string(str(get_value("brand_accent")), Color("cdfe02"))
 	return Color.from_string(str(cols.get(series, "")), fallback) if cols.has(series) else fallback
+
+
+# Dropped rounds in force for a championship that has run `rounds` rounds: none until more than
+# "drop_after" rounds are done (and never more than the rounds run).
+static func drops_for(rounds: int) -> int:
+	var drops := maxi(int(get_value("drop_rounds")), 0)
+	if rounds <= maxi(int(get_value("drop_after")), 0) or rounds <= drops:
+		return 0
+	return drops
 
 
 static func points() -> Array:

@@ -539,6 +539,11 @@ func attach_stats(draft: Dictionary) -> bool:
 		saved["stats"] = draft["stats"]
 		saved["track"] = draft.get("track", {})
 		saved["fp"] = draft.get("fp", {})
+		if saved.has("orders_original"):
+			# a race with steward penalties: the fresh stats are the original ones, the penalties
+			# (DQ status...) go on top again
+			saved["stats_original"] = draft["stats"]
+			_penalise_saved(saved)
 	if draft.has("event_time"):
 		saved["event_time"] = draft["event_time"]
 	var f := FileAccess.open(path, FileAccess.WRITE)
@@ -546,7 +551,7 @@ func attach_stats(draft: Dictionary) -> bool:
 	f.close()
 	for h in history:
 		if h["file"] == original:
-			h["stats"] = draft["stats"]
+			h["stats"] = _resolved_stats(saved.get("stats", draft["stats"]))
 	save_ratings()
 	return true
 
@@ -813,9 +818,33 @@ func set_race_penalties(file: String, pens: Array) -> String:
 	if not d.has("orders_original"):
 		d["orders_original"] = d["orders"].duplicate(true)
 		d["stats_original"] = d.get("stats", {}).duplicate(true)
+	d["penalties"] = pens
+	var problems := _penalise_saved(d)
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(JSON.stringify(d))
+	f.close()
+	rebuild_all()
+	return "; ".join(problems)
+
+
+# Rewrites a saved event's "orders" / "stats" from its originals and its "penalties" (DQ'd drivers
+# get status "DQ"). With no penalties left, the event goes back to the result as imported. Also
+# used when the event's stats are re-read from the XML (attach_stats), so a re-read never loses
+# a penalty. Returns the penalties that could not be applied.
+func _penalise_saved(d: Dictionary) -> PackedStringArray:
+	var problems := PackedStringArray()
+	var pens: Array = d.get("penalties", [])
+	if not d.has("orders_original"):
+		return problems
+	if pens.is_empty():
+		d["orders"] = d["orders_original"]
+		d["stats"] = d["stats_original"]
+		d.erase("orders_original")
+		d.erase("stats_original")
+		d.erase("penalties")
+		return problems
 	var orders: Dictionary = d["orders_original"].duplicate(true)
 	var stats: Dictionary = d["stats_original"].duplicate(true)
-	var problems := PackedStringArray()
 	for cls in orders.get("race", {}):
 		var mine := pens.filter(func(p): return str(p["cls"]) == str(cls))
 		if mine.is_empty():
@@ -830,18 +859,7 @@ func set_race_penalties(file: String, pens: Array) -> String:
 			problems.append("%s (%s): could not apply %s" % [p["driver"], cls, p["type"]])
 	d["orders"] = orders
 	d["stats"] = stats
-	d["penalties"] = pens
-	if pens.is_empty():   # back to the result as imported
-		d["orders"] = d["orders_original"]
-		d["stats"] = d["stats_original"]
-		d.erase("orders_original")
-		d.erase("stats_original")
-		d.erase("penalties")
-	var f := FileAccess.open(path, FileAccess.WRITE)
-	f.store_string(JSON.stringify(d))
-	f.close()
-	rebuild_all()
-	return "; ".join(problems)
+	return problems
 
 
 # ---------- Names and aliases ----------
