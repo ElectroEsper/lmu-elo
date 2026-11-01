@@ -457,6 +457,75 @@ func ranks() -> Array:
 	return tables
 
 
+# ---------- Forecast record (forecasts saved on the Predict screen) ----------
+func forecast_record() -> Array:
+	var all := Predict.list_forecasts()
+	if all.is_empty():
+		return [_table("Forecast record", [], [], "No forecasts saved yet. On the Predict screen, run a forecast and press \"Save for the record\" before the race; it is scored here once the race's results are imported.")]
+	var rows := []
+	var colours := []
+	var waiting := []
+	var by_class := {}   # class -> [scores]
+	for fc in all:
+		var s := Predict.score_forecast(fc)
+		var made := Time.get_date_string_from_unix_time(int(fc["made_at"]))
+		var mode: String = ["after quali", "before quali", "race only"][clampi(int(fc.get("mode", 0)), 0, 2)]
+		if s.is_empty():
+			waiting.append("%s %s (%s)" % [made, LeagueSettings.label(str(fc["class"])), str(fc.get("course", ""))])
+			continue
+		if not by_class.has(fc["class"]):
+			by_class[fc["class"]] = []
+		by_class[fc["class"]].append(s)
+		var where := str(s["course"])
+		if str(fc.get("course", "")) != "" and str(fc["course"]) != str(s["course"]):
+			where += " (forecast for %s)" % fc["course"]
+		rows.append([made, str(s["event"]).get_basename(), fc["class"], where, mode,
+			"%s (%.0f%%, %s)" % [s["winner"], 100.0 * float(s["winner_chance"]), _ord_pick(int(s["winner_rank"]))],
+			"yes" if s["fav_won"] else "no (%s)" % s["fav"], "%d / 3" % int(s["podium_hits"]),
+			snappedf(float(s["pos_error"]), 0.1)])
+		colours.append(UiTheme.driver_grade_color(5) if s["fav_won"] else null)
+	var summary := []
+	var totals := {"n": 0, "fav": 0, "hits": 0, "err": 0.0, "chance": 0.0}
+	for cls in by_class:
+		var n: int = by_class[cls].size()
+		var fav := 0
+		var hits := 0
+		var err := 0.0
+		var chance := 0.0
+		for s in by_class[cls]:
+			fav += 1 if s["fav_won"] else 0
+			hits += int(s["podium_hits"])
+			err += float(s["pos_error"])
+			chance += float(s["winner_chance"])
+		summary.append([cls, n, "%d of %d" % [fav, n], "%.1f / 3" % (float(hits) / n), snappedf(err / n, 0.1), "%.0f%%" % (100.0 * chance / n)])
+		totals["n"] += n
+		totals["fav"] += fav
+		totals["hits"] += hits
+		totals["err"] += err
+		totals["chance"] += chance
+	if by_class.size() > 1:
+		var n2: int = totals["n"]
+		summary.append(["All", n2, "%d of %d" % [totals["fav"], n2], "%.1f / 3" % (float(totals["hits"]) / n2),
+			snappedf(totals["err"] / n2, 0.1), "%.0f%%" % (100.0 * totals["chance"] / n2)])
+	var tables := []
+	var note := "Each saved forecast is judged on the first race of its class imported within %d days after it was made. Favourite = the driver forecast to finish first. Podium = how many of the forecast top three finished on the podium. Position error = how far, on average, each driver finished from their expected place. Winner's chance = what the forecast gave the driver who won (a good forecast gives winners a fair chance, not always the top one)." % Predict.MATCH_DAYS
+	if not waiting.is_empty():
+		note += " Waiting for results: " + ", ".join(PackedStringArray(waiting)) + "."
+	if not summary.is_empty():
+		tables.append(_table("Summary", ["Class", "Forecasts", "Favourite won", "Podium hits", "Position error", "Winner's chance"], summary, note))
+		var t := _table("Forecasts", ["Made", "Race", "Class", "Track", "Forecast", "Winner (chance, forecast place)", "Favourite won", "Podium", "Position error"], rows,
+			"Newest last. Green = the favourite won.")
+		t["cell_colors"] = {6: colours}
+		tables.append(t)
+	else:
+		tables.append(_table("Forecast record", [], [], note))
+	return tables
+
+
+func _ord_pick(n: int) -> String:
+	return "forecast %s" % ordinal(n)
+
+
 # ---------- Wet weather (wet_weather.gd) ----------
 func wet_weather() -> Array:
 	var tables := []

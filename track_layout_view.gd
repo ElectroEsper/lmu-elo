@@ -153,7 +153,7 @@ func _grades_panel(p: Dictionary) -> Control:
 		hl.text = h
 		hl.theme_type_variation = "TableHeader"
 		grid.add_child(hl)
-	for r in TrackGrades.grade(str(p["course"]), str(p["class"])):
+	for r in TrackGrades.grade(str(p["course"]), str(p["class"]), true):   # estimates shown, marked as such
 		var name_l := Label.new()
 		name_l.text = r["name"]
 		name_l.tooltip_text = r["tip"]
@@ -162,6 +162,10 @@ func _grades_panel(p: Dictionary) -> Control:
 		var g: int = r["grade"]
 		var grade_l := Label.new()
 		grade_l.text = "-" if g == 0 else "%d / 5" % g
+		if r.get("estimated", false):   # no league race of this class here: training races or an estimate
+			grade_l.text += " est."
+			grade_l.tooltip_text = "Not measured from league races of this class here. See Basis."
+			grade_l.mouse_filter = Control.MOUSE_FILTER_PASS
 		grade_l.add_theme_color_override("font_color", _grade_colour(g))
 		grid.add_child(grade_l)
 		var value_l := Label.new()

@@ -33,6 +33,14 @@ const DEFAULTS := {
 	# season): fuel / virtual-energy use and tyre wear multipliers set on the server, whether
 	# routine pit stops are part of the race, and stops the rules make compulsory.
 	# Used to put past races on the same x1 footing and for the pit-stop forecast.
+	# Graphics (Graphics screen): league name and colour on every image, and an optional logo file
+	"brand_name": "",
+	"brand_accent": "#cdfe02",      # league accent (images not tied to one series)
+	"brand_primary": "#512f89",     # main league colour: background glow, panels
+	"brand_secondary": "#ffffff",   # second colour: e.g. the second class on split track grades
+	"brand_logo": "",
+	"brand_title_font": "",         # optional font file for titles (TTF / OTF / WOFF2)
+	"series_colors": {"mc": "#cdfe02", "sc": "#f4901e"},   # accent of each series' images
 	"race_rules": [
 		{"series": "sc", "from": 1, "fuel": 1.0, "tyre": 1.0, "pits": false, "min_stops": 0},
 		{"series": "mc", "from": 1, "fuel": 2.0, "tyre": 2.0, "pits": true, "min_stops": 0},
@@ -172,6 +180,13 @@ static func rules_for(series: String, season: int) -> Dictionary:
 	return {"fuel": float(best.get("fuel", 1.0)), "tyre": float(best.get("tyre", 1.0)),
 		"pits": bool(best.get("pits", false)), "min_stops": int(best.get("min_stops", 0)),
 		"known": not best.is_empty()}
+
+
+# The accent colour of a series' images (Settings > Graphics), or the league accent.
+static func series_color(series: String) -> Color:
+	var cols: Dictionary = get_value("series_colors")
+	var fallback := Color.from_string(str(get_value("brand_accent")), Color("cdfe02"))
+	return Color.from_string(str(cols.get(series, "")), fallback) if cols.has(series) else fallback
 
 
 static func points() -> Array:

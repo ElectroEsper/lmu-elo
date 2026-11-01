@@ -861,3 +861,99 @@ func _load_settings() -> void:
 		for k in DEFAULTS:
 			if data["params"].has(k):
 				params[k] = float(data["params"][k])
+
+
+# ---------- Forecast record ----------
+# Saved forecasts (Predict screen, "Save for the record") are scored against the first race of
+# their class imported after they were made, so the league can see how good the forecasts are.
+const FORECAST_DIR := "user://forecasts"
+const MATCH_DAYS := 14   # a forecast is matched to a race of its class within this many days
+
+
+# Saves one class's forecast. made_at: unix time (0 = now). Returns the file path.
+func save_forecast(res: Dictionary, cls: String, series: String, mode: int, made_at := 0) -> String:
+	DirAccess.make_dir_recursive_absolute(FORECAST_DIR)
+	var t := made_at if made_at > 0 else int(Time.get_unix_time_from_system())
+	var rows := []
+	for r in res["rows"]:
+		rows.append({"name": r["name"], "win": r["win"], "podium": r["podium"], "top10": r["top10"],
+			"exp_pos": r["exp_pos"], "pole": r.get("pole", 0.0), "exp_grid": r.get("exp_grid", 0.0),
+			"grid": r.get("grid", 0)})
+	var data := {"made_at": t, "class": cls, "series": series, "mode": mode,
+		"course": str(res.get("track", {}).get("course", "")), "rows": rows}
+	var path := "%s/%d_%s.json" % [FORECAST_DIR, t, cls.validate_filename()]
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return ""
+	f.store_string(JSON.stringify(data))
+	f.close()
+	return path
+
+
+func list_forecasts() -> Array:
+	var out := []
+	if not DirAccess.dir_exists_absolute(FORECAST_DIR):
+		return out
+	for fn in DirAccess.get_files_at(FORECAST_DIR):
+		if not fn.ends_with(".json"):
+			continue
+		var d = JSON.parse_string(FileAccess.get_file_as_string("%s/%s" % [FORECAST_DIR, fn]))
+		if d is Dictionary and d.has("rows"):
+			d["file"] = fn
+			out.append(d)
+	out.sort_custom(func(a, b): return int(a["made_at"]) < int(b["made_at"]))
+	return out
+
+
+# The result a forecast is judged on: {"event", "course", "time", "pos": {driver: class place}},
+# or {} if that race has not been imported yet.
+func forecast_result(fc: Dictionary) -> Dictionary:
+	var made := int(fc["made_at"])
+	var best := {}
+	for h in Elo.history:
+		var t := int(h.get("time", -1))
+		if t < made or t > made + MATCH_DAYS * 86400:
+			continue
+		if fc.get("series", "") != "" and Elo.series_code(str(h["file"])) not in ["", str(fc["series"])]:
+			continue
+		var pos := {}
+		for c in h["changes"]:
+			if c["sess"] == "race" and c["cls"] == fc["class"]:
+				pos[Elo.resolve(str(c["driver"]))] = int(c["pos"])
+		if pos.is_empty():
+			continue
+		if best.is_empty() or t < int(best["time"]):
+			best = {"event": h["file"], "course": h.get("course", ""), "time": t, "pos": pos}
+	return best
+
+
+# How a forecast did: {"winner", "winner_chance", "winner_rank", "fav", "fav_won", "podium_hits",
+# "pos_error", "brier", "drivers"}, or {} if its race is not in yet.
+func score_forecast(fc: Dictionary) -> Dictionary:
+	var res := forecast_result(fc)
+	if res.is_empty():
+		return {}
+	var pos: Dictionary = res["pos"]
+	var rows: Array = fc["rows"].filter(func(r): return pos.has(Elo.resolve(str(r["name"]))))
+	if rows.is_empty():
+		return {}
+	# the forecast's own order (expected finish) and the actual order, among drivers in both
+	rows.sort_custom(func(a, b): return float(a["exp_pos"]) < float(b["exp_pos"]))
+	var actual := rows.duplicate()
+	actual.sort_custom(func(a, b): return pos[Elo.resolve(str(a["name"]))] < pos[Elo.resolve(str(b["name"]))])
+	var winner: Dictionary = actual[0]
+	var winner_rank := rows.find(winner) + 1
+	var hits := 0
+	for i in mini(3, rows.size()):
+		if actual.slice(0, 3).has(rows[i]):
+			hits += 1
+	var err := 0.0
+	var brier := 0.0
+	for i in actual.size():
+		var r: Dictionary = actual[i]
+		err += absf(float(r["exp_pos"]) - float(i + 1))
+		brier += pow(float(r["podium"]) - (1.0 if i < 3 else 0.0), 2.0)
+	return {"event": res["event"], "course": res["course"], "winner": winner["name"],
+		"winner_chance": float(winner["win"]), "winner_rank": winner_rank,
+		"fav": rows[0]["name"], "fav_won": rows[0] == winner, "podium_hits": hits,
+		"pos_error": err / actual.size(), "brier": brier / actual.size(), "drivers": actual.size()}

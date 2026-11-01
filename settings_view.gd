@@ -18,6 +18,15 @@ var grade_spin := SpinBox.new()
 var drop_spin := SpinBox.new()
 var class_rows := GridContainer.new()   # game class name -> name shown on screen
 var rule_rows := VBoxContainer.new()     # race rules: one row per series and starting season
+var brand_name := LineEdit.new()
+var brand_color := ColorPickerButton.new()
+var brand_logo := LineEdit.new()
+var logo_dialog := FileDialog.new()
+var brand_primary := ColorPickerButton.new()
+var brand_secondary := ColorPickerButton.new()
+var series_color_box := VBoxContainer.new()   # one colour per series
+var title_font := LineEdit.new()
+var font_dialog := FileDialog.new()
 var preview := Label.new()
 
 const BASES := [["average", "Average of race and quali rating"], ["race", "Race rating only"], ["quali", "Quali rating only"]]
@@ -91,6 +100,52 @@ func _ready() -> void:
 	add_rule.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	rr.add_child(add_rule)
 
+	# graphics
+	var gr2 := _card("GRAPHICS")
+	gr2.add_child(_note("Shown on every image made on the Graphics screen: the league name above the title, the league colours, and a logo (PNG, JPG or SVG with a transparent background; square badges and wide wordmarks both work, but on the dark background a logo needs light or coloured lettering). Images of one series (a Sprint forecast, Multiclass standings) use that series' colour; the others use the accent colour."))
+	var g_form := GridContainer.new()
+	g_form.columns = 2
+	gr2.add_child(g_form)
+	brand_name.placeholder_text = "League name"
+	brand_name.custom_minimum_size = Vector2(320, 0)
+	_form_row(g_form, "League name", brand_name, "")
+	brand_color.edit_alpha = false
+	brand_color.custom_minimum_size = Vector2(120, 0)
+	_form_row(g_form, "Accent colour", brand_color, "")
+	brand_primary.edit_alpha = false
+	brand_primary.custom_minimum_size = Vector2(120, 0)
+	_form_row(g_form, "Main league colour", brand_primary, "The background glow behind every image.")
+	brand_secondary.edit_alpha = false
+	brand_secondary.custom_minimum_size = Vector2(120, 0)
+	_form_row(g_form, "Secondary colour", brand_secondary, "The second class on the track card's split grades (the first class uses the series colour).")
+	_form_row(g_form, "Series colours", series_color_box, "")
+	var logo_row := HBoxContainer.new()
+	brand_logo.placeholder_text = "no logo"
+	brand_logo.custom_minimum_size = Vector2(320, 0)
+	logo_row.add_child(brand_logo)
+	logo_row.add_child(_btn("Choose...", func(): logo_dialog.popup_centered_ratio(0.6)))
+	logo_row.add_child(_btn("Remove", func(): brand_logo.text = ""))
+	_form_row(g_form, "Logo file", logo_row, "")
+	var font_row := HBoxContainer.new()
+	title_font.placeholder_text = "system font"
+	title_font.custom_minimum_size = Vector2(320, 0)
+	font_row.add_child(title_font)
+	font_row.add_child(_btn("Choose...", func(): font_dialog.popup_centered_ratio(0.6)))
+	font_row.add_child(_btn("Remove", func(): title_font.text = ""))
+	_form_row(g_form, "Title font file", font_row, "A font for the big titles (TTF, OTF or WOFF2), e.g. the league's own display font.")
+	font_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	font_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	font_dialog.filters = PackedStringArray(["*.ttf, *.otf, *.woff, *.woff2 ; Fonts"])
+	font_dialog.use_native_dialog = true
+	font_dialog.file_selected.connect(func(p: String): title_font.text = p)
+	add_child(font_dialog)
+	logo_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	logo_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	logo_dialog.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp, *.svg ; Images"])
+	logo_dialog.use_native_dialog = true
+	logo_dialog.file_selected.connect(func(p: String): brand_logo.text = p)
+	add_child(logo_dialog)
+
 	# class names
 	var cn := _card("CLASS NAMES")
 	cn.add_child(_note("How each class is called on screen and in exports. The data keeps the game's own class name, so classes with different specs (ELMS and WEC LMP2, for example) stay separate. Leave a name empty to show the game's name."))
@@ -155,6 +210,28 @@ func refresh() -> void:
 		e.custom_minimum_size = Vector2(200, 0)
 		e.set_meta("class", c)
 		class_rows.add_child(e)
+	brand_name.text = str(LeagueSettings.get_value("brand_name"))
+	brand_color.color = Color.from_string(str(LeagueSettings.get_value("brand_accent")), Color("cdfe02"))
+	brand_logo.text = str(LeagueSettings.get_value("brand_logo"))
+	brand_primary.color = Color.from_string(str(LeagueSettings.get_value("brand_primary")), Color("512f89"))
+	brand_secondary.color = Color.from_string(str(LeagueSettings.get_value("brand_secondary")), Color.WHITE)
+	title_font.text = str(LeagueSettings.get_value("brand_title_font"))
+	for c in series_color_box.get_children():
+		series_color_box.remove_child(c)
+		c.queue_free()
+	var snames: Dictionary = LeagueSettings.get_value("series_names")
+	for code in snames:
+		var srow := HBoxContainer.new()
+		var sl := _label(str(snames[code]))
+		sl.custom_minimum_size = Vector2(120, 0)
+		srow.add_child(sl)
+		var cp := ColorPickerButton.new()
+		cp.edit_alpha = false
+		cp.custom_minimum_size = Vector2(120, 0)
+		cp.color = LeagueSettings.series_color(str(code))
+		cp.set_meta("series", str(code))
+		srow.add_child(cp)
+		series_color_box.add_child(srow)
 	for c in rule_rows.get_children():
 		rule_rows.remove_child(c)
 		c.queue_free()
@@ -271,6 +348,19 @@ func _collect() -> Dictionary:
 			return str(a["series"]) < str(b["series"])
 		return int(a["from"]) < int(b["from"]))
 	values["race_rules"] = rules
+	values["brand_name"] = brand_name.text.strip_edges()
+	values["brand_accent"] = "#" + brand_color.color.to_html(false)
+	values["brand_logo"] = brand_logo.text.strip_edges()
+	values["brand_primary"] = "#" + brand_primary.color.to_html(false)
+	values["brand_secondary"] = "#" + brand_secondary.color.to_html(false)
+	values["brand_title_font"] = title_font.text.strip_edges()
+	var scols := {}
+	for srow in series_color_box.get_children():
+		if srow.is_queued_for_deletion():
+			continue
+		var cp := srow.get_child(1) as ColorPickerButton
+		scols[str(cp.get_meta("series"))] = "#" + cp.color.to_html(false)
+	values["series_colors"] = scols
 	return values
 
 

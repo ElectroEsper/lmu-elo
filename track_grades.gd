@@ -47,7 +47,10 @@ const TRAITS := [
 
 # One row per characteristic for this track and class:
 # {"id", "name", "tip", "grade" (0 = no data), "value", "detail", "basis"}
-static func grade(course: String, cls: String) -> Array:
+# estimate: when the class has no league race at the track, the results grades (overtaking,
+# incidents) come from its training races there, else from tendencies (see _estimate); such rows
+# have "estimated": true. Only for display (the track card): analyses use real races only.
+static func grade(course: String, cls: String, estimate := false) -> Array:
 	var values := collect(cls)   # course -> {key: value}
 	var mine: Dictionary = values.get(course, {})
 	var out := []
@@ -79,7 +82,335 @@ static func grade(course: String, cls: String) -> Array:
 				row["basis"] = "fixed scale (%d track%s known)" % [pool.size(), "" if pool.size() == 1 else "s"]
 			if t.get("invert", false) and int(row["grade"]) > 0:
 				row["grade"] = 6 - int(row["grade"])
+		elif estimate and t["src"] == "res":
+			var est := _estimate(course, cls, t, values)
+			if not est.is_empty():
+				var pool := {}
+				for c in values:
+					if values[c].has(key):
+						pool[c] = float(values[c][key])
+				var x := float(est["value"])
+				pool[course] = x
+				row["value"] = "%s %s (estimate)" % [_fmt(x), unit]
+				row["grade"] = _ranked(course, pool)["grade"] if pool.size() >= MIN_RANKED else _fixed(x, cuts)
+				if t.get("invert", false):
+					row["grade"] = 6 - int(row["grade"])
+				row["basis"] = est["basis"]
+				row["estimated"] = true
 		out.append(row)
+	return out
+
+
+# A results value (passes or incidents per 10 laps) for a class that has no league race at the
+# track. First its training races there. Otherwise a self-checking estimate: five methods are
+# tried (see _predict_all), each scored by predicting every track the class HAS raced while that
+# track is left out, and the one with the smallest typical error for this class and grade is used
+# (among those that have the inputs they need at this track). Nothing qualifies: {} (no grade).
+static func _estimate(course: String, cls: String, t: Dictionary, values: Dictionary) -> Dictionary:
+	var key: String = t["key"]
+	var tr: Dictionary = _training_results(cls)
+	if tr.has(course) and tr[course].has(key):
+		var n := int(tr[course].get("races", tr[course].get("incident_races", 1)))
+		return {"value": float(tr[course][key]), "basis": "from %d training race%s here" % [n, "" if n == 1 else "s"]}
+	var est := _estimator(cls, key)
+	if est["rows"].is_empty():
+		return {}
+	var target := _row(course, key, values, est["oc"], false)
+	var preds := _predict_all(est["rows"], target, est)
+	var best := ""
+	for m in preds:
+		if est["scores"].has(m) and (best == "" or float(est["scores"][m]["err"]) < float(est["scores"][best]["err"])):
+			best = m
+	if best == "":
+		return {}
+	var sc: Dictionary = est["scores"][best]
+	var pct := roundi((exp(float(sc["err"])) - 1.0) * 100.0)
+	var oc_name := LeagueSettings.label(str(est["oc"]))
+	var label := ""
+	match best:
+		"scaled":
+			label = "%s here x%.2f" % [oc_name, float(preds["_ratio"])]
+		"ridge_other":
+			label = "this track's 8 traits + %s here" % oc_name
+		"avg":
+			label = "the average of %s here x%.2f and this track's 8 traits" % [oc_name, float(preds["_ratio"])]
+		"ridge":
+			label = "this track's 8 traits"
+		"single":
+			label = "its %s here" % str(preds["_single"]).to_lower()
+		"mean":
+			label = "the %s average" % LeagueSettings.label(cls)
+	return {"value": maxf(0.0, exp(float(preds[best])) - 0.1),
+		"basis": "estimated from %s (typically within ±%d%%, checked on %d tracks)" % [label, pct, int(sc["n"])],
+		"method": best}
+
+
+const _EST_MIN_SCORED := 5     # a method must have predicted at least this many left-out tracks
+const _LAMBDAS := [1.0, 3.0, 10.0, 30.0, 100.0]
+static var _est_cache := {}    # "cls|key" -> {"stamp", ...}
+
+
+static func _tel_keys() -> Array:
+	return TRAITS.filter(func(x): return x["src"] == "tel").map(func(x): return x["key"])
+
+
+static func _ly(v: float) -> float:   # passes and incidents are compared on a log scale
+	return log(maxf(v, 0.0) + 0.1)
+
+
+# One track of the class: {"course", "y" (log, or NAN), "x" (8 traits, or empty), "o" (log value
+# of the other class there, or NAN)}
+static func _row(course: String, key: String, values: Dictionary, oc: String, need_y := true) -> Dictionary:
+	var v: Dictionary = values.get(course, {})
+	var x := PackedFloat64Array()
+	for k in _tel_keys():
+		if not v.has(k):
+			x = PackedFloat64Array()
+			break
+		x.append(float(v[k]))
+	var o := NAN
+	if oc != "":
+		var ov: Dictionary = collect(oc).get(course, {})
+		if ov.has(key):
+			o = _ly(float(ov[key]))
+	var y := NAN
+	if need_y and v.has(key):
+		y = _ly(float(v[key]))
+	return {"course": course, "y": y, "x": x, "o": o, "o_raw": exp(o) - 0.1 if not is_nan(o) else NAN}
+
+
+# Which methods work for this class and grade, and how well: scored once per data change.
+static func _estimator(cls: String, key: String) -> Dictionary:
+	var stamp := "%d|%d" % [TrackStore.revision, Profiles.revision]
+	var ck := cls + "|" + key
+	var hit: Dictionary = _est_cache.get(ck, {})
+	if hit.get("stamp", "") == stamp:
+		return hit
+	var values := collect(cls)
+	# the other class: the one sharing the most tracks with a value for this grade
+	var oc := ""
+	var best_shared := 2
+	for b in Elo.boards():
+		var c2: String = b[0]
+		if c2 == cls or b[1] != "race":
+			continue
+		var ov := collect(c2)
+		var shared := 0
+		for c in values:
+			if values[c].has(key) and ov.has(c) and ov[c].has(key):
+				shared += 1
+		if shared > best_shared:
+			best_shared = shared
+			oc = c2
+	var rows := []
+	for c in values:
+		if values[c].has(key):
+			rows.append(_row(c, key, values, oc))
+	var est := {"stamp": stamp, "oc": oc, "rows": rows, "scores": {}, "lam": 10.0, "lam_o": 10.0}
+	est["lam"] = _pick_lambda(rows, false)
+	est["lam_o"] = _pick_lambda(rows, true)
+	var errs := {}
+	for i in rows.size():
+		var train := rows.duplicate()
+		train.remove_at(i)
+		var preds := _predict_all(train, rows[i], est)
+		for m in preds:
+			if str(m).begins_with("_"):
+				continue
+			if not errs.has(m):
+				errs[m] = []
+			errs[m].append(absf(float(preds[m]) - float(rows[i]["y"])))
+	for m in errs:
+		if errs[m].size() >= _EST_MIN_SCORED:
+			est["scores"][m] = {"err": _mean(errs[m]), "n": errs[m].size()}
+	_est_cache[ck] = est
+	return est
+
+
+# Predictions (log scale) of every method that has what it needs, from the training tracks:
+#  mean: the class average; scaled: the other class here x (class / other class over shared
+#  tracks, at least 3); ridge: the 8 telemetry traits (ridge regression); ridge_other: the 8
+#  traits plus the other class's value here; avg: the average of scaled and ridge; single: the one
+#  trait with the strongest link (at least 6 tracks, |r| >= 0.5).
+static func _predict_all(train: Array, target: Dictionary, est: Dictionary) -> Dictionary:
+	var out := {}
+	var ys := train.map(func(r): return float(r["y"]))
+	if ys.size() >= 2:
+		out["mean"] = _mean(ys)
+	var num := 0.0
+	var den := 0.0
+	var shared := 0
+	for r in train:
+		if not is_nan(float(r["o"])):
+			num += exp(float(r["y"])) - 0.1
+			den += float(r["o_raw"])
+			shared += 1
+	if shared >= 3 and den > 0.0 and not is_nan(float(target["o"])):
+		out["_ratio"] = num / den
+		out["scaled"] = _ly(float(target["o_raw"]) * num / den)
+	var has_x: bool = not (target["x"] as PackedFloat64Array).is_empty()
+	if has_x:
+		var tx := train.filter(func(r): return not (r["x"] as PackedFloat64Array).is_empty())
+		if tx.size() >= 5:
+			var m := _ridge(tx.map(func(r): return r["x"]), tx.map(func(r): return float(r["y"])), float(est["lam"]))
+			out["ridge"] = _ridge_at(m, target["x"])
+			if out.has("scaled"):
+				out["avg"] = (float(out["ridge"]) + float(out["scaled"])) / 2.0
+		if not is_nan(float(target["o"])):
+			var txo := tx.filter(func(r): return not is_nan(float(r["o"])))
+			if txo.size() >= 5:
+				var m2 := _ridge(txo.map(func(r): return _with_o(r)), txo.map(func(r): return float(r["y"])), float(est["lam_o"]))
+				out["ridge_other"] = _ridge_at(m2, _with_o(target))
+		if tx.size() >= 6:
+			var keys := _tel_keys()
+			var best := {}
+			for j in keys.size():
+				var fit := _line(tx.map(func(r): return float(r["x"][j])), tx.map(func(r): return float(r["y"])))
+				if absf(float(fit["r"])) >= 0.5 and absf(float(fit["r"])) > absf(float(best.get("r", 0.0))):
+					best = fit
+					best["j"] = j
+			if not best.is_empty():
+				out["single"] = float(best["a"]) + float(best["b"]) * float(target["x"][int(best["j"])])
+				var tname := ""
+				for tt in TRAITS:
+					if tt["key"] == keys[int(best["j"])]:
+						tname = tt["name"]
+				out["_single"] = tname
+	return out
+
+
+static func _with_o(r: Dictionary) -> PackedFloat64Array:
+	var x: PackedFloat64Array = (r["x"] as PackedFloat64Array).duplicate()
+	x.append(float(r["o"]))
+	return x
+
+
+# The ridge penalty that predicts left-out tracks best (once per class and grade).
+static func _pick_lambda(rows: Array, with_other: bool) -> float:
+	var rr := rows.filter(func(r): return not (r["x"] as PackedFloat64Array).is_empty() and (not with_other or not is_nan(float(r["o"]))))
+	if rr.size() < 6:
+		return 10.0
+	var best_l := 10.0
+	var best_e := INF
+	for lam in _LAMBDAS:
+		var e := 0.0
+		for i in rr.size():
+			var train := rr.duplicate()
+			train.remove_at(i)
+			var feats := train.map(func(r): return _with_o(r) if with_other else r["x"])
+			var m := _ridge(feats, train.map(func(r): return float(r["y"])), lam)
+			e += absf(_ridge_at(m, _with_o(rr[i]) if with_other else rr[i]["x"]) - float(rr[i]["y"]))
+		if e < best_e:
+			best_e = e
+			best_l = lam
+	return best_l
+
+
+# Ridge regression on standardised inputs: {"mu", "sd", "w", "ym"}
+static func _ridge(xs: Array, ys: Array, lam: float) -> Dictionary:
+	var n := xs.size()
+	var d: int = (xs[0] as PackedFloat64Array).size()
+	var mu := PackedFloat64Array()
+	var sd := PackedFloat64Array()
+	mu.resize(d)
+	sd.resize(d)
+	for j in d:
+		var col := xs.map(func(x): return float(x[j]))
+		mu[j] = _mean(col)
+		var v := 0.0
+		for c in col:
+			v += (c - mu[j]) * (c - mu[j])
+		sd[j] = sqrt(v / n) + 1e-9
+	var ym := _mean(ys)
+	var a := []          # (Z'Z + lam I) | Z'(y - ym), as rows of an augmented matrix
+	for p in d:
+		var row := PackedFloat64Array()
+		row.resize(d + 1)
+		a.append(row)
+	for i in n:
+		var z := PackedFloat64Array()
+		z.resize(d)
+		for j in d:
+			z[j] = (float(xs[i][j]) - mu[j]) / sd[j]
+		var dy := float(ys[i]) - ym
+		for p in d:
+			var rp: PackedFloat64Array = a[p]
+			for q in d:
+				rp[q] += z[p] * z[q]
+			rp[d] += z[p] * dy
+			a[p] = rp
+	for p in d:
+		var rp: PackedFloat64Array = a[p]
+		rp[p] += lam
+		a[p] = rp
+	return {"mu": mu, "sd": sd, "w": _solve(a, d), "ym": ym}
+
+
+static func _ridge_at(m: Dictionary, x: PackedFloat64Array) -> float:
+	var out := float(m["ym"])
+	for j in x.size():
+		out += (x[j] - m["mu"][j]) / m["sd"][j] * m["w"][j]
+	return out
+
+
+# Gaussian elimination with partial pivoting on an augmented d x (d+1) matrix.
+static func _solve(a: Array, d: int) -> PackedFloat64Array:
+	for col in d:
+		var piv := col
+		for r in range(col + 1, d):
+			if absf(a[r][col]) > absf(a[piv][col]):
+				piv = r
+		var tmp = a[col]
+		a[col] = a[piv]
+		a[piv] = tmp
+		var pr: PackedFloat64Array = a[col]
+		if absf(pr[col]) < 1e-12:
+			continue
+		for r in range(col + 1, d):
+			var rr: PackedFloat64Array = a[r]
+			var f := rr[col] / pr[col]
+			for c in range(col, d + 1):
+				rr[c] -= f * pr[c]
+			a[r] = rr
+	var w := PackedFloat64Array()
+	w.resize(d)
+	for r in range(d - 1, -1, -1):
+		var rr: PackedFloat64Array = a[r]
+		var sum := rr[d]
+		for c in range(r + 1, d):
+			sum -= rr[c] * w[c]
+		w[r] = sum / rr[r] if absf(rr[r]) > 1e-12 else 0.0
+	return w
+
+
+# Least-squares line y = a + b x and its correlation r.
+static func _line(xs: Array, ys: Array) -> Dictionary:
+	var mx := _mean(xs)
+	var my := _mean(ys)
+	var sxy := 0.0
+	var sxx := 0.0
+	var syy := 0.0
+	for i in xs.size():
+		sxy += (xs[i] - mx) * (ys[i] - my)
+		sxx += (xs[i] - mx) * (xs[i] - mx)
+		syy += (ys[i] - my) * (ys[i] - my)
+	if sxx <= 0.0 or syy <= 0.0:
+		return {"a": my, "b": 0.0, "r": 0.0, "n": xs.size()}
+	var b := sxy / sxx
+	return {"a": my - b * mx, "b": b, "r": sxy / sqrt(sxx * syy), "n": xs.size()}
+
+
+# The same results values from training races only (course -> values), for _estimate.
+static var _training_cache := {}   # cls -> {"stamp", "values"}
+
+
+static func _training_results(cls: String) -> Dictionary:
+	var stamp := str(Profiles.revision)
+	var hit: Dictionary = _training_cache.get(cls, {})
+	if hit.get("stamp", "") == stamp:
+		return hit["values"]
+	var out := _results(cls, true)
+	_training_cache[cls] = {"stamp": stamp, "values": out}
 	return out
 
 
@@ -124,10 +455,10 @@ static func _collect(cls: String) -> Dictionary:
 
 
 # Overtaking, incidents and fuel per tank from the league races of this class
-static func _results(cls: String) -> Dictionary:
+static func _results(cls: String, training := false) -> Dictionary:
 	var acc := {}   # course -> lists of per-race values (passes, incidents, fuel...)
 	for day in Profiles.days:
-		if day.get("training", false) or day["race"].is_empty():
+		if bool(day.get("training", false)) != training or day["race"].is_empty():
 			continue
 		var race: Dictionary = day["race"]
 		if not race.get("classes", {}).has(cls):

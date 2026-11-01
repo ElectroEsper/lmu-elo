@@ -32,6 +32,9 @@ var fuel_spin := SpinBox.new()          # fuel / virtual-energy use multiplier
 var tyre_spin := SpinBox.new()          # tyre wear multiplier
 var min_stops_spin := SpinBox.new()     # stops the rules make compulsory
 var _last_stops_on := false
+var _last_results := []   # [{"cls", "res"}] of the forecast on screen, for "Save for the record"
+var _last_mode := 0
+var save_btn := Button.new()
 var mode_pick := OptionButton.new()
 var track_pick := OptionButton.new()
 var minutes_spin := SpinBox.new()
@@ -168,6 +171,11 @@ func _ready() -> void:
 	var go := _btn("Predict", _run)
 	go.theme_type_variation = "AccentButton"
 	entry.add_child(go)
+	save_btn.text = "Save for the record"
+	save_btn.tooltip_text = "Keep this forecast. Once the race's results are imported it is scored in Reports > Forecast record (did the favourite win, podium hits, position error)."
+	save_btn.disabled = true
+	save_btn.pressed.connect(_save_forecast)
+	entry.add_child(save_btn)
 
 	# model checks and settings
 	var model := _card(left, "MODEL")
@@ -713,7 +721,21 @@ func _run() -> void:
 		results.append({"cls": cls, "res": res})
 	_last_stops_on = pits_check.button_pressed
 	_busy = false
+	_last_results = results
+	_last_mode = mode
+	save_btn.disabled = false
 	_show_all(results, mode)
+
+
+func _save_forecast() -> void:
+	if _last_results.is_empty():
+		return
+	var n := 0
+	for entry in _last_results:
+		if Predict.save_forecast(entry["res"], entry["cls"], _current_series(), _last_mode) != "":
+			n += 1
+	save_btn.disabled = true   # once per forecast
+	notice.emit("Saved %d forecast%s. They are scored in Reports > Forecast record once the race's results are imported." % [n, "" if n == 1 else "s"])
 
 
 # Column titles and widths; with several classes an "Overall" column is added.
