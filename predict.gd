@@ -59,6 +59,22 @@ const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track te
 const TEL_RACE_RATIO := {"Hyper": 1.045, "GT3": 1.03, "LMP3": 1.03}
 const TEL_RACE_RATIO_DEFAULT := 1.03
 const TEL_CHECK := 0.05   # telemetry and league race pace this far apart: the forecast asks to check
+# ---------- Weather (fitted on the league's own races, autumn 2026) ----------
+# plan["weather"]: "dry", "mixed" or "wet"; plan["rain"]: chance of rain per stage for "mixed".
+# Fully wet races kept the dry order (results vs ratings: 0.50 in both) at a slower pace; the
+# chaos comes from conditions CHANGING: 5 mixed races had 0.7 more stops per driver, twice the
+# retirements and a looser order. Backtests never use weather (past races are replayed dry).
+const WET_SLOW := 0.11      # wet laps vs dry race laps (wet races: +14% over telemetry, dry: +3%)
+# LMU's custom weather runs in 5 stages, each with its own chance of rain. Conditions mostly carry
+# on from one stage to the next: each mixed league race changed exactly once, between 35% and 70%
+# of the race (dry to wet or wet to dry).
+const WX_STAGES := 5
+const WX_PERSIST := 0.75    # chance a stage keeps the previous stage's conditions
+# Each change: everyone needs other tyres (about one stop) and the timing is a lottery. In the
+# clearest mixed race the switch spread the field by 45-85 s over ~10 laps (2-7 s before it).
+const WX_SWITCH_SD := 0.5   # scatter per driver per change, x the pit loss
+const WX_DNF_PER_CHANGE := 0.5   # retirements +50% per change (doubled in 5 mixed races; few, so held back)
+const WX_DEFAULT_RAIN := 0.5
 const DEFAULT_PIT_LOSS := 60.0   # s per stop when neither the track nor the class has a measured one
 # Multiclass traffic. Encounters per lap with another class (passing it, or being passed by it)
 # = cars of that class x |1 - own lap time / their lap time|: checked on the league's races, this
@@ -84,12 +100,14 @@ const SETTINGS_PATH := "user://predict.json"
 var params := DEFAULTS.duplicate()
 var rng := RandomNumberGenerator.new()
 var pit_rng := RandomNumberGenerator.new()   # separate, so pit stops do not shift the other random draws
+var wx_rng := RandomNumberGenerator.new()    # weather draws: separate too, so a dry forecast is unchanged
 var last_backtest := {}
 
 
 func _ready() -> void:
 	rng.randomize()
 	pit_rng.randomize()
+	wx_rng.randomize()
 	_load_settings()
 
 
@@ -126,6 +144,7 @@ func driver_inputs(names: Array, cls: String, before := "", course := "") -> Arr
 				prior_q = ELO_TO_PACE * (float(Elo.ratings[kq]["r"]) - Elo.START)
 		out.append({
 			"name": nm,
+			"wet": float(WetWeather.of(nm, cls).get("effect", 0.0)),   # % lap time in the wet, < 0 = quicker
 			"n_r": s["n_r"],
 			"known": s["n_r"] > 0 or s["n_q"] > 0 or has_elo,
 			"pace": Profiles.shrunk(s["pace"], s["n_r"], Profiles.K_PACE, prior_r),
@@ -511,7 +530,11 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var P := params if prm.is_empty() else prm
 	var m := inputs.size()
 	var t_ref: float = track["ref_s"]
-	var laps := maxi(1, int(float(track["minutes"]) * 60.0 / t_ref) + 1)
+	var plan: Dictionary = track.get("plan", {})
+	var wx := str(plan.get("weather", "dry"))
+	var rain := clampf(float(plan.get("rain", WX_DEFAULT_RAIN)), 0.0, 1.0)
+	var exp_wet := 1.0 if wx == "wet" else (rain if wx == "mixed" else 0.0)   # expected wet share
+	var laps := maxi(1, int(float(track["minutes"]) * 60.0 / (t_ref * (1.0 + WET_SLOW * exp_wet))) + 1)
 	var base := []        # % pace incl. track-fit adjustment
 	var qbase := []
 	var lap_sd := []      # seconds, summed over the race
@@ -522,7 +545,6 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var dnf := []         # chance of retiring
 	var stops := []       # planned pit stops per driver
 	# pit stops: track["plan"] = {"pits": expected?, "fuel": x, "tyre": x, "min_stops": n}
-	var plan: Dictionary = track.get("plan", {})
 	var pit_loss := float(track.get("pit_loss", 0.0))
 	var tank_laps := float(track.get("tank_laps", 0.0)) / maxf(float(plan.get("fuel", 1.0)), 0.01)
 	var tyre_laps := float(track.get("tyre_laps", 0.0)) / maxf(float(plan.get("tyre", 1.0)), 0.01)
@@ -572,6 +594,13 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 		pod.append(0)
 		t10.append(0)
 		epos.append(0)
+	# weather: one tyre change costs about a pit stop even in races without planned stops
+	var wx_loss := float(track.get("wx_pit_loss", pit_loss if pit_loss > 0.0 else DEFAULT_PIT_LOSS))
+	var win_rain := []
+	win_rain.resize(m)
+	win_rain.fill(0)
+	var rain_sims := 0
+	var change_total := 0
 	var tot := []
 	tot.resize(m)
 	var qs := []
@@ -583,13 +612,36 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var by_total := func(a, b): return tot[a] < tot[b]
 	var by_quali := func(a, b): return qs[a] < qs[b]
 	for s in sims:
+		# --- weather: wet share of the race, number of changes, wet quali ---
+		var wet_share := 0.0
+		var changes := 0
+		var q_wet := false
+		if wx == "wet":
+			wet_share = 1.0
+			q_wet = true
+		elif wx == "mixed":
+			q_wet = wx_rng.randf() < rain   # quali has its own weather, before the race
+			var cur := wx_rng.randf() < rain
+			var n_wet := 0
+			for k in WX_STAGES:
+				if k > 0 and wx_rng.randf() > WX_PERSIST:
+					var nxt := wx_rng.randf() < rain
+					if nxt != cur:
+						changes += 1
+					cur = nxt
+				if cur:
+					n_wet += 1
+			wet_share = float(n_wet) / WX_STAGES
+		if wet_share > 0.0:
+			rain_sims += 1
+		change_total += changes
 		# --- grid ---
 		if mode == Mode.ACTUAL_GRID:
 			for i in m:
 				gpos[i] = i + 1
 		else:
 			for i in m:
-				qs[i] = qbase[i] + rng.randfn(0.0, P["sq"])
+				qs[i] = qbase[i] + (float(inputs[i].get("wet", 0.0)) if q_wet else 0.0) + rng.randfn(0.0, P["sq"])
 			qidx.sort_custom(by_quali)
 			for k in m:
 				gpos[qidx[k]] = k + 1
@@ -601,7 +653,11 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 				egrid[i] += gpos[i]
 		# --- race ---
 		for i in m:
-			var t: float = laps * t_ref * (1.0 + (base[i] + rng.randfn(0.0, P["sig_form"])) / 100.0)
+			var t: float = laps * t_ref * (1.0 + (base[i] + float(inputs[i].get("wet", 0.0)) * wet_share + rng.randfn(0.0, P["sig_form"])) / 100.0)
+			if wet_share > 0.0:
+				t *= 1.0 + WET_SLOW * wet_share
+			for c in changes:   # tyre change, and whether its timing paid off
+				t += wx_loss + wx_rng.randfn(0.0, WX_SWITCH_SD * wx_loss)
 			if mode != Mode.RACE_ONLY:
 				t += gpos[i] * P["g_grid"]
 			t += rng.randfn() * lap_sd[i]
@@ -625,7 +681,7 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 				t += pit_loss + pit_rng.randfn(0.0, PIT_SD)
 			if tr_on > 0.0:
 				t += _traffic_loss(n_pass, s_pass) + _traffic_loss(n_passed, s_passed)
-			if dnf[i] > 0.0 and rng.randf() < dnf[i]:
+			if dnf[i] > 0.0 and rng.randf() < dnf[i] * (1.0 + WX_DNF_PER_CHANGE * changes):
 				t += 1.0e7 + rng.randf()   # retired: classified behind every finisher
 			tot[i] = t
 		idx.sort_custom(by_total)
@@ -634,6 +690,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 			epos[who] += k + 1
 			if k == 0:
 				win[who] += 1
+				if wet_share > 0.0:
+					win_rain[who] += 1
 			if k < 3:
 				pod[who] += 1
 			if k < 10:
@@ -642,6 +700,12 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 			await get_tree().process_frame
 	var f := float(sims)
 	var out := {"laps": laps, "stops": stops, "pole": [], "front": [], "exp_grid": [], "win": [], "podium": [], "top10": [], "exp_pos": []}
+	if wx == "mixed":
+		# win chances split by whether the run saw rain: the "if it rains" swing
+		out["wx"] = {"rain_share": rain_sims / f, "changes": change_total / f, "win_rain": [], "win_dry": []}
+		for i in m:
+			out["wx"]["win_rain"].append(win_rain[i] / float(maxi(rain_sims, 1)))
+			out["wx"]["win_dry"].append((win[i] - win_rain[i]) / float(maxi(sims - rain_sims, 1)))
 	for i in m:
 		out["pole"].append(pole[i] / f)
 		out["front"].append(front[i] / f)
@@ -727,6 +791,9 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 	if plan.is_empty():
 		plan = LeagueSettings.rules_for(series if series != "" else str(ctx.get("series", "")), 0)
 	track["plan"] = plan
+	var wx := str(plan.get("weather", "dry"))
+	if wx != "dry":
+		track["wx_pit_loss"] = class_pit_loss(cls)
 	if bool(plan.get("pits", false)):
 		if not track.has("pit_loss"):
 			track["pit_loss"] = class_pit_loss(cls)
@@ -747,6 +814,11 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 		for k in ks:
 			parts.append("%d driver%s %d stop%s" % [counts[k], "" if counts[k] == 1 else "s", k, "" if k == 1 else "s"])
 		notes.append("Planned stops: " + ", ".join(parts) + ".")
+	if wx == "wet":
+		notes.append("Wet race: laps about %d%% slower, each driver's wet pace applied; quali wet too." % roundi(WET_SLOW * 100.0))
+	elif wx == "mixed":
+		notes.append("Mixed weather, %d%% chance of rain per stage: %d%% of the runs saw rain, %.1f changes of conditions on average (each one: a tyre change whose timing is a lottery, and more retirements)." % [
+			roundi(100.0 * float(plan.get("rain", WX_DEFAULT_RAIN))), roundi(100.0 * float(res["wx"]["rain_share"])), float(res["wx"]["changes"])])
 	var rows := []
 	for i in inputs.size():
 		var d: Dictionary = inputs[i]
@@ -759,10 +831,14 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 			"exp_pos": res["exp_pos"][i],
 			"stops": res["stops"][i],
 			"track_gap": d["track_gap_r"], "tend": d["tend"],
+			"wet": d["wet"],
+			"win_rain": res["wx"]["win_rain"][i] if res.has("wx") else -1.0,
+			"win_dry": res["wx"]["win_dry"][i] if res.has("wx") else -1.0,
 		})
 	rows.sort_custom(func(a, b): return a["exp_pos"] < b["exp_pos"])
 	var ret := expected_dnfs(inputs.map(func(d): return float(d.get("dnf", 0.0))) if float(params.get("dnf", 0.0)) > 0.0 else [])
-	return {"rows": rows, "track": track, "laps": res["laps"], "notes": notes, "dnf": ret}
+	return {"rows": rows, "track": track, "laps": res["laps"], "notes": notes, "dnf": ret, "weather": wx,
+		"rain": float(plan.get("rain", WX_DEFAULT_RAIN)) if wx == "mixed" else (1.0 if wx == "wet" else 0.0)}
 
 
 # How many drivers retire, from each one's retirement chance: the exact distribution of the count
@@ -1025,8 +1101,9 @@ func save_forecast(res: Dictionary, cls: String, series: String, mode: int, made
 	for r in res["rows"]:
 		rows.append({"name": r["name"], "win": r["win"], "podium": r["podium"], "top10": r["top10"],
 			"exp_pos": r["exp_pos"], "pole": r.get("pole", 0.0), "exp_grid": r.get("exp_grid", 0.0),
-			"grid": r.get("grid", 0)})
+			"grid": r.get("grid", 0), "win_rain": r.get("win_rain", -1.0), "win_dry": r.get("win_dry", -1.0)})
 	var data := {"made_at": t, "class": cls, "series": series, "mode": mode, "dnf": res.get("dnf", {}),
+		"weather": res.get("weather", "dry"), "rain": res.get("rain", 0.0),
 		"course": str(res.get("track", {}).get("course", "")), "rows": rows}
 	var path := "%s/%d_%s.json" % [FORECAST_DIR, t, cls.validate_filename()]
 	var f := FileAccess.open(path, FileAccess.WRITE)

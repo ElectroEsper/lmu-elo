@@ -31,6 +31,8 @@ var pits_check := CheckBox.new()        # routine pit stops expected in this rac
 var fuel_spin := SpinBox.new()          # fuel / virtual-energy use multiplier
 var tyre_spin := SpinBox.new()          # tyre wear multiplier
 var min_stops_spin := SpinBox.new()     # stops the rules make compulsory
+var weather_pick := OptionButton.new()  # dry / mixed / wet
+var rain_spin := SpinBox.new()          # mixed: chance of rain per stage, %
 var _last_stops_on := false
 var _last_results := []   # [{"cls", "res"}] of the forecast on screen, for "Save for the record"
 var _last_mode := 0
@@ -134,6 +136,37 @@ func _ready() -> void:
 	pits_check.toggled.connect(func(on: bool):
 		for sb in [fuel_spin, tyre_spin, min_stops_spin]:
 			sb.editable = on)
+
+	# weather: not known in advance, so Mixed lets every simulated race roll its own
+	var wx_form := GridContainer.new()
+	wx_form.columns = 2
+	wx_form.add_theme_constant_override("h_separation", 12)
+	setup.add_child(wx_form)
+	weather_pick.add_item("Dry")
+	weather_pick.set_item_metadata(0, "dry")
+	weather_pick.add_item("Mixed (rain may come and go)")
+	weather_pick.set_item_metadata(1, "mixed")
+	weather_pick.add_item("Wet")
+	weather_pick.set_item_metadata(2, "wet")
+	weather_pick.select(0)
+	weather_pick.tooltip_text = "Dry: as before.\nMixed: every simulated race rolls its own weather over LMU's 5 weather stages (dry, a shower part way, or wet), and qualifying its own. Each change of conditions means a tyre change whose timing is a lottery, and more retirements, as in the league's mixed races.\nWet: wet all race and quali: slower laps and each driver's own wet pace (the order mostly holds, as in the league's wet races)."
+	rain_spin.min_value = 0
+	rain_spin.max_value = 100
+	rain_spin.step = 5
+	rain_spin.value = roundi(100.0 * Predict.WX_DEFAULT_RAIN)
+	rain_spin.suffix = "%"
+	rain_spin.editable = false
+	rain_spin.tooltip_text = "Mixed weather: chance of rain in each of the 5 weather stages. 50% when nothing is known; set it from the admins' hints or the server's forecast."
+	weather_pick.item_selected.connect(func(i: int): rain_spin.editable = str(weather_pick.get_item_metadata(i)) == "mixed")
+	for row in [["Weather", weather_pick], ["Rain chance", rain_spin]]:
+		var l := _label(row[0])
+		l.theme_type_variation = "Muted"
+		wx_form.add_child(l)
+		var c: Control = row[1]
+		c.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		if c is OptionButton:
+			(c as OptionButton).clip_text = true
+		wx_form.add_child(c)
 
 	# entry list
 	var entry := _card(left, "ENTRY LIST")
@@ -454,7 +487,8 @@ func _fill_plan() -> void:
 
 func _plan() -> Dictionary:
 	return {"pits": pits_check.button_pressed, "fuel": fuel_spin.value, "tyre": tyre_spin.value,
-		"min_stops": int(min_stops_spin.value)}
+		"min_stops": int(min_stops_spin.value),
+		"weather": str(weather_pick.get_item_metadata(weather_pick.selected)), "rain": rain_spin.value / 100.0}
 
 
 # {class: cars} for the ticked classes; "_set" marks that the screen chose them (even none).
@@ -848,6 +882,9 @@ func _add_rows(root: TreeItem, rows: Array, mode: int, overall_offset: int) -> v
 		it.set_text(3, "%.1f" % (100.0 * r["front"]) if has_quali else "-")
 		it.set_text(4, "%.1f" % r["exp_grid"] if has_quali else "-")
 		it.set_text(5, "%.1f" % (100.0 * r["win"]))
+		if float(r.get("win_rain", -1.0)) >= 0.0:
+			it.set_tooltip_text(5, "Win chance if it stays dry: %.1f%%, if it rains: %.1f%%. Wet pace vs own dry pace: %+.2f%% (negative = quicker)." % [
+				100.0 * float(r["win_dry"]), 100.0 * float(r["win_rain"]), float(r.get("wet", 0.0))])
 		it.set_text(6, "%.1f" % (100.0 * r["podium"]))
 		it.set_text(7, "%.1f" % (100.0 * r["top10"]))
 		it.set_text(8, "%.1f" % r["exp_pos"])

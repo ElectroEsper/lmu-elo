@@ -13,7 +13,9 @@ const PANEL := Color("221a36")
 const PANEL_2 := Color("2e2547")
 const TEXT := Color("f4f2f8")
 const MUTED := Color("a39bbd")
-const HEAD := Color("8c60dc")      # section headings (the site's soft purple)
+const HEAD := Color("8c60dc")
+const RAIN_BLUE := Color("5aa9e6")
+const RAIN_MIN_SWING := 0.02   # win-chance swing (dry runs vs rain runs) worth showing      # section headings (the site's soft purple)
 const PODIUM := [Color("eac45a"), Color("c3cad4"), Color("c98a5a")]
 const FONT_NAMES := ["Segoe UI", "Inter", "Roboto", "Noto Sans", "DejaVu Sans", "sans-serif"]
 const TITLE_FONTS := ["Bahnschrift", "Segoe UI", "Inter", "Roboto", "DejaVu Sans", "sans-serif"]
@@ -180,9 +182,13 @@ func _build_forecast(body: VBoxContainer) -> void:
 		per = 16 if n_cls == 1 else 10
 	if landscape and n_cls == 1:
 		per = 8
+	if bool(spec.get("rain_swing", false)) and not landscape:
+		per -= 1   # room for the "if it rains" strip
 	# Event predictions: qualifying (predicted pole) on top, then the race
 	if _pole_strip(body, classes):
-		body.add_child(_label("RACE", 24, MUTED, "bold", 3))
+		body.add_child(_label("RACE" + _wx_tag(), 24, MUTED, "bold", 3))
+	elif _wx_tag() != "":
+		body.add_child(_label("RACE" + _wx_tag(), 24, MUTED, "bold", 3))
 	var holder: BoxContainer = HBoxContainer.new() if landscape and n_cls > 1 else VBoxContainer.new()
 	holder.add_theme_constant_override("separation", int(30 * s))
 	holder.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -206,6 +212,8 @@ func _build_forecast(body: VBoxContainer) -> void:
 		for i in mini(per, rows.size()):
 			var r: Dictionary = rows[i]
 			block.add_child(_forecast_row(i, r, top_win))
+	if bool(spec.get("rain_swing", false)):
+		_rain_strip(body, classes)
 
 
 # Top strip: each class's pole. Before quali, the driver most likely on pole and the chance;
@@ -227,7 +235,7 @@ func _pole_strip(body: VBoxContainer, classes: Array) -> bool:
 			entries.append([c["cls"], best["name"], best["note"]])
 	if entries.is_empty():
 		return false
-	body.add_child(_label("QUALIFYING", 24, MUTED, "bold", 3))
+	body.add_child(_label("QUALIFYING" + _wx_tag(), 24, MUTED, "bold", 3))
 	var bottom := HBoxContainer.new()
 	bottom.add_theme_constant_override("separation", int(16 * s))
 	body.add_child(bottom)
@@ -252,6 +260,64 @@ func _pole_strip(body: VBoxContainer, classes: Array) -> bool:
 			row.add_child(item)
 		bottom.add_child(panel)
 	return true
+
+
+# Weather after a section label: "  ·  MIXED WEATHER" (nothing when dry).
+func _wx_tag() -> String:
+	match str(spec.get("weather", "dry")):
+		"mixed":
+			return "  ·  MIXED WEATHER"
+		"wet":
+			return "  ·  WET"
+	return ""
+
+
+# Mixed weather: per class, the driver who gains the most win chance when rain comes and the one
+# who loses the most (runs with rain against runs that stayed dry). Small swings are left out.
+func _rain_strip(body: VBoxContainer, classes: Array) -> void:
+	var lines := []   # [class, [[tag, colour, name, dry, rain], ...]]
+	for c in classes:
+		var best := {}
+		var worst := {}
+		for r in c["rows"]:
+			if float(r.get("win_rain", -1.0)) < 0.0:
+				continue
+			var d := float(r["win_rain"]) - float(r["win_dry"])
+			if d > float(best.get("d", RAIN_MIN_SWING)):
+				best = {"d": d, "r": r}
+			if d < float(worst.get("d", -RAIN_MIN_SWING)):
+				worst = {"d": d, "r": r}
+		var items := []
+		if not best.is_empty():
+			items.append(["GAINS", Color("5cd68a"), best["r"]])
+		if not worst.is_empty():
+			items.append(["LOSES", Color("ef6b6b"), worst["r"]])
+		if not items.is_empty():
+			lines.append([c["cls"], items])
+	if lines.is_empty():
+		return
+	body.add_child(_label("IF IT RAINS", 24, MUTED, "bold", 3))
+	var panel := _panel(Color(RAIN_BLUE, 0.14), RAIN_BLUE)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.add_child(panel)
+	var row: Container = HBoxContainer.new() if landscape else VBoxContainer.new()
+	row.add_theme_constant_override("separation", int((36 if landscape else 2) * s))
+	panel.add_child(row)
+	for ln in lines:
+		var block := VBoxContainer.new()
+		block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		block.add_theme_constant_override("separation", int((2 if landscape else -4) * s))
+		row.add_child(block)
+		for it in ln[1]:
+			var h := HBoxContainer.new()
+			h.add_theme_constant_override("separation", int(14 * s))
+			var cls_txt := LeagueSettings.label(str(ln[0])).to_upper() if it == ln[1][0] else ""
+			h.add_child(_label(cls_txt, 28, HEAD.lightened(0.25), "title", 0, 110))
+			h.add_child(_label(str(it[0]), 20, it[1], "bold", 2, 96))
+			h.add_child(_fit(_label(str(it[2]["name"]), 28 if not landscape else 30, TEXT, "bold")))
+			h.add_child(_label("%d%% → %d%%" % [roundi(100.0 * float(it[2]["win_dry"])), roundi(100.0 * float(it[2]["win_rain"]))],
+				26, MUTED, "regular", 0, 0.0, HORIZONTAL_ALIGNMENT_RIGHT))
+			block.add_child(h)
 
 
 func _forecast_row(i: int, r: Dictionary, top_win: float) -> Control:

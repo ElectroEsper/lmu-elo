@@ -25,6 +25,7 @@ var champ_label := Label.new()
 var champ_pick := OptionButton.new()    # standings: which championship of the season; driver card: which class
 var title_edit := LineEdit.new()
 var corners_check := CheckBox.new()     # track card: show the detected corner numbers on the map
+var rain_check := CheckBox.new()        # event predictions, mixed weather: the "if it rains" strip
 var watch_label := Label.new()
 var watch_pick := OptionButton.new()    # track card: drivers to watch from history or a forecast
 var minutes_label := Label.new()
@@ -92,6 +93,13 @@ func _ready() -> void:
 		_save_ui("corner_numbers", on)
 		_render())
 	left.add_child(corners_check)
+	rain_check.text = "\"If it rains\" strip"
+	rain_check.tooltip_text = "Mixed-weather forecasts: under the race results, who gains and who loses the most when rain comes."
+	rain_check.button_pressed = true
+	rain_check.toggled.connect(func(on: bool):
+		_save_ui("rain_strip", on)
+		_render())
+	left.add_child(rain_check)
 	watch_label.text = "Drivers to watch"
 	watch_label.theme_type_variation = "Muted"
 	left.add_child(watch_label)
@@ -143,6 +151,7 @@ func _ready() -> void:
 	_show_bg_name(str(cfg.get_value("graphics", "background", "")))
 	tint_slider.value = float(cfg.get_value("graphics", "tint", 0.7))
 	corners_check.set_pressed_no_signal(bool(cfg.get_value("graphics", "corner_numbers", false)))
+	rain_check.set_pressed_no_signal(bool(cfg.get_value("graphics", "rain_strip", true)))
 	tint_slider.value_changed.connect(func(v: float):
 		_save_ui("tint", v)
 		_render())
@@ -271,6 +280,7 @@ func _fill_sources() -> void:
 	minutes_spin.visible = _kind() == "track"
 	watch_label.visible = _kind() == "track"
 	corners_check.visible = _kind() == "track"
+	rain_check.visible = _kind() == "forecast"
 	watch_pick.visible = _kind() == "track"
 	notes_edit.visible = _kind() == "track"
 	_load_notes()
@@ -640,6 +650,8 @@ func _forecast_spec() -> Dictionary:
 	var course := ""
 	var series := ""
 	var mode := -1
+	var weather := "dry"
+	var rain := 0.0
 	var src := int(source_pick.get_item_metadata(source_pick.selected)) if source_pick.selected >= 0 else -1
 	if src < 0:
 		var pv = shell.predict_view if shell != null else null
@@ -647,6 +659,8 @@ func _forecast_spec() -> Dictionary:
 			for e in pv._last_results:
 				classes.append({"cls": e["cls"], "rows": e["res"]["rows"]})
 				course = str(e["res"]["track"].get("course", ""))
+				weather = str(e["res"].get("weather", "dry"))
+				rain = float(e["res"].get("rain", 0.0))
 			series = pv._current_series()
 			mode = int(pv._last_mode)
 	else:
@@ -658,6 +672,8 @@ func _forecast_spec() -> Dictionary:
 			course = str(fc.get("course", ""))
 			series = str(fc.get("series", ""))
 			mode = int(fc.get("mode", -1))
+			weather = str(fc.get("weather", "dry"))
+			rain = float(fc.get("rain", 0.0))
 	if classes.is_empty():
 		return {"kind": "forecast", "title": "Event Predictions", "subtitle": "Run a forecast on the Predict screen first.", "classes": [], "empty": true}
 	# fastest class first, GT3 last (top to bottom, or left to right on the stream size): the
@@ -675,7 +691,8 @@ func _forecast_spec() -> Dictionary:
 		sub.append(course)
 	if series_name != "":
 		sub.append(series_name)
-	var sp := {"kind": "forecast", "title": "Event Predictions", "subtitle": " · ".join(sub), "classes": classes, "mode": mode}
+	var sp := {"kind": "forecast", "title": "Event Predictions", "subtitle": " · ".join(sub), "classes": classes, "mode": mode,
+		"weather": weather, "rain": rain, "rain_swing": rain_check.button_pressed and weather == "mixed"}
 	if series != "":
 		sp["accent"] = LeagueSettings.series_color(series)
 	return sp

@@ -363,6 +363,39 @@ func _test_predict() -> void:
 	check(absf(float(r_tel["track"]["ref_s"]) - want) < 1e-6 and int(r_tel["laps"]) == int(3600.0 / want) + 1,
 		"Forecast race lap = telemetry lap x class factor (%s: 100 s -> %.1f s)" % [cls, want], "%s s, %d laps" % [r_tel["track"]["ref_s"], r_tel["laps"]])
 	check(absf(float(r_typed["track"]["ref_s"]) - 95.0) < 1e-6, "A lap time typed on the Predict screen wins over telemetry")
+	# weather: "dry" gives exactly the old forecast; mixed rolls its own weather per run; wet is slower
+	var wx_res := {}
+	for wx in ["none", "dry", "mixed", "wet"]:
+		Predict.rng.seed = 42
+		Predict.pit_rng.seed = 43
+		Predict.wx_rng.seed = 44
+		var pl: Dictionary = plan.duplicate()
+		if wx != "none":
+			pl["weather"] = wx
+			pl["rain"] = 0.5
+		wx_res[wx] = await Predict.forecast(names, cls, Predict.Mode.ACTUAL_GRID, tl_course, 60, 0.0, "", {}, pl)
+	var same := true
+	for i in wx_res["none"]["rows"].size():
+		same = same and wx_res["none"]["rows"][i]["name"] == wx_res["dry"]["rows"][i]["name"] \
+			and wx_res["none"]["rows"][i]["win"] == wx_res["dry"]["rows"][i]["win"]
+	check(same, "Weather Dry gives exactly the forecast without weather")
+	var mix: Dictionary = wx_res["mixed"]
+	var split_ok := true
+	var sum_win := 0.0
+	for r in mix["rows"]:
+		split_ok = split_ok and float(r["win_rain"]) >= 0.0 and float(r["win_dry"]) >= 0.0
+		sum_win += float(r["win"])
+	check(mix["weather"] == "mixed" and split_ok and absf(sum_win - 1.0) < 0.01,
+		"Mixed weather: win chances add up and split into dry / rain runs")
+	var top_dry: float = wx_res["dry"]["rows"][0]["win"]
+	var top_mix := 0.0
+	for r in mix["rows"]:
+		top_mix = maxf(top_mix, float(r["win"]))
+	check(top_mix < top_dry, "Mixed weather makes the favourite less sure (%.0f%% dry, %.0f%% mixed)" % [100.0 * top_dry, 100.0 * top_mix])
+	check(int(wx_res["wet"]["laps"]) < int(wx_res["dry"]["laps"]), "Wet race: fewer laps (%d vs %d dry)" % [wx_res["wet"]["laps"], wx_res["dry"]["laps"]])
+	Predict.rng.randomize()
+	Predict.pit_rng.randomize()
+	Predict.wx_rng.randomize()
 	# the league lap time at a track averages its dry races only (wet ones run 11-19% slower)
 	var wet_checked := false
 	for d in Profiles.days:
