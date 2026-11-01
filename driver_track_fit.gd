@@ -62,13 +62,13 @@ static func fit(driver_name: String, cls: String, before := "", values := {}, cl
 				if float(rec.get(s[3], 0.0)) >= WET_SHARE:
 					wet[s[0]] += 1
 					continue
-				vals.append({"course": str(rec["course"]), "x": float(e[s[2]])})
+				vals.append({"course": str(rec["course"]), "x": float(e[s[2]]), "date": str(rec.get("date", ""))})
 		var mean := 0.0
 		for v in vals:
 			mean += v["x"]
 		mean /= maxf(vals.size(), 1)
 		for v in vals:
-			pts[s[0]].append({"course": v["course"], "y": v["x"] - mean})
+			pts[s[0]].append({"course": v["course"], "y": v["x"] - mean, "date": v["date"]})
 	var sigma := {}
 	var class_sigma := {}
 	for s in SESSIONS:
@@ -76,6 +76,7 @@ static func fit(driver_name: String, cls: String, before := "", values := {}, cl
 		class_sigma[s[0]] = cs
 		sigma[s[0]] = _blend_noise(pts[s[0]], cs)
 	var tracks := _tracks(pts, cls, sigma, light)
+	_add_aged(tracks, pts, before)
 	return {
 		"tracks": tracks,
 		"tendencies": _tendencies(pts, cls, sigma, values),
@@ -85,6 +86,38 @@ static func fit(driver_name: String, cls: String, before := "", values := {}, cl
 		"wet_left_out": wet,
 		"n": {"race": pts["race"].size(), "quali": pts["quali"].size()},
 	}
+
+
+# For the predictor: each track's race and quali gaps again, but older visits count less (half
+# weight per AGE_HALF_LIFE days before the forecast date): "race_aged" / "quali_aged" (mean) and
+# "races_aged" / "quali_aged_n" (sum of weights, used like a number of visits).
+const AGE_HALF_LIFE := 365.0
+
+
+static func _add_aged(tracks: Array, pts: Dictionary, before: String) -> void:
+	# dates are stored as 2026_10_29: made readable (2026-10-29) before converting
+	var ref: float = Time.get_unix_time_from_datetime_string(_iso(before)) if before != "" else Time.get_unix_time_from_system()
+	var by := {}
+	for sess in ["race", "quali"]:
+		for p in pts[sess]:
+			var age := 0.0
+			if str(p["date"]) != "":
+				age = maxf(0.0, (ref - Time.get_unix_time_from_datetime_string(_iso(str(p["date"])))) / 86400.0)
+			var w := pow(0.5, age / AGE_HALF_LIFE)
+			var k := "%s|%s" % [p["course"], sess]
+			if not by.has(k):
+				by[k] = [0.0, 0.0]
+			by[k][0] += w * float(p["y"])
+			by[k][1] += w
+	for t in tracks:
+		for sess in ["race", "quali"]:
+			var a: Array = by.get("%s|%s" % [t["course"], sess], [0.0, 0.0])
+			t[sess + "_aged"] = a[0] / a[1] if a[1] > 0.0 else null
+			t[sess + "_aged_n"] = a[1]
+
+
+static func _iso(d: String) -> String:
+	return d.replace("_", "-").left(10)
 
 
 # The driver's own session-to-session scatter, blended with the class figure: with few sessions

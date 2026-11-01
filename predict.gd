@@ -35,6 +35,18 @@ const DEFAULTS := {
 	"p_tend": 0.0,     # strength of the driver's track tendencies (0 = off, 1 = full)
 	"pits": 0.0,       # no longer used: pit stops follow the race rules (kept so old settings files load)
 	"traffic": 0.0,    # strength of multiclass traffic (0 = off, 1 = as measured)
+	# 1 = track-limit warnings and contacts vary from race to race (how many, how costly), with the
+	# same averages as before. Backtest on 89 races (autumn 2026): no measurable change in accuracy
+	# (Brier 0.2258 -> 0.2255, log-loss within seed noise), kept because it is closer to reality.
+	"rand_inc": 1.0,
+	# 1 = the driver's own track history counts older visits less (half weight per year).
+	# Backtest, 89 races (autumn 2026): Brier 0.2284 -> 0.2282, log-loss 1.556 -> 1.550.
+	"age_track": 1.0,
+	# 1 = each driver can retire, at their own rate (finishing record pulled towards the class, see
+	# dnf_rate). Backtest with aged history: Brier 0.2282 -> 0.2271 (podium / top-10 calls better),
+	# log-loss 1.550 -> 1.566 (winners given a little less). Kept: Brier is the main measure.
+	# Heavier incident costs (contact 4 or 8 s, damage 0.40%/lap) were all worse: kept at 1 s, 0.15%.
+	"dnf": 1.0,
 }
 const K_TRACK := 2.0   # sessions at a track before the driver's own history there gets half weight
 const PIT_SD := 3.0    # seconds of scatter per pit stop
@@ -123,8 +135,48 @@ func driver_inputs(names: Array, cls: String, before := "", course := "") -> Arr
 			"track_gap_r": fit["gap_r"],
 			"track_gap_q": fit["gap_q"],
 			"tend": fit["tend"],
+			"dnf": dnf_rate(nm, cls, before),
 		})
 	return out
+
+
+# Chance that a driver retires (DNF or disqualification), from their finishing record in the
+# class up to `before`, pulled towards the class rate with few races (K_DNF races of class rate).
+const K_DNF := 6.0
+var _dnf_cache := {}   # "cls|before|revision" -> {"rate": class rate, "drivers": {name: [races, retired]}}
+
+
+func dnf_rate(nm: String, cls: String, before := "") -> float:
+	var ck := "%s|%s|%d" % [cls, before, Elo.revision]
+	if not _dnf_cache.has(ck):
+		var drivers := {}
+		var n := 0
+		var r := 0
+		for ev in Elo.history:
+			# only races before the forecast (dates compared in one format: 2026-10-29)
+			if before != "" and Time.get_date_string_from_unix_time(int(ev.get("time", 0))) >= before.replace("_", "-").left(10):
+				continue
+			var stats: Dictionary = Reports._stats_for(ev, "race", cls)
+			if stats.is_empty():
+				continue
+			for c in ev["changes"]:
+				if c["sess"] != "race" or c["cls"] != cls:
+					continue
+				var d := Elo.resolve(str(c["driver"]))
+				var s: Dictionary = stats.get(str(c["driver"]), {})
+				if s.is_empty():
+					continue
+				var rr: Array = drivers.get(d, [0, 0])
+				rr[0] += 1
+				n += 1
+				if Reports._retired(str(s.get("status", ""))):
+					rr[1] += 1
+					r += 1
+				drivers[d] = rr
+		_dnf_cache[ck] = {"rate": float(r) / maxf(n, 1), "drivers": drivers}
+	var e: Dictionary = _dnf_cache[ck]
+	var rr: Array = e["drivers"].get(nm, [0, 0])
+	return (float(rr[1]) + K_DNF * float(e["rate"])) / (float(rr[0]) + K_DNF)
 
 
 # The driver's own history at this course (gap to their own average, pulled towards 0 with
@@ -140,6 +192,13 @@ func _track_terms(nm: String, cls: String, before: String, course: String, value
 	var f := DriverTrackFit.fit(nm, cls, before, values, class_sig, true)
 	for t in f["tracks"]:
 		if t["course"] != course:
+			continue
+		if float(params.get("age_track", 0.0)) > 0.0 and t.has("race_aged"):
+			# older visits count less: an aged mean, with the summed weights as the number of visits
+			if t["race_aged"] != null:
+				out["gap_r"] = float(t["race_aged"]) * float(t["race_aged_n"]) / (float(t["race_aged_n"]) + K_TRACK)
+			if t["quali_aged"] != null:
+				out["gap_q"] = float(t["quali_aged"]) * float(t["quali_aged_n"]) / (float(t["quali_aged_n"]) + K_TRACK)
 			continue
 		if t["race_y"] != null:
 			out["gap_r"] = float(t["race_y"]) * t["races"] / (t["races"] + K_TRACK)
@@ -438,8 +497,10 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var qbase := []
 	var lap_sd := []      # seconds, summed over the race
 	var tl_cost := []     # expected seconds lost to track limits
+	var tl_n := []        # expected track-limit warnings over the race
 	var tl_pen := []      # penalty rate over the race
 	var con_rate := []    # contacts over the race
+	var dnf := []         # chance of retiring
 	var stops := []       # planned pit stops per driver
 	# pit stops: track["plan"] = {"pits": expected?, "fuel": x, "tyre": x, "min_stops": n}
 	var plan: Dictionary = track.get("plan", {})
@@ -473,8 +534,10 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 		stops.append(n_stops)
 		lap_sd.append(d["cons"] * P["lap_noise"] / 100.0 * t_ref * sqrt(laps))
 		tl_cost.append(d["tl"] * laps * P["tl_cost"])
+		tl_n.append(d["tl"] * laps)
 		tl_pen.append(d["tl"] * laps * P["tl_pen"])
 		con_rate.append(d["con"] * laps)
+		dnf.append(float(d.get("dnf", 0.0)) if float(P.get("dnf", 0.0)) > 0.0 else 0.0)
 	var pole := []
 	var front := []
 	var egrid := []
@@ -522,14 +585,29 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 			var t: float = laps * t_ref * (1.0 + (base[i] + rng.randfn(0.0, P["sig_form"])) / 100.0)
 			if mode != Mode.RACE_ONLY:
 				t += gpos[i] * P["g_grid"]
-			t += rng.randfn() * lap_sd[i] + tl_cost[i]
+			t += rng.randfn() * lap_sd[i]
+			var rand_inc := float(P.get("rand_inc", 0.0)) > 0.0
+			if rand_inc:
+				# a random number of warnings this race, each a random loss (mostly small, now and
+				# then a bigger one); the same average as the fixed amount
+				for w in _poisson(tl_n[i]):
+					t += -float(P["tl_cost"]) * log(maxf(rng.randf(), 1e-9))
+			else:
+				t += tl_cost[i]
 			t += _poisson(tl_pen[i]) * P["pen_s"]
 			for c in _poisson(con_rate[i]):
-				t += P["c0"] + t_ref * P["dmg"] / 100.0 * laps * (1.0 - rng.randf())
+				var hit: float = P["c0"]
+				var severity := 1.0
+				if rand_inc:   # from a tap to a spin, from cosmetic to real damage; same averages
+					hit = -float(P["c0"]) * log(maxf(rng.randf(), 1e-9))
+					severity = -log(maxf(rng.randf(), 1e-9))
+				t += hit + t_ref * P["dmg"] / 100.0 * laps * (1.0 - rng.randf()) * severity
 			for k in stops[i]:
 				t += pit_loss + pit_rng.randfn(0.0, PIT_SD)
 			if tr_on > 0.0:
 				t += _traffic_loss(n_pass, s_pass) + _traffic_loss(n_passed, s_passed)
+			if dnf[i] > 0.0 and rng.randf() < dnf[i]:
+				t += 1.0e7 + rng.randf()   # retired: classified behind every finisher
 			tot[i] = t
 		idx.sort_custom(by_total)
 		for k in m:

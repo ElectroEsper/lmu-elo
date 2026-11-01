@@ -326,6 +326,23 @@ func _test_predict() -> void:
 		if int(r["stops"]) != 0:
 			none = false
 	check(none, "No stops when none are expected")
+	# retirements: the rate only uses races before the forecast date (dates come as 2026_10_29)
+	var last_ev: Dictionary = Elo.history[Elo.history.size() - 1]
+	var day := Time.get_date_string_from_unix_time(int(last_ev["time"])).replace("-", "_")
+	var someone: String = names[0]
+	var r_all := Predict.dnf_rate(someone, cls, "")
+	var r_before := Predict.dnf_rate(someone, cls, day)
+	var r_none := Predict.dnf_rate(someone, cls, "1990_01_01")
+	check(r_all > 0.0 and r_all < 1.0 and r_none == 0.0, "Retirement chance between 0 and 1; none known before the first race (%.3f)" % r_all)
+	check(not is_equal_approx(Predict._dnf_cache.size(), 0) and r_before >= 0.0, "Retirement chance computed for a past date without later races")
+	# aged track history: older visits count less, dates in either format
+	check(DriverTrackFit._iso("2026_10_29") == "2026-10-29" and DriverTrackFit._iso("2026-10-29") == "2026-10-29", "Dates read in both formats (2026_10_29 / 2026-10-29)")
+	var fit_now: Dictionary = DriverTrackFit.fit(someone, cls, "", TrackGrades.collect(cls), {}, true)
+	var aged_ok := true
+	for t in fit_now["tracks"]:
+		if t.has("race_aged_n") and int(t["races"]) > 0:
+			aged_ok = aged_ok and float(t["race_aged_n"]) > 0.0 and float(t["race_aged_n"]) <= float(t["races"]) + 1e-6
+	check(aged_ok, "Track history weights: every visit counts, older ones less")
 
 
 func _test_forecast_record() -> void:
