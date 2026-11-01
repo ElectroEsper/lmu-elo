@@ -40,6 +40,7 @@ var _bg_file := ""                      # its full path ("" = the plain league b
 var bg_dialog := FileDialog.new()
 var tint_slider := HSlider.new()
 var _bg_cache := {}                     # path -> Texture2D
+var _font_cache := {}                   # path -> Font (or null when the file cannot be read)
 var batch_box := VBoxContainer.new()    # driver cards for a whole class
 var batch_series := OptionButton.new()
 var batch_class := OptionButton.new()
@@ -600,10 +601,14 @@ func _brand() -> Dictionary:
 		"secondary": Color.from_string(str(LeagueSettings.get_value("brand_secondary")), Color.WHITE),
 		"logo": null, "title_font": null}
 	var font_path := str(LeagueSettings.get_value("brand_title_font"))
-	if font_path != "" and FileAccess.file_exists(font_path):
-		var f := FontFile.new()
-		if f.load_dynamic_font(font_path) == OK:
-			out["title_font"] = f
+	if font_path != "":
+		if not _font_cache.has(font_path):
+			var f := FontFile.new()
+			var ok := FileAccess.file_exists(font_path) and f.load_dynamic_font(font_path) == OK
+			_font_cache[font_path] = f if ok else null
+			if not ok:
+				notice.emit("Could not read the title font %s (Settings > Graphics): using the default font." % font_path.get_file())
+		out["title_font"] = _font_cache[font_path]
 	var path := str(LeagueSettings.get_value("brand_logo"))
 	if path != "" and FileAccess.file_exists(path):
 		var img := Image.load_from_file(path)

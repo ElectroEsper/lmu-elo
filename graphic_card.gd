@@ -30,6 +30,7 @@ var _fonts := {}
 
 func set_spec(new_spec: Dictionary) -> void:
 	spec = new_spec
+	_fonts.clear()   # the title font can change between images (Settings > Graphics)
 	for c in get_children():
 		remove_child(c)
 		c.queue_free()

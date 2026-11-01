@@ -417,6 +417,19 @@ func _test_screens() -> void:
 			if gv.card.get_child_count() > 0 and gv.viewport.size == gv.FORMATS[f][1]:
 				built += 1
 	check(built == gv.KINDS.size() * gv.FORMATS.size(), "Every graphic builds in every size (%d)" % built)
+	# a title font chosen after images were already made must be used on the next image
+	var custom_font := SystemFont.new()
+	custom_font.font_names = PackedStringArray(["serif"])
+	var base_spec: Dictionary = gv.card.spec.duplicate()
+	gv.card.set_spec(base_spec)
+	var before_font: Font = gv.card._font("title")
+	var with_font := base_spec.duplicate()
+	with_font["brand"] = base_spec.get("brand", {}).duplicate()
+	with_font["brand"]["title_font"] = custom_font
+	gv.card.set_spec(with_font)
+	var after_font: Font = gv.card._font("title")
+	gv.card.set_spec(base_spec)
+	check(after_font == custom_font and before_font != custom_font and gv.card._font("title") != custom_font, "A title font chosen later is used on the next image (and removed again)")
 	# a background photo (a made-up image), and a class's driver cards for the batch
 	var photo := Image.create(64, 40, false, Image.FORMAT_RGB8)
 	photo.fill(Color("336699"))
