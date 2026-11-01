@@ -42,22 +42,34 @@ func refresh() -> void:
 
 
 func _fill_picker() -> void:
-	var keep := ""
-	if picker.selected >= 0:
-		keep = picker.get_item_text(picker.selected)
+	var keep := _picked()
 	var names := Elo.known_names()
-	names.sort_custom(func(a, b): return a.to_lower() < b.to_lower())
+	names.sort_custom(func(a, b): return Elo.pretty(a).to_lower() < Elo.pretty(b).to_lower())
+	# tidied names (Elo.pretty); when two stored names tidy to the same, show the stored one too
+	var seen := {}
+	for n in names:
+		var p := Elo.pretty(n)
+		seen[p] = int(seen.get(p, 0)) + 1
 	var filter := search.text.strip_edges().to_lower()
 	picker.clear()
 	for n in names:
-		if filter == "" or n.to_lower().contains(filter):
-			picker.add_item(n)
+		var p := Elo.pretty(n)
+		if filter == "" or n.to_lower().contains(filter) or p.to_lower().contains(filter):
+			picker.add_item(p if int(seen[p]) == 1 else "%s  [%s]" % [p, n])
+			picker.set_item_metadata(picker.item_count - 1, n)
 	for i in picker.item_count:
-		if picker.get_item_text(i) == keep:
+		if str(picker.get_item_metadata(i)) == keep:
 			picker.select(i)
 			return
 	if picker.item_count > 0:
 		picker.select(0)
+
+
+# The stored name of the picked driver ("" if none).
+func _picked() -> String:
+	if picker.selected < 0:
+		return ""
+	return str(picker.get_item_metadata(picker.selected))
 
 
 func _on_search(_text: String) -> void:
@@ -95,7 +107,7 @@ func _show() -> void:
 		_message("No drivers to show. Confirm a result file first, or clear the filter.")
 		return
 	var keep := out_tabs.current_tab
-	var tables := Reports.driver_profile(picker.get_item_text(picker.selected))
+	var tables := Reports.driver_profile(_picked())
 	shown = tables
 	_clear(out_tabs)
 	for t in tables:
@@ -112,7 +124,7 @@ func _export() -> void:
 	var sheets := []
 	for t in shown:
 		sheets.append({"name": LeagueSettings.label(t["title"]), "headers": t["headers"], "rows": t["rows"]})
-	var driver_name := picker.get_item_text(picker.selected)
+	var driver_name := Elo.pretty(_picked())
 	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
 	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
 	var path := "%s/lmu_profile_%s_%s.xlsx" % [dir, driver_name.validate_filename().replace(" ", "_"), stamp]

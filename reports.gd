@@ -29,7 +29,20 @@ func _season_note() -> String:
 	return ("%s only. " % season) if season != "" else "All seasons together. "
 
 
+# Columns that hold a driver name: shown tidied (Elo.pretty), the stored name stays as it is.
+const NAME_COLS := ["Driver", "Finished ahead", "Beat", "Ahead"]
+
+
 func _table(title: String, headers: Array, rows: Array, note := "") -> Dictionary:
+	var cols := []
+	for i in headers.size():
+		if str(headers[i]) in NAME_COLS:
+			cols.append(i)
+	if not cols.is_empty():
+		for r in rows:
+			for i in cols:
+				if i < r.size() and r[i] is String and r[i] != "":
+					r[i] = Elo.pretty(r[i])
 	return {"title": title, "note": note, "headers": headers, "rows": rows}
 
 
@@ -101,7 +114,7 @@ func movers(event_index: int) -> Array:
 		var note := ""
 		if not rows.is_empty():
 			note = "Biggest gain: %s %+d.  Biggest drop: %s %+d." % [
-				gain_name, roundi(gain), drop_name, roundi(drop)]
+				Elo.pretty(gain_name), roundi(gain), Elo.pretty(drop_name), roundi(drop)]
 		tables.append(_table("%s %s" % [board[0], board[1]],
 			["Pos", "Driver", "Before", "After", "Change"], rows, note))
 	return tables
@@ -240,7 +253,7 @@ func rating_history() -> Array:
 		var series := []
 		for k in mini(CHART_TOP_N, names.size()):
 			series.append({
-				"name": names[k],
+				"name": Elo.pretty(str(names[k])),
 				"color": chart_colors[k % chart_colors.size()],
 				"points": pts[names[k]],
 			})
@@ -480,8 +493,8 @@ func forecast_record() -> Array:
 		if str(fc.get("course", "")) != "" and str(fc["course"]) != str(s["course"]):
 			where += " (forecast for %s)" % fc["course"]
 		rows.append([made, str(s["event"]).get_basename(), fc["class"], where, mode,
-			"%s (%.0f%%, %s)" % [s["winner"], 100.0 * float(s["winner_chance"]), _ord_pick(int(s["winner_rank"]))],
-			"yes" if s["fav_won"] else "no (%s)" % s["fav"], "%d / 3" % int(s["podium_hits"]),
+			"%s (%.0f%%, %s)" % [Elo.pretty(str(s["winner"])), 100.0 * float(s["winner_chance"]), _ord_pick(int(s["winner_rank"]))],
+			"yes" if s["fav_won"] else "no (%s)" % Elo.pretty(str(s["fav"])), "%d / 3" % int(s["podium_hits"]),
 			snappedf(float(s["pos_error"]), 0.1)])
 		colours.append(UiTheme.driver_grade_color(5) if s["fav_won"] else null)
 	var summary := []
@@ -600,7 +613,8 @@ func standings() -> Array:
 		for i in rows.size():
 			rows[i][0] = i + 1
 		var drop_txt := "No dropped rounds." if drops == 0 else (
-			"Worst %d round%s of %d dropped (a missed round counts as 0 and goes first). Dropped = points not counted; Total = before dropping." % [drops, "" if drops == 1 else "s", ch["rounds"]])
+			("Worst %d round%s of %d dropped (a missed round counts as 0 and goes first). Dropped = points not counted; Total = before dropping." % [LeagueSettings.drops_for(int(ch["rounds"])), "" if LeagueSettings.drops_for(int(ch["rounds"])) == 1 else "s", ch["rounds"]]) if LeagueSettings.drops_for(int(ch["rounds"])) > 0 else
+			("No rounds dropped yet: drops count once %d rounds are done (%d of the season so far)." % [int(LeagueSettings.get_value("drop_after")), ch["rounds"]]))
 		if drops > 0 and ch["rounds"] <= drops:
 			drop_txt = "Only %d round%s so far: nothing is dropped until there are more rounds than drops." % [ch["rounds"], "" if ch["rounds"] == 1 else "s"]
 		tables.append(_table(str(k), ["Pos", "Driver", "Points", "Dropped", "Total", "Wins", "Podiums", "Races"], rows,
@@ -657,8 +671,9 @@ func season_points(for_season: String) -> Dictionary:
 			for p in pts:
 				total += p
 			var dropped := 0
-			if ch["rounds"] > drops:
-				for i in mini(drops, pts.size()):
+			var n_drop := LeagueSettings.drops_for(int(ch["rounds"]))   # none in the first rounds of a season
+			if n_drop > 0:
+				for i in mini(n_drop, pts.size()):
 					dropped += pts[i]
 			drivers[d] = {"points": total - dropped, "dropped": dropped, "total": total,
 				"wins": wins, "pod": pod, "races": res.size()}
@@ -713,6 +728,8 @@ func _standings_all_time() -> Array:
 func head_to_head(cls: String, sess: String, a: String, b: String) -> Array:
 	if a == "" or b == "" or a == b:
 		return [_table("Head to head", ["Event", "A", "B", "Ahead"], [], "Pick two different drivers.")]
+	var pa_name := Elo.pretty(a)
+	var pb_name := Elo.pretty(b)
 	var rows := []
 	var a_wins := 0
 	var b_wins := 0
@@ -733,11 +750,11 @@ func head_to_head(cls: String, sess: String, a: String, b: String) -> Array:
 				b_wins += 1
 			rows.append([ev["file"], pa, pb, ahead])
 	var note := "%s %d - %d %s over %d shared %s sessions.  Ratings now: %s %d, %s %d." % [
-		a, a_wins, b_wins, b, rows.size(), sess,
-		a, _rating_of(a, cls, sess), b, _rating_of(b, cls, sess)]
+		pa_name, a_wins, b_wins, pb_name, rows.size(), sess,
+		pa_name, _rating_of(a, cls, sess), pb_name, _rating_of(b, cls, sess)]
 	if rows.is_empty():
 		note = "These two have not been rated in the same %s %s session yet." % [cls, sess]
-	return [_table("%s vs %s" % [a, b], ["Event", "%s pos" % a, "%s pos" % b, "Ahead"], rows, note)]
+	return [_table("%s vs %s" % [pa_name, pb_name], ["Event", "%s pos" % pa_name, "%s pos" % pb_name, "Ahead"], rows, note)]
 
 
 # ---------- 11. Driver profile ----------

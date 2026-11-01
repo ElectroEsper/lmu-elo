@@ -246,7 +246,7 @@ func _fill_drivers(cls: String) -> void:
 		var tag_text := ", ".join(PackedStringArray(tags))
 		out.append({
 			"text": [
-				r["name"], "%d" % r["n_r"],
+				Elo.pretty(r["name"]), "%d" % r["n_r"],
 				_num(r["qpace"]) if has_q else "-",
 				_num(r["pace"]) if has_r else "-",
 				_num(r["wear"]) if has_r else "-",
@@ -257,7 +257,7 @@ func _fill_drivers(cls: String) -> void:
 				_num(r["cons"], "%.2f") if has_r else "-",
 				tag_text],
 			"key": [
-				r["name"], r["n_r"],
+				Elo.pretty(r["name"]), r["n_r"],
 				r["qpace"] if has_q else null,
 				r["pace"] if has_r else null,
 				r["wear"] if has_r else null,

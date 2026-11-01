@@ -98,8 +98,11 @@ func _fill_drivers() -> void:
 		return
 	var b: Array = _boards[board_picker.selected]
 	for r in Elo.leaderboard(b[0], b[1]):
-		driver_a.add_item(r["name"])
-		driver_b.add_item(r["name"])
+		# shown tidied; the stored name rides along as metadata
+		driver_a.add_item(Elo.pretty(r["name"]))
+		driver_a.set_item_metadata(driver_a.item_count - 1, r["name"])
+		driver_b.add_item(Elo.pretty(r["name"]))
+		driver_b.set_item_metadata(driver_b.item_count - 1, r["name"])
 	if driver_b.item_count > 1:
 		driver_b.select(1)
 
@@ -154,8 +157,8 @@ func _run() -> void:
 				return
 			var b: Array = _boards[board_picker.selected]
 			tables = Reports.head_to_head(b[0], b[1],
-				driver_a.get_item_text(driver_a.selected),
-				driver_b.get_item_text(driver_b.selected))
+				str(driver_a.get_item_metadata(driver_a.selected)),
+				str(driver_b.get_item_metadata(driver_b.selected)))
 		_:
 			tables = Reports.call(rep["fn"])
 

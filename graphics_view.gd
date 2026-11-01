@@ -8,14 +8,12 @@ extends HBoxContainer
 
 signal notice(text: String)
 
-const KINDS := [["forecast", "Race forecast"], ["standings", "Championship standings"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
+const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
 	["track", "Track card"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
 const OUT_DIR_NAME := "LMU_Elo graphics"
 const UI_CFG := "user://ui.cfg"
-# The telemetry laps are very competitive: the front-runners' race pace is about 2% slower.
-const TEL_RACE_RATIO := 1.02
 
 var shell: Node   # the main screen: the Predict screen's current forecast lives there
 
@@ -479,15 +477,16 @@ func track_spec(course: String, series: String, minutes: int, notes := "", watch
 	for c in classes:
 		var info := Profiles.track_info(course, c)
 		Predict.fill_pit_data(info, c, course)
-		# race lap: the telemetry lap + 2% when the class has telemetry here, else the front-runners'
+		# race lap: the telemetry lap + its class factor (Predict.tel_ratio) when the class has telemetry here, else the front-runners'
 		# race pace from the league results
 		var ref := float(info.get("ref_s", 0.0))
-		if profs.has(c) and float(profs[c]["lap"].get("time_s", 0.0)) > 0.0:
-			ref = float(profs[c]["lap"]["time_s"]) * TEL_RACE_RATIO
+		var tel := Predict.telemetry_race_lap(course, c)
+		if tel > 0.0:
+			ref = tel
 		elif not bool(info.get("known_race", false)):
 			rows.append([LeagueSettings.label(c), "-", "-", "-"])
 			continue
-		var laps := int(ceil(minutes * 60.0 / ref))
+		var laps := int(minutes * 60.0 / ref) + 1   # timed race: the lap running at the flag counts, as in the predictor
 		var stops := 0
 		if bool(rule["pits"]):
 			stops = int(rule["min_stops"])
@@ -495,7 +494,7 @@ func track_spec(course: String, series: String, minutes: int, notes := "", watch
 				stops = maxi(stops, int(ceil(laps / (float(info["tank_laps"]) / float(rule["fuel"])))) - 1)
 			if float(info.get("tyre_laps", 0.0)) > 0.0:
 				stops = maxi(stops, int(ceil(laps / (float(info["tyre_laps"]) / float(rule["tyre"])))) - 1)
-		rows.append([LeagueSettings.label(c), "~%d:%04.1f" % [int(ref / 60.0), fmod(ref, 60.0)], "~%d" % laps, str(stops)])
+		rows.append([LeagueSettings.label(c), "%d:%04.1f" % [int(ref / 60.0), fmod(ref, 60.0)], "~%d" % laps, str(stops)])
 	var facts := []
 	var length := float(prof.get("lap", {}).get("length_m", 0.0)) / 1000.0
 	if length > 0.0:
@@ -660,7 +659,7 @@ func _forecast_spec() -> Dictionary:
 			series = str(fc.get("series", ""))
 			mode = int(fc.get("mode", -1))
 	if classes.is_empty():
-		return {"kind": "forecast", "title": "Race forecast", "subtitle": "Run a forecast on the Predict screen first.", "classes": [], "empty": true}
+		return {"kind": "forecast", "title": "Event Predictions", "subtitle": "Run a forecast on the Predict screen first.", "classes": [], "empty": true}
 	# fastest class first, GT3 last (top to bottom, or left to right on the stream size): the
 	# series' usual order from lap times; a class not known there goes after them, GT classes last
 	var order: Array = Predict.series_classes(series)
@@ -676,7 +675,7 @@ func _forecast_spec() -> Dictionary:
 		sub.append(course)
 	if series_name != "":
 		sub.append(series_name)
-	var sp := {"kind": "forecast", "title": "Race forecast", "subtitle": " · ".join(sub), "classes": classes, "mode": mode}
+	var sp := {"kind": "forecast", "title": "Event Predictions", "subtitle": " · ".join(sub), "classes": classes, "mode": mode}
 	if series != "":
 		sp["accent"] = LeagueSettings.series_color(series)
 	return sp
@@ -698,9 +697,9 @@ func _standings_spec() -> Dictionary:
 		if a["wins"] != b["wins"]:
 			return a["wins"] > b["wins"]
 		return a["pod"] > b["pod"])
-	var drops := int(LeagueSettings.get_value("drop_rounds"))
+	var drops := LeagueSettings.drops_for(int(ch.get("rounds", 0)))
 	var note := "After %d round%s" % [int(ch.get("rounds", 0)), "" if int(ch.get("rounds", 0)) == 1 else "s"]
-	if drops > 0 and int(ch.get("rounds", 0)) > drops:
+	if drops > 0:
 		note += " · worst %d result%s dropped" % [drops, "" if drops == 1 else "s"]
 	var sp := {"kind": "standings", "title": "%s standings" % LeagueSettings.label(key), "subtitle": season, "rows": rows,
 		"rounds_note": note, "empty": rows.is_empty()}

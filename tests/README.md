@@ -16,8 +16,25 @@ Linux / macOS:
     tests/run_tests.sh /path/to/godot
 
 Or set a `GODOT` environment variable to that path once and run the script without it.
-Each check prints PASS / FAIL / SKIP; the last line is the total. Exit code 0 = all passed,
-1 = something failed, 2 = refused to run (see below).
+Each check prints PASS / FAIL / SKIP; the last line is the total. Exit codes:
+
+- 0 = all passed, 1 = something failed, 2 = refused to run (see below)
+- 3 = `run_tests.gd` itself has an error and could not load
+- 4 = stopped by the watchdog (see below); if Godot was completely frozen it is ended
+  outright instead, so the code is whatever the system gives a killed program
+
+## A run always ends
+
+`tests/watchdog.gd` watches every run from its own thread and stops it, saying which step it
+was on and the last script errors, when:
+
+- a script error kills a test and nothing moves for 5 s afterwards,
+- no check finishes for 90 s (a test waiting on something that never comes, or a loop that
+  never ends),
+- the whole run passes 10 minutes.
+
+A script error the run survives still shows up as a FAIL at the end. On Linux/macOS
+`run_tests.sh` also puts a hard 15-minute limit on Godot, in case everything else fails.
 
 ## Test data
 

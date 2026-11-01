@@ -11,6 +11,7 @@ var passed := 0
 var failed := 0
 var skipped := 0
 var tmp := ""   # scratch folder for files made by the tests
+var section := ""
 
 
 func _ready() -> void:
@@ -42,12 +43,19 @@ func _ready() -> void:
 		await _test_forecast_record()
 		_test_penalties()
 		await _test_screens()
+	# a script error the run survived is still a bug in the tool
+	var errs := _script_errors()
+	if not errs.is_empty():
+		print("\nScript errors during the run")
+		for e in errs:
+			check(false, "Script error", e)
 	print("\n%d passed, %d failed, %d skipped" % [passed, failed, skipped])
 	get_tree().quit(1 if failed > 0 else 0)
 
 
 # ---------- helpers ----------
 func check(ok: bool, name: String, detail := "") -> void:
+	_progress(name)
 	if ok:
 		passed += 1
 		print("  PASS  " + name)
@@ -58,11 +66,26 @@ func check(ok: bool, name: String, detail := "") -> void:
 
 func _skip(name: String, why: String) -> void:
 	skipped += 1
+	_progress(name)
 	print("  SKIP  %s: %s" % [name, why])
 
 
 func _section(title: String) -> void:
+	section = title
+	_progress("start")
 	print("\n" + title)
+
+
+# Tells the watchdog (tests/watchdog.gd, started by bootstrap.gd) the run is still moving.
+func _progress(step: String) -> void:
+	var w = get_parent().get("watchdog")
+	if w != null:
+		w.progress("%s > %s" % [section, step])
+
+
+func _script_errors() -> Array:
+	var w = get_parent().get("watchdog")
+	return w.script_errors() if w != null else []
 
 
 func _league_files() -> Array:
@@ -117,6 +140,8 @@ func _test_settings() -> void:
 	r = LeagueSettings.rules_for("zz", 2)
 	check(r["fuel"] == 1.0 and not r["pits"] and not r["known"], "Unknown series: x1, no stops")
 	check(LeagueSettings.label("LMP2_ELMS") == "LMP2+", "Class label LMP2_ELMS -> LMP2+")
+	check(LeagueSettings.points().slice(0, 7) == [50, 47, 44, 41, 38, 35, 34] and LeagueSettings.points().size() == 40, "League points scale: 50, 47, 44, 41, 38, 35, 34... down to 1")
+	check(LeagueSettings.drops_for(1) == 0 and LeagueSettings.drops_for(2) == 0 and LeagueSettings.drops_for(3) == 1, "One drop, only from round 3 (drops apply after round 2)")
 	var names_ok := Elo.pretty("DAN POULIN") == "Dan Poulin" and Elo.pretty("p thom") == "P Thom" \
 		and Elo.pretty("David Carter#4131") == "David Carter" and Elo.pretty("JD Bagnoli") == "JD Bagnoli" \
 		and Elo.pretty("MCDONALD") == "McDonald" and Elo.pretty("jean-luc o'neil") == "Jean-Luc O'Neil"
@@ -322,6 +347,44 @@ func _test_predict() -> void:
 	check(sorted, "Rows come in expected finishing order")
 	var plan := {"pits": true, "fuel": 2.0, "tyre": 1.0, "min_stops": 1}
 	res = await Predict.forecast(names, cls, Predict.Mode.ACTUAL_GRID, "", 60, 0.0, "", {}, plan)
+	# race lap: a typed lap time first, else the telemetry lap x class factor, else the league results
+	var tl_course := Profiles.latest_course()
+	var tl_file := TrackStore.DIR + "/test_telemetry.json"
+	DirAccess.make_dir_recursive_absolute(TrackStore.DIR)
+	var fa := FileAccess.open(tl_file, FileAccess.WRITE)
+	fa.store_string(JSON.stringify({"course": tl_course, "class": cls, "map": [], "lap": {"time_s": 100.0}}))
+	fa.close()
+	TrackStore._list_cache = null
+	var r_tel: Dictionary = await Predict.forecast(names, cls, Predict.Mode.ACTUAL_GRID, tl_course, 60, 0.0, "", {}, plan)
+	var r_typed: Dictionary = await Predict.forecast(names, cls, Predict.Mode.ACTUAL_GRID, tl_course, 60, 95.0, "", {}, plan)
+	DirAccess.remove_absolute(tl_file)
+	TrackStore._list_cache = null
+	var want := 100.0 * Predict.tel_ratio(cls)
+	check(absf(float(r_tel["track"]["ref_s"]) - want) < 1e-6 and int(r_tel["laps"]) == int(3600.0 / want) + 1,
+		"Forecast race lap = telemetry lap x class factor (%s: 100 s -> %.1f s)" % [cls, want], "%s s, %d laps" % [r_tel["track"]["ref_s"], r_tel["laps"]])
+	check(absf(float(r_typed["track"]["ref_s"]) - 95.0) < 1e-6, "A lap time typed on the Predict screen wins over telemetry")
+	# the league lap time at a track averages its dry races only (wet ones run 11-19% slower)
+	var wet_checked := false
+	for d in Profiles.days:
+		if wet_checked or d["race"].is_empty() or float(d["race"].get("wet", 0.0)) < 0.5:
+			continue
+		for wc in d["race"]["classes"]:
+			var dry := []
+			for d2 in Profiles.days:
+				if d2["course"] == d["course"] and not d2["race"].is_empty() and float(d2["race"].get("wet", 0.0)) < 0.5 \
+						and d2["race"]["classes"].has(wc) and float(d2["race"]["classes"][wc].get("ref_s", 0.0)) > 0.0:
+					dry.append(float(d2["race"]["classes"][wc]["ref_s"]))
+			if dry.is_empty():
+				continue
+			var avg := 0.0
+			for x in dry:
+				avg += x / dry.size()
+			check(absf(float(Profiles.track_info(str(d["course"]), str(wc))["ref_s"]) - avg) < 1e-3,
+				"League lap time leaves out wet races (%s %s)" % [d["course"], wc])
+			wet_checked = true
+			break
+	if not wet_checked:
+		_skip("wet races left out of the lap time", "no wet race at a track that also has dry ones")
 	var stops_ok := true
 	for r in res["rows"]:
 		if int(r["stops"]) < 1:
@@ -438,6 +501,13 @@ func _test_penalties() -> void:
 	r = Elo.penalised_order(order, st, [{"id": "d", "cls": cls, "driver": order[0], "type": "dsq", "value": 0, "reason": "", "at": 0}])
 	check(r["order"][-1] == order[0] and r["dsq"].has(order[0]), "Disqualified: to the back")
 	# applied for real: the result, ratings and file change; undone: everything back
+	var season_name := ""
+	var series_name := ""
+	for h in Elo.history:
+		if h["file"] == file:
+			season_name = Elo.season_of(h)
+			series_name = Elo.series_of(h)
+	var before_sp: Dictionary = Reports.season_points(season_name).get(("%s %s" % [series_name, cls]).strip_edges(), {}).get("drivers", {})
 	Elo.set_race_penalties(file, [{"id": "d", "cls": cls, "driver": order[0], "type": "dsq", "value": 0, "reason": "", "at": 0}])
 	var winner := ""
 	for h in Elo.history:
@@ -447,6 +517,38 @@ func _test_penalties() -> void:
 					winner = c["driver"]
 	check(winner == Elo.resolve(order[1]), "After a DSQ of the winner the 2nd is rated as the winner", winner)
 	check(Elo.event_penalties(file).size() == 1 and Elo.original_race(file)["orders"][cls] == order, "The penalty is saved, the original result kept")
+	# standings: the points of that race follow the corrected result (totals before dropped rounds)
+	var key := ("%s %s" % [series_name, cls]).strip_edges()
+	var after_sp: Dictionary = Reports.season_points(season_name).get(key, {}).get("drivers", {})
+	var pts: Array = LeagueSettings.points()
+	var p_at := func(pos: int) -> int: return int(pts[pos - 1]) if pos <= pts.size() else 0
+	var won: Dictionary = before_sp.get(Elo.resolve(order[1]), {})
+	var won2: Dictionary = after_sp.get(Elo.resolve(order[1]), {})
+	var dq: Dictionary = before_sp.get(Elo.resolve(order[0]), {})
+	var dq2: Dictionary = after_sp.get(Elo.resolve(order[0]), {})
+	check(not won.is_empty() and int(won2["wins"]) == int(won["wins"]) + 1 and int(won2["total"]) - int(won["total"]) == p_at.call(1) - p_at.call(2),
+		"Standings: the promoted driver gets the win and the winner's points", "%s -> %s" % [won, won2])
+	check(not dq.is_empty() and int(dq2["wins"]) == int(dq["wins"]) - 1 and int(dq["total"]) - int(dq2["total"]) == p_at.call(1) - p_at.call(order.size()),
+		"Standings: the disqualified driver loses the win and its points", "%s -> %s" % [dq, dq2])
+	# a re-read of the race from the archived XML keeps the penalty (DQ status and order)
+	var xml := Elo.stored_xml_path(file)
+	if xml != "":
+		Elo.attach_stats(Elo.build_draft(xml))
+		var st_after: Dictionary = {}
+		for h in Elo.history:
+			if h["file"] == file:
+				st_after = Reports._stats_for(h, "race", cls)
+		var saved = JSON.parse_string(FileAccess.get_file_as_string("user://events/%s.json" % file))
+		check(str(st_after.get(Elo.resolve(order[0]), {}).get("status", "")) == "DQ" and saved["orders"]["race"][cls][-1] == order[0],
+			"Re-reading the race from its XML keeps the penalty (status DQ, order)")
+	# the lap-data side (predictor backtest) uses the corrected places
+	Profiles.rebuild()
+	var lap_pos := -1
+	for day in Profiles.days:
+		var drv: Dictionary = day["race"].get("drivers", {}) if not day["race"].is_empty() else {}
+		if drv.has(Elo.resolve(order[0])) and str(drv[Elo.resolve(order[0])].get("cls", "")) == cls and int(drv[Elo.resolve(order[0])].get("pos", 0)) == order.size():
+			lap_pos = order.size()
+	check(lap_pos == order.size(), "Lap data (predictor backtest) uses the corrected places")
 	Elo.set_race_penalties(file, [])
 	var same := true
 	for k in before:
@@ -474,6 +576,16 @@ func _test_screens() -> void:
 		rv._run()
 		await get_tree().process_frame
 	check(reports_ok and rv.report_picker.item_count > 0, "Every report runs (%d)" % rv.report_picker.item_count)
+	# names are shown tidied, but the stored name is still what gets looked up
+	var tidy := true
+	for t in Reports.consistency():
+		for r in t["rows"]:
+			tidy = tidy and str(r[0]) == Elo.pretty(str(r[0]))
+	var dv = screen.driver_view
+	var raw := str(dv.picker.get_item_metadata(0)) if dv.picker.item_count > 0 else ""
+	check(tidy and raw != "" and Elo.known_names().has(raw) and dv.picker.get_item_text(0).begins_with(Elo.pretty(raw))
+		and not Reports.driver_profile(raw)[0]["rows"].is_empty(),
+		"Reports and the Drivers screen show tidied names and still find the driver")
 	screen.show_view("predict")
 	var pv = screen.predict_view
 	for i in pv.class_pick.item_count:

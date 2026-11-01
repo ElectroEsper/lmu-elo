@@ -54,6 +54,11 @@ const PIT_SD := 3.0    # seconds of scatter per pit stop
 # Predict screen), and the backtest replays every past race under its own rules.
 const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track tendencies"],
 	["traffic", "Traffic (multiclass)"]]
+# The telemetry laps are very competitive. Over 66 dry league races the top five's typical clean
+# race lap was this much slower (the winner's best lap was about 2% slower); other classes: x1.03.
+const TEL_RACE_RATIO := {"Hyper": 1.045, "GT3": 1.03, "LMP3": 1.03}
+const TEL_RACE_RATIO_DEFAULT := 1.03
+const TEL_CHECK := 0.05   # telemetry and league race pace this far apart: the forecast asks to check
 const DEFAULT_PIT_LOSS := 60.0   # s per stop when neither the track nor the class has a measured one
 # Multiclass traffic. Encounters per lap with another class (passing it, or being passed by it)
 # = cars of that class x |1 - own lap time / their lap time|: checked on the league's races, this
@@ -391,6 +396,20 @@ func _met_ratio(cls: String, other: String) -> float:
 	return ratios[ratios.size() / 2]
 
 
+# Race lap of a class at a track from its saved telemetry lap (x its TEL_RACE_RATIO), 0 if there is none.
+func telemetry_race_lap(course: String, cls: String) -> float:
+	for p in TrackStore.list():
+		if str(p["course"]) == course and str(p["class"]) == cls:
+			var t := float(p.get("lap", {}).get("time_s", 0.0))
+			if t > 0.0:
+				return t * tel_ratio(cls)
+	return 0.0
+
+
+func tel_ratio(cls: String) -> float:
+	return float(TEL_RACE_RATIO.get(cls, TEL_RACE_RATIO_DEFAULT))
+
+
 func _avg(a: Array) -> float:
 	var s := 0.0
 	for x in a:
@@ -649,8 +668,23 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 	if course == "":
 		course = Profiles.latest_course()
 	var track = Profiles.track_info(course, cls)
+	# race lap: typed on the Predict screen, else the telemetry lap + 2%, else the league results
+	var tel_lap := telemetry_race_lap(course, cls)
 	if lap_s > 0.0:
 		track["ref_s"] = lap_s
+	elif tel_lap > 0.0:
+		var league_lap := float(track["ref_s"])
+		track["ref_s"] = tel_lap
+		notes.append("Race lap %d:%04.1f: the telemetry lap + %s%%." % [int(tel_lap / 60.0), fmod(tel_lap, 60.0),
+			String.num((tel_ratio(cls) - 1.0) * 100.0, 1)])
+		# a big gap usually means wet league races here, or telemetry from another layout or car
+		if track["known_race"] and league_lap > 0.0 and absf(tel_lap / league_lap - 1.0) > TEL_CHECK:
+			if track.get("ref_wet", false):
+				notes.append("League races here were all wet (%d:%04.1f, %+.0f%% vs telemetry): if this one is wet too, type a lap time." % [
+					int(league_lap / 60.0), fmod(league_lap, 60.0), 100.0 * (league_lap / tel_lap - 1.0)])
+			else:
+				notes.append("Check the lap time: dry league races here ran %d:%04.1f (%+.0f%% vs telemetry). Type a lap time to override." % [
+					int(league_lap / 60.0), fmod(league_lap, 60.0), 100.0 * (league_lap / tel_lap - 1.0)])
 	var ctx := series_context(series, cls)
 	var series_name := str(LeagueSettings.get_value("series_names").get(series, series.to_upper())) if series != "" else ""
 	if minutes > 0:
@@ -681,7 +715,8 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 	if not Profiles.has_data():
 		notes.append("No lap-data fingerprints saved yet: drivers are rated from Elo only. Drop your XML folder to backfill them.")
 	elif not track["known_race"]:
-		notes.append("No earlier race at this track: lap time comes from quali (or a default), and tyre / fuel track effects are off.")
+		notes.append("No earlier race at this track: %s, and tyre / fuel track effects are off." % [
+			"lap time from telemetry" if tel_lap > 0.0 and lap_s <= 0.0 else "lap time comes from quali (or a default)"])
 	var inputs := driver_inputs(names, cls, "", course)
 	var on := []
 	for u in UPGRADES:

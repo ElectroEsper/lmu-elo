@@ -98,6 +98,15 @@ func rebuild() -> void:
 		day["course"] = fp["track"].get("course", "")
 		if fp.has("race"):
 			day["race"] = _resolved(fp["race"])
+			# steward penalties (Penalties screen): finishing places from the corrected result, not
+			# the game's, so everything measured against results (backtest...) uses the official one
+			if not draft.get("penalties", []).is_empty():
+				for pc in draft.get("orders", {}).get("race", {}):
+					var po: Array = draft["orders"]["race"][pc]
+					for i in po.size():
+						var rn := Elo.resolve(str(po[i]))
+						if day["race"].get("drivers", {}).has(rn) and str(day["race"]["drivers"][rn].get("cls", "")) == str(pc):
+							day["race"]["drivers"][rn]["pos"] = i + 1
 			day["series"] = Elo.series_code(str(draft["file"]))   # "sc", "mc"... ("" if the name has none)
 			day["season"] = Elo.season_number(str(draft["file"]))
 			# fuel, energy and tyre figures back to x1, so races run under different multipliers
@@ -402,7 +411,8 @@ func _course_stats(course: String, cls: String, before: String, quali_day: Strin
 		length = day["track"].get("length", length)
 		if race_ok and day["race"]["classes"].has(cls):
 			var c: Dictionary = day["race"]["classes"][cls]
-			_add(acc, cnt, "ref_s", c.get("ref_s", 0.0))
+			# lap time from dry races: wet ones run 11-19% slower and would skew it (wet only as a fallback)
+			_add(acc, cnt, "ref_s_wet" if float(day["race"].get("wet", 0.0)) >= 0.5 else "ref_s", c.get("ref_s", 0.0))
 			_add(acc, cnt, "wear_km", c.get("wear_km", 0.0))
 			_add(acc, cnt, "fuel_km", c.get("fuel_km", 0.0))
 			_add(acc, cnt, "ve_km", c.get("ve_km", 0.0))
@@ -424,6 +434,10 @@ func _course_stats(course: String, cls: String, before: String, quali_day: Strin
 	var out := {"visits": visits, "length": length}
 	for k in acc:
 		out[k] = acc[k] / cnt[k]
+	if not out.has("ref_s") and out.has("ref_s_wet"):
+		out["ref_s"] = out["ref_s_wet"]
+		out["ref_wet"] = true
+	out.erase("ref_s_wet")
 	return out
 
 
@@ -448,6 +462,7 @@ func track_info(course: String, cls: String, before := "", quali_day := "") -> D
 	if t.has("ref_s"):
 		out["ref_s"] = t["ref_s"]
 		out["known_race"] = true
+		out["ref_wet"] = t.get("ref_wet", false)   # every race of the class here was wet
 	elif t.has("best_s"):
 		out["ref_s"] = t["best_s"] * RACE_QUALI_RATIO
 	else:

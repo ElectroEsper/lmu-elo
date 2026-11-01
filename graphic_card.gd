@@ -180,6 +180,9 @@ func _build_forecast(body: VBoxContainer) -> void:
 		per = 16 if n_cls == 1 else 10
 	if landscape and n_cls == 1:
 		per = 8
+	# Event predictions: qualifying (predicted pole) on top, then the race
+	if _pole_strip(body, classes):
+		body.add_child(_label("RACE", 24, MUTED, "bold", 3))
 	var holder: BoxContainer = HBoxContainer.new() if landscape and n_cls > 1 else VBoxContainer.new()
 	holder.add_theme_constant_override("separation", int(30 * s))
 	holder.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -203,12 +206,11 @@ func _build_forecast(body: VBoxContainer) -> void:
 		for i in mini(per, rows.size()):
 			var r: Dictionary = rows[i]
 			block.add_child(_forecast_row(i, r, top_win))
-	_pole_strip(body, classes)
 
 
-# Bottom strip: each class's pole. Before quali, the driver most likely on pole and the chance;
+# Top strip: each class's pole. Before quali, the driver most likely on pole and the chance;
 # after quali, the driver who took it. Race-only forecasts have no quali, so no strip.
-func _pole_strip(body: VBoxContainer, classes: Array) -> void:
+func _pole_strip(body: VBoxContainer, classes: Array) -> bool:
 	var mode := int(spec.get("mode", -1))
 	var entries := []   # [class, driver, text under it]
 	for c in classes:
@@ -224,8 +226,8 @@ func _pole_strip(body: VBoxContainer, classes: Array) -> void:
 		if not best.is_empty():
 			entries.append([c["cls"], best["name"], best["note"]])
 	if entries.is_empty():
-		return
-	# bottom row: the pole box and, beside it, its own box for the expected retirements
+		return false
+	body.add_child(_label("QUALIFYING", 24, MUTED, "bold", 3))
 	var bottom := HBoxContainer.new()
 	bottom.add_theme_constant_override("separation", int(16 * s))
 	body.add_child(bottom)
@@ -249,6 +251,7 @@ func _pole_strip(body: VBoxContainer, classes: Array) -> void:
 			item.add_child(_label(str(e[2]), 24, MUTED, "regular"))
 			row.add_child(item)
 		bottom.add_child(panel)
+	return true
 
 
 func _forecast_row(i: int, r: Dictionary, top_win: float) -> Control:
