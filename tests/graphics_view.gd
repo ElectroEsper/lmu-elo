@@ -589,7 +589,7 @@ func _render() -> void:
 		sp["title"] = title_edit.text.strip_edges()
 	sp["background"] = _background()
 	sp["tint"] = tint_slider.value
-	card.set_spec(sp)
+	card.set_spec(_pretty_spec(sp))
 	save_btn.disabled = bool(sp.get("empty", false))
 
 
@@ -640,7 +640,6 @@ func _forecast_spec() -> Dictionary:
 	var classes := []
 	var course := ""
 	var series := ""
-	var when := Time.get_date_string_from_system()
 	var mode := -1
 	var src := int(source_pick.get_item_metadata(source_pick.selected)) if source_pick.selected >= 0 else -1
 	if src < 0:
@@ -660,7 +659,6 @@ func _forecast_spec() -> Dictionary:
 			course = str(fc.get("course", ""))
 			series = str(fc.get("series", ""))
 			mode = int(fc.get("mode", -1))
-		when = Time.get_date_string_from_unix_time(int(g[0]["made_at"]))
 	if classes.is_empty():
 		return {"kind": "forecast", "title": "Race forecast", "subtitle": "Run a forecast on the Predict screen first.", "classes": [], "empty": true}
 	# fastest class first, GT3 last (top to bottom, or left to right on the stream size): the
@@ -678,7 +676,6 @@ func _forecast_spec() -> Dictionary:
 		sub.append(course)
 	if series_name != "":
 		sub.append(series_name)
-	sub.append(when)
 	var sp := {"kind": "forecast", "title": "Race forecast", "subtitle": " · ".join(sub), "classes": classes, "mode": mode}
 	if series != "":
 		sp["accent"] = LeagueSettings.series_color(series)
@@ -701,9 +698,9 @@ func _standings_spec() -> Dictionary:
 		if a["wins"] != b["wins"]:
 			return a["wins"] > b["wins"]
 		return a["pod"] > b["pod"])
-	var drops := int(LeagueSettings.get_value("drop_rounds"))
+	var drops := LeagueSettings.drops_for(int(ch.get("rounds", 0)))
 	var note := "After %d round%s" % [int(ch.get("rounds", 0)), "" if int(ch.get("rounds", 0)) == 1 else "s"]
-	if drops > 0 and int(ch.get("rounds", 0)) > drops:
+	if drops > 0:
 		note += " · worst %d result%s dropped" % [drops, "" if drops == 1 else "s"]
 	var sp := {"kind": "standings", "title": "%s standings" % LeagueSettings.label(key), "subtitle": season, "rows": rows,
 		"rounds_note": note, "empty": rows.is_empty()}
@@ -781,6 +778,34 @@ func _driver_spec(nm: String, cls := "") -> Dictionary:
 			wet = w
 	return {"kind": "driver", "title": nm, "subtitle": "Driver card", "ranks": ranks, "stats": stats, "grades": grades,
 		"grade_class": main, "strong": strong, "weak": weak, "wet": wet}
+
+
+# Every driver name on an image as people expect to read it (Elo.pretty): "DAN POULIN" -> "Dan
+# Poulin", "David Carter#4131" -> "David Carter". The data keeps the names as stored.
+func _pretty_spec(sp: Dictionary) -> Dictionary:
+	var out := sp.duplicate(true)
+	match str(out.get("kind", "")):
+		"forecast":
+			for c in out.get("classes", []):
+				for r in c["rows"]:
+					r["name"] = Elo.pretty(str(r["name"]))
+		"standings":
+			for r in out.get("rows", []):
+				r["name"] = Elo.pretty(str(r["name"]))
+		"ranks":
+			for t in out.get("tiers", []):
+				t["drivers"] = t["drivers"].map(func(n): return Elo.pretty(str(n)))
+		"driver":
+			if title_edit.text.strip_edges() == "":
+				out["title"] = Elo.pretty(str(out.get("title", "")))
+		"track":
+			for w in out.get("winners", []):
+				w[1] = Elo.pretty(str(w[1]))
+			for w in out.get("watch", []):
+				var parts := str(w[1]).split("  ")   # "Name  47%" from a forecast
+				parts[0] = Elo.pretty(parts[0])
+				w[1] = "  ".join(parts)
+	return out
 
 
 # ---------- background ----------
@@ -910,11 +935,11 @@ func _save_batch() -> void:
 		sp["brand"] = _brand()
 		sp["background"] = _background()
 		sp["tint"] = tint_slider.value
-		card.set_spec(sp)
+		card.set_spec(_pretty_spec(sp))
 		await RenderingServer.frame_post_draw
 		await RenderingServer.frame_post_draw
 		var img := viewport.get_texture().get_image()
-		if img != null and img.save_png(dir.path_join("%s.png" % str(drivers[i]).validate_filename().replace(" ", "_"))) == OK:
+		if img != null and img.save_png(dir.path_join("%s.png" % Elo.pretty(str(drivers[i])).validate_filename().replace(" ", "_"))) == OK:
 			saved += 1
 	if shell != null:
 		shell.progress_done()

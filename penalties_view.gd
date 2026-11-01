@@ -97,10 +97,18 @@ func _ready() -> void:
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	form.add_child(note)
 
+	var ah_row := HBoxContainer.new()
 	var ah := Label.new()
 	ah.text = "APPLIED PENALTIES"
 	ah.theme_type_variation = "HeaderSmall"
-	add_child(ah)
+	ah.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ah_row.add_child(ah)
+	var export_btn := Button.new()
+	export_btn.text = "Export to Excel"
+	export_btn.tooltip_text = "Every penalty (with positions before and after) and the corrected result of each race that has one."
+	export_btn.pressed.connect(_export)
+	ah_row.add_child(export_btn)
+	add_child(ah_row)
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size = Vector2(0, 150)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -345,6 +353,63 @@ func _fill_applied() -> void:
 			applied_box.add_child(row)
 	if not any:
 		applied_box.add_child(_muted("None yet."))
+
+
+# ---------- Excel ----------
+func export_sheets() -> Array:
+	var pen_rows := []
+	var res_rows := []
+	for h in Elo.history:
+		var file := str(h["file"])
+		var pens := Elo.event_penalties(file)
+		if pens.is_empty():
+			continue
+		var date := Time.get_date_string_from_unix_time(int(h.get("time", 0))) if int(h.get("time", 0)) > 0 else ""
+		var orig := Elo.original_race(file)
+		var classes: Array = orig["orders"].keys()
+		classes.sort()
+		for cls in classes:
+			var mine := pens.filter(func(p): return str(p["cls"]) == str(cls))
+			if mine.is_empty():
+				continue
+			var o: Array = orig["orders"][cls]
+			var stats: Dictionary = orig["stats"].get(cls, {})
+			var r := Elo.penalised_order(o, stats, mine)
+			for p in mine:
+				pen_rows.append([file.get_basename(), date, str(h.get("course", "")), LeagueSettings.label(str(cls)),
+					Elo.pretty(str(p["driver"])), _describe(p), str(p.get("reason", "")),
+					Time.get_datetime_string_from_unix_time(int(p.get("at", 0))).replace("T", " ") if int(p.get("at", 0)) > 0 else "",
+					o.find(p["driver"]) + 1, r["order"].find(p["driver"]) + 1])
+			for i in r["order"].size():
+				var n: String = r["order"][i]
+				var notes := PackedStringArray()
+				for p in mine:
+					if p["driver"] == n:
+						notes.append(_describe(p))
+				var status := "DQ" if r["dsq"].has(n) else str(stats.get(n, {}).get("status", ""))
+				res_rows.append([file.get_basename(), LeagueSettings.label(str(cls)), i + 1, Elo.pretty(n), o.find(n) + 1,
+					int(stats.get(n, {}).get("laps", 0)), "Finished" if status.to_lower().begins_with("finished") else status, ", ".join(notes)])
+	return [
+		{"name": "Penalties", "headers": ["Race", "Date", "Track", "Class", "Driver", "Penalty", "Reason", "Applied", "Position before", "Position after"], "rows": pen_rows},
+		{"name": "Corrected results", "headers": ["Race", "Class", "Pos", "Driver", "Pos before penalties", "Laps", "Status", "Penalties"], "rows": res_rows},
+	]
+
+
+func _export() -> void:
+	var sheets := export_sheets()
+	if sheets[0]["rows"].is_empty():
+		notice.emit("No penalties to export yet.")
+		return
+	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	if dir == "":
+		dir = OS.get_user_data_dir()
+	var path := "%s/lmu_penalties_%s.xlsx" % [dir, Time.get_datetime_string_from_system().replace(":", "-")]
+	var err := Elo.write_xlsx(path, sheets)
+	if err == OK:
+		notice.emit("Exported: " + path)
+		OS.shell_open(dir)
+	else:
+		notice.emit("Export failed (error %d)" % err)
 
 
 func _muted(text: String) -> Label:

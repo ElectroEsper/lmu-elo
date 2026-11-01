@@ -495,7 +495,7 @@ func track_spec(course: String, series: String, minutes: int, notes := "", watch
 				stops = maxi(stops, int(ceil(laps / (float(info["tank_laps"]) / float(rule["fuel"])))) - 1)
 			if float(info.get("tyre_laps", 0.0)) > 0.0:
 				stops = maxi(stops, int(ceil(laps / (float(info["tyre_laps"]) / float(rule["tyre"])))) - 1)
-		rows.append([LeagueSettings.label(c), "%d:%04.1f" % [int(ref / 60.0), fmod(ref, 60.0)], "~%d" % laps, str(stops)])
+		rows.append([LeagueSettings.label(c), "~%d:%04.1f" % [int(ref / 60.0), fmod(ref, 60.0)], "~%d" % laps, str(stops)])
 	var facts := []
 	var length := float(prof.get("lap", {}).get("length_m", 0.0)) / 1000.0
 	if length > 0.0:
