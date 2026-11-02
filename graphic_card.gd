@@ -108,6 +108,8 @@ func _build() -> void:
 			_build_forecast(body)
 		"standings":
 			_build_standings(body)
+		"season":
+			_build_season(body)
 		"ranks":
 			_build_ranks(body)
 		"driver":
@@ -351,6 +353,112 @@ func _forecast_row(i: int, r: Dictionary, top_win: float) -> Control:
 	return panel
 
 
+# ---------- season scenarios ----------
+# Title fight: the rounds still to come, the contenders with their points, best possible total and
+# title chance, what settles it at the next round, and a few things to watch. Stream size: two columns.
+func _build_season(body: VBoxContainer) -> void:
+	var main: BoxContainer = HBoxContainer.new() if landscape else VBoxContainer.new()
+	main.add_theme_constant_override("separation", int((40 if landscape else 22) * s))
+	main.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(main)
+	var left_col := VBoxContainer.new()
+	left_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_col.size_flags_stretch_ratio = 1.4
+	left_col.add_theme_constant_override("separation", int(10 * s))
+	var right_col := VBoxContainer.new()
+	right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_col.add_theme_constant_override("separation", int(14 * s))
+	# portrait: rounds left on top, then the table, then what settles it and what to watch;
+	# landscape: the table on the left, everything else on the right
+	var top_col := right_col
+	if not landscape:
+		top_col = VBoxContainer.new()
+		top_col.add_theme_constant_override("separation", int(10 * s))
+		main.add_child(top_col)
+	main.add_child(left_col)
+	main.add_child(right_col)
+	var rl: Array = spec.get("rounds_left", [])
+	if not rl.is_empty():
+		top_col.add_child(_label("STILL TO RACE", 24, MUTED, "bold", 3))
+		var rp := _panel(PANEL, Color(0, 0, 0, 0))
+		var rbox := VBoxContainer.new()
+		rbox.add_theme_constant_override("separation", int(4 * s))
+		rp.add_child(rbox)
+		for rd in rl:
+			var h := HBoxContainer.new()
+			h.add_theme_constant_override("separation", int(14 * s))
+			h.add_child(_label(str(rd["round"]), 28, accent, "title", 0, 56))
+			h.add_child(_fit(_label(str(rd["course"]), 28, TEXT, "bold")))
+			var wx := str(rd["weather"])
+			h.add_child(_label(wx, 24, RAIN_BLUE if wx != "Dry" else MUTED, "bold", 1, 0.0, HORIZONTAL_ALIGNMENT_RIGHT))
+			rbox.add_child(h)
+		top_col.add_child(rp)
+	# contenders
+	left_col.add_child(_label("TITLE CHANCES", 24, MUTED, "bold", 3))
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", int(14 * s))
+	var dl := _label("DRIVER", 22, MUTED, "bold", 2)
+	dl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(_label("", 22, MUTED, "bold", 0, 40))
+	head.add_child(dl)
+	head.add_child(_label("POINTS", 22, MUTED, "bold", 2, 100, HORIZONTAL_ALIGNMENT_RIGHT))
+	head.add_child(_label("MAX", 22, MUTED, "bold", 2, 80, HORIZONTAL_ALIGNMENT_RIGHT))
+	head.add_child(_label("TITLE", 22, MUTED, "bold", 2, 200, HORIZONTAL_ALIGNMENT_RIGHT))
+	left_col.add_child(head)
+	var rows: Array = spec.get("rows", [])
+	var top := 0.0
+	for r in rows:
+		top = maxf(top, float(r["title"]))
+	for i in rows.size():
+		var r: Dictionary = rows[i]
+		var tint: Color = PODIUM[i] if i < 3 else PANEL
+		var panel := _panel(Color(tint, 0.18) if i < 3 else PANEL, tint if i < 3 else Color(0, 0, 0, 0))
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", int(14 * s))
+		panel.add_child(row)
+		row.add_child(_label(str(i + 1), 32, tint if i < 3 else MUTED, "title", 0, 40))
+		row.add_child(_fit(_label(str(r["name"]), 32, TEXT, "bold")))
+		row.add_child(_label(str(int(r["points"])), 32, TEXT, "title", 0, 100, HORIZONTAL_ALIGNMENT_RIGHT))
+		row.add_child(_label(str(int(r["max"])), 26, MUTED, "regular", 0, 80, HORIZONTAL_ALIGNMENT_RIGHT))
+		var t := float(r["title"])
+		var cell := HBoxContainer.new()
+		cell.custom_minimum_size = Vector2(200 * s, 0)
+		cell.add_theme_constant_override("separation", int(8 * s))
+		var bar := ColorRect.new()
+		bar.color = accent
+		bar.custom_minimum_size = Vector2(maxf(4.0, 110.0 * s * (t / maxf(top, 0.01))), 30 * s)
+		bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		cell.add_child(bar)
+		var pct := "<1%" if t > 0.0 and t < 0.005 else ("%d%%" % roundi(100.0 * t))
+		cell.add_child(_label(pct, 28, TEXT, "bold"))
+		row.add_child(cell)
+		left_col.add_child(panel)
+	if str(spec.get("alive_note", "")) != "":
+		left_col.add_child(_label(str(spec["alive_note"]), 22, MUTED, "regular"))
+	# what settles it
+	var cp := _panel(Color(accent, 0.14), accent)
+	cp.add_child(_wrap(_label(str(spec.get("clinch", "")), 30, TEXT, "bold")))
+	right_col.add_child(cp)
+	# things to watch
+	var watch: Array = spec.get("watch", [])
+	if not watch.is_empty():
+		right_col.add_child(_label("ALSO WATCH", 24, MUTED, "bold", 3))
+		for w in watch:   # bullet in its own column, so wrapped lines stay indented
+			var line := HBoxContainer.new()
+			line.add_theme_constant_override("separation", int(10 * s))
+			var dot := _label("•", 26, accent, "bold", 0, 18)
+			dot.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+			line.add_child(dot)
+			line.add_child(_wrap(_label(str(w), 26, TEXT, "regular")))
+			right_col.add_child(line)
+
+
+func _wrap(l: Label) -> Label:
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	return l
+
+
 # ---------- standings ----------
 # spec["rows"] = [{"name", "points", "wins", "pod", "races", "dropped"}], best first; spec["rounds_note"]
 func _build_standings(body: VBoxContainer) -> void:
@@ -360,6 +468,10 @@ func _build_standings(body: VBoxContainer) -> void:
 		per = 15
 	if landscape:
 		per = 8
+	var first := 0   # paged (stream size: the whole field, 10 a page): this page's first place
+	if int(spec.get("per_page", 0)) > 0:
+		per = int(spec["per_page"])
+		first = int(spec.get("page", 0)) * per
 	var h := HBoxContainer.new()
 	var spacer := _label("", 22, MUTED, "bold", 0, 60)
 	h.add_child(spacer)
@@ -369,13 +481,16 @@ func _build_standings(body: VBoxContainer) -> void:
 	h.add_child(_label("GAP", 22, MUTED, "bold", 2, 70, HORIZONTAL_ALIGNMENT_RIGHT))
 	h.add_child(_label("WINS", 22, MUTED, "bold", 2, 84, HORIZONTAL_ALIGNMENT_RIGHT))
 	h.add_child(_label("PODIUMS", 22, MUTED, "bold", 2, 124, HORIZONTAL_ALIGNMENT_RIGHT))
+	var show_dropped := bool(spec.get("show_dropped", false))
+	if show_dropped:
+		h.add_child(_label("DROPPED", 22, MUTED, "bold", 2, 124, HORIZONTAL_ALIGNMENT_RIGHT))
 	h.add_child(_label("POINTS", 22, MUTED, "bold", 2, 120, HORIZONTAL_ALIGNMENT_RIGHT))
 	body.add_child(h)
 	var leader := float(rows[0]["points"]) if not rows.is_empty() else 0.0
 	var list := VBoxContainer.new()
-	list.add_theme_constant_override("separation", int(10 * s))
+	list.add_theme_constant_override("separation", int((6 if per > 8 and landscape else 10) * s))
 	body.add_child(list)
-	for i in mini(per, rows.size()):
+	for i in range(first, mini(first + per, rows.size())):
 		var r: Dictionary = rows[i]
 		var tint: Color = PODIUM[i] if i < 3 else PANEL
 		var panel := _panel(Color(tint, 0.18) if i < 3 else PANEL, tint if i < 3 else Color(0, 0, 0, 0))
@@ -388,6 +503,9 @@ func _build_standings(body: VBoxContainer) -> void:
 		row.add_child(_label("-%d" % roundi(leader - float(r["points"])) if i > 0 else "", 24, MUTED, "regular", 0, 70, HORIZONTAL_ALIGNMENT_RIGHT))
 		row.add_child(_label(str(int(r["wins"])), 30, TEXT, "bold", 0, 84, HORIZONTAL_ALIGNMENT_RIGHT))
 		row.add_child(_label(str(int(r["pod"])), 30, TEXT, "bold", 0, 124, HORIZONTAL_ALIGNMENT_RIGHT))
+		if show_dropped:   # points the dropped round(s) took off the total ("-" when nothing scored was dropped)
+			var dp := int(r.get("dropped", 0))
+			row.add_child(_label("-%d" % dp if dp > 0 else "-", 26, MUTED, "regular", 0, 124, HORIZONTAL_ALIGNMENT_RIGHT))
 		row.add_child(_label(str(int(r["points"])), 36, accent if i == 0 else TEXT, "title", 0, 100, HORIZONTAL_ALIGNMENT_RIGHT))
 		list.add_child(panel)
 	if str(spec.get("rounds_note", "")) != "":

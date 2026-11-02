@@ -32,7 +32,7 @@ const DEFAULTS := {
 	"drop_rounds": 1,
 	"drop_after": 2,   # dropped rounds only count once this many rounds of the season are done
 
-	"series_names": {"sc": "Sprint", "mc": "Multiclass"},
+	"series_names": {"sc": "Sprint", "mc": "Enduro"},   # code in the file name -> name shown (Settings > Series)
 	# Race rules per series, from a season on (a later row for the same series takes over from its
 	# season): fuel / virtual-energy use and tyre wear multipliers set on the server, whether
 	# routine pit stops are part of the race, and stops the rules make compulsory.
@@ -45,6 +45,10 @@ const DEFAULTS := {
 	"brand_logo": "",
 	"brand_title_font": "",         # optional font file for titles (TTF / OTF / WOFF2)
 	"series_colors": {"mc": "#cdfe02", "sc": "#f4901e"},   # accent of each series' images
+	# rounds in a season, per series (season scenarios: points still to play for)
+	"season_rounds": {"sc": 6, "mc": 6},
+	# rounds still to come: {"series", "season", "round", "course", "weather": dry/mixed/wet, "rain": 0-1}
+	"calendar": [],
 	"race_rules": [
 		{"series": "sc", "from": 1, "fuel": 1.0, "tyre": 1.0, "pits": false, "min_stops": 0},
 		{"series": "mc", "from": 1, "fuel": 2.0, "tyre": 2.0, "pits": true, "min_stops": 0},
@@ -166,6 +170,21 @@ static func _escape(s: String) -> String:
 	var out := ""
 	for ch in s:
 		out += ("\\" + ch) if ch in "\\.^$|?*+()[]{}" else ch
+	return out
+
+
+# Rounds in a season of a series (6 when not set).
+static func season_rounds(series: String) -> int:
+	return int(get_value("season_rounds").get(series, 6))
+
+
+# The calendar's rounds for a series and season, by round number.
+static func calendar_for(series: String, season: int) -> Array:
+	var out := []
+	for c in get_value("calendar"):
+		if c is Dictionary and str(c.get("series", "")) == series and int(c.get("season", 0)) == season:
+			out.append(c)
+	out.sort_custom(func(a, b): return int(a["round"]) < int(b["round"]))
 	return out
 
 

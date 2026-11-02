@@ -19,6 +19,9 @@ var drop_spin := SpinBox.new()
 var drop_after_spin := SpinBox.new()
 var class_rows := GridContainer.new()   # game class name -> name shown on screen
 var rule_rows := VBoxContainer.new()     # race rules: one row per series and starting season
+var series_rows := VBoxContainer.new()   # series: code in the file name -> name shown
+var rounds_box := HBoxContainer.new()    # rounds per season, one spin per series
+var cal_rows := VBoxContainer.new()      # season calendar: rounds still to come
 var brand_name := LineEdit.new()
 var brand_color := ColorPickerButton.new()
 var brand_logo := LineEdit.new()
@@ -88,14 +91,29 @@ func _ready() -> void:
 		points_edit.text = ", ".join(PackedStringArray(LeagueSettings.DEFAULTS["points"].map(func(p): return str(p))))))
 	_form_row(st_form, "Points for P1, P2, P3...", pts_row, "Separated by commas. Places after the last number score nothing. League scale: 50, 47, 44, 41, 38, 35, then one less per place down to 1.")
 	drop_spin.max_value = 10
-	_form_row(st_form, "Dropped rounds per season", drop_spin, "Each driver's worst rounds of a season championship are not counted. A missed round counts as 0, so it is dropped first. Each series (Sprint, Multiclass...) is its own championship.")
+	_form_row(st_form, "Dropped rounds per season", drop_spin, "Each driver's worst rounds of a season championship are not counted. A missed round counts as 0, so it is dropped first. Each series (Sprint, Enduro...) is its own championship.")
 	drop_after_spin.min_value = 0
 	drop_after_spin.max_value = 20
 	_form_row(st_form, "Drops apply after round", drop_after_spin, "No round is dropped until this many rounds of the season are done (2 = the first drop shows in the standings after round 3).")
 
+	# series names
+	var se := _card("SERIES")
+	se.add_child(_note("Each series is told apart by the code after the season in the result file names (\"s6-mc2-r.xml\": season 6, series mc, round 2). Set the name shown everywhere for each code: standings, reports, graphics. Renaming a series renames its past seasons too."))
+	var shead := HBoxContainer.new()
+	for h in [["Code in file names", 160], ["Name", 220]]:
+		var l := _label(h[0])
+		l.theme_type_variation = "TableHeader"
+		l.custom_minimum_size = Vector2(h[1], 0)
+		shead.add_child(l)
+	se.add_child(shead)
+	se.add_child(series_rows)
+	var add_series := _btn("Add series", func(): _add_series_row("", ""))
+	add_series.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	se.add_child(add_series)
+
 	# race rules
 	var rr := _card("RACE RULES")
-	rr.add_child(_note("The fuel / energy and tyre wear multipliers each series runs with, whether routine pit stops are part of its races, and stops the rules make compulsory. A rule applies from its season on, until a later rule for the same series takes over. Past races are scaled back to x1 with the rule they ran under (so Sprint and Multiclass fuel and tyre figures compare), and the Predict screen starts from each series' latest rule."))
+	rr.add_child(_note("The fuel / energy and tyre wear multipliers each series runs with, whether routine pit stops are part of its races, and stops the rules make compulsory. A rule applies from its season on, until a later rule for the same series takes over. Past races are scaled back to x1 with the rule they ran under (so the series' fuel and tyre figures compare), and the Predict screen starts from each series' latest rule."))
 	var rhead := HBoxContainer.new()
 	for h in [["Series", 150], ["From season", 110], ["Fuel / energy x", 120], ["Tyre wear x", 110], ["Pit stops", 90], ["Min. stops", 100]]:
 		var l := _label(h[0])
@@ -108,9 +126,33 @@ func _ready() -> void:
 	add_rule.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	rr.add_child(add_rule)
 
+	# season: length and the rounds still to come
+	var sc := _card("SEASON CALENDAR")
+	sc.add_child(_note("How many rounds a season of each series has, and the rounds still to come with their track and expected weather. Used by the Season scenarios graphic (points still to play for, title chances)."))
+	sc.add_child(rounds_box)
+	var chead := HBoxContainer.new()
+	for h in [["Series", 150], ["Season", 80], ["Round", 80], ["Track", 280], ["Weather", 110], ["Rain %", 90]]:
+		var l := _label(h[0])
+		l.theme_type_variation = "TableHeader"
+		l.custom_minimum_size = Vector2(h[1], 0)
+		chead.add_child(l)
+	sc.add_child(chead)
+	sc.add_child(cal_rows)
+	var add_cal := _btn("Add round", func():
+		var last := {"series": "mc", "season": 1, "round": 1}
+		if cal_rows.get_child_count() > 0:
+			last = _cal_values(cal_rows.get_child(cal_rows.get_child_count() - 1))
+			last["round"] = int(last["round"]) + 1
+		last["course"] = ""
+		last["weather"] = "dry"
+		last["rain"] = 0.5
+		_add_cal_row(last))
+	add_cal.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	sc.add_child(add_cal)
+
 	# graphics
 	var gr2 := _card("GRAPHICS")
-	gr2.add_child(_note("Shown on every image made on the Graphics screen: the league name above the title, the league colours, and a logo (PNG, JPG or SVG with a transparent background; square badges and wide wordmarks both work, but on the dark background a logo needs light or coloured lettering). Images of one series (a Sprint forecast, Multiclass standings) use that series' colour; the others use the accent colour."))
+	gr2.add_child(_note("Shown on every image made on the Graphics screen: the league name above the title, the league colours, and a logo (PNG, JPG or SVG with a transparent background; square badges and wide wordmarks both work, but on the dark background a logo needs light or coloured lettering). Images of one series (a Sprint forecast, Enduro standings) use that series' colour; the others use the accent colour."))
 	var g_form := GridContainer.new()
 	g_form.columns = 2
 	gr2.add_child(g_form)
@@ -225,6 +267,12 @@ func refresh() -> void:
 	brand_primary.color = Color.from_string(str(LeagueSettings.get_value("brand_primary")), Color("512f89"))
 	brand_secondary.color = Color.from_string(str(LeagueSettings.get_value("brand_secondary")), Color.WHITE)
 	title_font.text = str(LeagueSettings.get_value("brand_title_font"))
+	for c in series_rows.get_children():
+		series_rows.remove_child(c)
+		c.queue_free()
+	var all_names: Dictionary = LeagueSettings.get_value("series_names")
+	for code in all_names:
+		_add_series_row(str(code), str(all_names[code]))
 	for c in series_color_box.get_children():
 		series_color_box.remove_child(c)
 		c.queue_free()
@@ -247,6 +295,26 @@ func refresh() -> void:
 	for r in LeagueSettings.get_value("race_rules"):
 		if r is Dictionary:
 			_add_rule_row(r)
+	for c in rounds_box.get_children():
+		rounds_box.remove_child(c)
+		c.queue_free()
+	var round_names: Dictionary = LeagueSettings.get_value("series_names")
+	for code in round_names:
+		var l := _label("%s rounds" % str(round_names[code]))
+		rounds_box.add_child(l)
+		var sb := SpinBox.new()
+		sb.min_value = 1
+		sb.max_value = 30
+		sb.value = LeagueSettings.season_rounds(str(code))
+		sb.set_meta("series", str(code))
+		sb.custom_minimum_size = Vector2(90, 0)
+		rounds_box.add_child(sb)
+	for c in cal_rows.get_children():
+		cal_rows.remove_child(c)
+		c.queue_free()
+	for r in LeagueSettings.get_value("calendar"):
+		if r is Dictionary:
+			_add_cal_row(r)
 	_show_preview()
 
 
@@ -286,6 +354,84 @@ func _add_rule_row(r: Dictionary) -> void:
 	remove.theme_type_variation = "SmallButton"
 	row.add_child(remove)
 	rule_rows.add_child(row)
+
+
+func _add_series_row(code: String, series_name: String) -> void:
+	var row := HBoxContainer.new()
+	var ce := LineEdit.new()
+	ce.text = code
+	ce.placeholder_text = "e.g. mc"
+	ce.custom_minimum_size = Vector2(160, 0)
+	row.add_child(ce)
+	var ne := LineEdit.new()
+	ne.text = series_name
+	ne.placeholder_text = "e.g. Enduro"
+	ne.custom_minimum_size = Vector2(220, 0)
+	row.add_child(ne)
+	var remove := _btn("Remove", func(): row.queue_free())
+	remove.theme_type_variation = "SmallButton"
+	row.add_child(remove)
+	series_rows.add_child(row)
+
+
+func _add_cal_row(r: Dictionary) -> void:
+	var row := HBoxContainer.new()
+	var series := OptionButton.new()
+	series.custom_minimum_size = Vector2(150, 0)
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	for c in names:
+		series.add_item(str(names[c]))
+		series.set_item_metadata(series.item_count - 1, str(c))
+		if str(c) == str(r.get("series", "")):
+			series.select(series.item_count - 1)
+	row.add_child(series)
+	for spec in [["season", 80], ["round", 80]]:
+		var sb := SpinBox.new()
+		sb.min_value = 1
+		sb.max_value = 99
+		sb.value = int(r.get(spec[0], 1))
+		sb.custom_minimum_size = Vector2(spec[1], 0)
+		row.add_child(sb)
+	var track := OptionButton.new()
+	track.custom_minimum_size = Vector2(280, 0)
+	track.clip_text = true
+	track.add_item("(not known)")
+	track.set_item_metadata(0, "")
+	for c in Profiles.courses():
+		track.add_item(str(c))
+		track.set_item_metadata(track.item_count - 1, str(c))
+		if str(c) == str(r.get("course", "")):
+			track.select(track.item_count - 1)
+	row.add_child(track)
+	var wx := OptionButton.new()
+	wx.custom_minimum_size = Vector2(110, 0)
+	for w in [["Dry", "dry"], ["Mixed", "mixed"], ["Wet", "wet"]]:
+		wx.add_item(w[0])
+		wx.set_item_metadata(wx.item_count - 1, w[1])
+		if w[1] == str(r.get("weather", "dry")):
+			wx.select(wx.item_count - 1)
+	row.add_child(wx)
+	var rain := SpinBox.new()
+	rain.max_value = 100
+	rain.step = 5
+	rain.value = roundi(100.0 * float(r.get("rain", 0.5)))
+	rain.custom_minimum_size = Vector2(90, 0)
+	rain.tooltip_text = "Mixed weather: chance of rain per weather stage."
+	row.add_child(rain)
+	var remove := _btn("Remove", func(): row.queue_free())
+	remove.theme_type_variation = "SmallButton"
+	row.add_child(remove)
+	cal_rows.add_child(row)
+
+
+func _cal_values(row: Node) -> Dictionary:
+	var sp := row.get_child(0) as OptionButton
+	var tr := row.get_child(3) as OptionButton
+	var wx := row.get_child(4) as OptionButton
+	return {"series": str(sp.get_item_metadata(maxi(sp.selected, 0))),
+		"season": int((row.get_child(1) as SpinBox).value), "round": int((row.get_child(2) as SpinBox).value),
+		"course": str(tr.get_item_metadata(maxi(tr.selected, 0))), "weather": str(wx.get_item_metadata(maxi(wx.selected, 0))),
+		"rain": snappedf((row.get_child(5) as SpinBox).value / 100.0, 0.01)}
 
 
 func _add_rank_row(rank_name: String, from: float, colour: Color) -> void:
@@ -358,6 +504,22 @@ func _collect() -> Dictionary:
 			return str(a["series"]) < str(b["series"])
 		return int(a["from"]) < int(b["from"]))
 	values["race_rules"] = rules
+	var rounds := {}
+	for c in rounds_box.get_children():
+		if c is SpinBox:
+			rounds[str(c.get_meta("series"))] = int((c as SpinBox).value)
+	values["season_rounds"] = rounds
+	var cal := []
+	for row in cal_rows.get_children():
+		if not row.is_queued_for_deletion():
+			cal.append(_cal_values(row))
+	cal.sort_custom(func(a, b):
+		if a["series"] != b["series"]:
+			return str(a["series"]) < str(b["series"])
+		if a["season"] != b["season"]:
+			return int(a["season"]) < int(b["season"])
+		return int(a["round"]) < int(b["round"]))
+	values["calendar"] = cal
 	values["brand_name"] = brand_name.text.strip_edges()
 	values["brand_accent"] = "#" + brand_color.color.to_html(false)
 	values["brand_logo"] = brand_logo.text.strip_edges()
@@ -371,6 +533,16 @@ func _collect() -> Dictionary:
 		var cp := srow.get_child(1) as ColorPickerButton
 		scols[str(cp.get_meta("series"))] = "#" + cp.color.to_html(false)
 	values["series_colors"] = scols
+	var snames := {}
+	for row in series_rows.get_children():
+		if row.is_queued_for_deletion():
+			continue
+		var code := (row.get_child(0) as LineEdit).text.strip_edges().to_lower()
+		var sname := (row.get_child(1) as LineEdit).text.strip_edges()
+		if code != "":
+			snames[code] = sname if sname != "" else code.to_upper()
+	if not snames.is_empty():
+		values["series_names"] = snames
 	return values
 
 

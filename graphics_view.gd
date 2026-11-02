@@ -8,7 +8,7 @@ extends HBoxContainer
 
 signal notice(text: String)
 
-const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
+const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
 	["track", "Track card"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
@@ -40,6 +40,10 @@ var bg_dialog := FileDialog.new()
 var tint_slider := HSlider.new()
 var _bg_cache := {}                     # path -> Texture2D
 var _font_cache := {}                   # path -> Font (or null when the file cannot be read)
+var page_label := Label.new()
+var page_pick := OptionButton.new()     # standings on the stream size: which page of 10 to preview
+var batch_pages := CheckBox.new()       # on: Save writes every page, each marked "page x of y"
+const STREAM_PER_PAGE := 10
 var batch_box := VBoxContainer.new()    # driver cards for a whole class
 var batch_series := OptionButton.new()
 var batch_class := OptionButton.new()
@@ -155,6 +159,17 @@ func _ready() -> void:
 	tint_slider.value_changed.connect(func(v: float):
 		_save_ui("tint", v)
 		_render())
+	page_label.text = "Page"
+	page_label.theme_type_variation = "Muted"
+	left.add_child(page_label)
+	page_pick.tooltip_text = "The stream size shows the whole field, 10 drivers a page. Save PNG saves every page."
+	page_pick.item_selected.connect(func(_i): _render())
+	left.add_child(page_pick)
+	batch_pages.text = "Batch save"
+	batch_pages.button_pressed = true
+	batch_pages.tooltip_text = "On: Save PNG saves every page, each marked \"page x of y\".\nOff: it saves only the page shown, without the page mark."
+	batch_pages.toggled.connect(func(_on): _render())
+	left.add_child(batch_pages)
 	save_btn.text = "Save PNG"
 	save_btn.theme_type_variation = "AccentButton"
 	save_btn.pressed.connect(_save)
@@ -239,7 +254,7 @@ func _fill_sources() -> void:
 				source_pick.add_item("Saved %s: %s, %s" % [Time.get_datetime_string_from_unix_time(int(g[0]["made_at"])).replace("T", " ").left(16),
 					", ".join(classes), str(g[0].get("course", ""))])
 				source_pick.set_item_metadata(source_pick.item_count - 1, i)
-		"standings":
+		"standings", "season":
 			source_label.text = "Season"
 			var seasons := Elo.seasons()
 			for i in range(seasons.size() - 1, -1, -1):
@@ -298,7 +313,7 @@ func _fill_champs() -> void:
 		_default_minutes()
 		_fill_watch()
 		return
-	if _kind() != "standings":
+	if _kind() != "standings" and _kind() != "season":
 		return
 	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
 	champ_pick.clear()
@@ -600,6 +615,23 @@ func _render() -> void:
 	sp["tint"] = tint_slider.value
 	card.set_spec(_pretty_spec(sp))
 	save_btn.disabled = bool(sp.get("empty", false))
+	var pages := int(sp.get("pages", 1)) if _kind() == "standings" else 1
+	page_label.visible = pages > 1
+	page_pick.visible = pages > 1
+	batch_pages.visible = pages > 1
+	save_btn.text = "Save PNG" if pages <= 1 or not batch_pages.button_pressed else "Save PNG (%d pages)" % pages
+
+
+# Page picker for paged standings: one entry per page, keeping the choice.
+func _sync_pages(pages: int, per: int, n: int) -> void:
+	var first_label := "1: P1-%d" % mini(per, n)
+	if page_pick.item_count == pages and page_pick.get_item_text(0) == first_label:
+		return
+	var keep := maxi(page_pick.selected, 0)
+	page_pick.clear()
+	for p in pages:
+		page_pick.add_item("%d: P%d-%d" % [p + 1, p * per + 1, mini((p + 1) * per, n)])
+	page_pick.select(mini(keep, pages - 1))
 
 
 func _brand() -> Dictionary:
@@ -631,6 +663,8 @@ func _spec() -> Dictionary:
 			return _forecast_spec()
 		"standings":
 			return _standings_spec()
+		"season":
+			return _season_spec()
 		"ranks":
 			return _ranks_spec()
 		"track":
@@ -643,6 +677,115 @@ func _spec() -> Dictionary:
 			var cls := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
 			return _driver_spec(source_pick.get_item_text(source_pick.selected), cls)
 	return {"kind": "standings", "title": "", "rows": [], "empty": true}
+
+
+# ---------- season scenarios ----------
+var _season_cache := {}     # inputs key -> scenarios (title chances take a few seconds: kept)
+var _season_busy := ""
+
+
+func _season_spec() -> Dictionary:
+	if source_pick.selected < 0 or champ_pick.selected < 0:
+		return {"kind": "season", "title": "Season scenarios", "subtitle": "No championship results yet.", "empty": true}
+	var season := source_pick.get_item_text(source_pick.selected)
+	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
+	var ck := "%s|%s|%d|%s|%s|%s" % [season, key, Elo.history.size(), JSON.stringify(LeagueSettings.get_value("calendar")),
+		JSON.stringify(LeagueSettings.get_value("season_rounds")), JSON.stringify(LeagueSettings.points())]
+	if not _season_cache.has(ck):
+		if _season_busy != ck:
+			_season_busy = ck
+			_compute_season(season, key, ck)
+		return {"kind": "season", "title": "%s title fight" % LeagueSettings.label(key), "subtitle": "Working out the title chances...", "empty": true}
+	var sc: Dictionary = _season_cache[ck]
+	var code := str(sc["series"])
+	var series_name := str(LeagueSettings.get_value("series_names").get(code, code.to_upper()))
+	var left := int(sc["left"])
+	var sp := {"kind": "season", "title": "%s title fight" % LeagueSettings.label(str(sc["cls"])),
+		"subtitle": "%s · %s · %s" % [season, series_name, "season over" if left == 0 else "%d round%s left" % [left, "" if left == 1 else "s"]],
+		"empty": false}
+	sp["accent"] = LeagueSettings.series_color(code)
+	# rounds still to come
+	var rl := []
+	for rd in sc["rounds_left"]:
+		var course := str(rd.get("course", ""))
+		rl.append({"round": "R%d" % int(rd["round"]), "course": course if course != "" else "Track to be confirmed",
+			"weather": {"dry": "Dry", "mixed": "Mixed weather", "wet": "Wet"}.get(str(rd.get("weather", "dry")), "Dry")})
+	sp["rounds_left"] = rl
+	# contenders: still able to win it, in table order, at most 6
+	var rows := []
+	var alive := 0
+	for r in sc["rows"]:
+		if not bool(r["alive"]):
+			continue
+		alive += 1
+		if rows.size() < 6:
+			rows.append({"name": r["name"], "points": r["points"], "max": r["max"], "title": float(r.get("title", 0.0))})
+	sp["rows"] = rows
+	sp["alive_note"] = "%d driver%s can still win it on points" % [alive, "" if alive == 1 else "s"] if left > 0 else ""
+	# what settles it at the next round
+	var cl: Dictionary = sc.get("clinch", {})
+	var next_course := str(rl[0]["course"]) if not rl.is_empty() else ""
+	var who := Elo.pretty(str(cl.get("driver", "")))
+	if left == 0:
+		sp["clinch"] = "%s is champion" % Elo.pretty(str(sc["rows"][0]["name"]))
+	elif int(cl.get("place", 0)) == -1:
+		sp["clinch"] = "%s is champion whatever happens" % who
+	elif int(cl.get("place", 0)) == 1:
+		sp["clinch"] = "%s is champion by winning at %s" % [who, next_course]
+	elif int(cl.get("place", 0)) > 0:
+		sp["clinch"] = "%s is champion at %s by finishing P%d or better" % [who, next_course, int(cl["place"])]
+	elif left == 1:
+		sp["clinch"] = "It all comes down to %s" % next_course
+	else:
+		sp["clinch"] = "It cannot be settled at %s: the fight goes on to the next round" % next_course
+	var watch: Array = (sc["watch"] as Array).map(func(x): return str(x["text"]))
+	var drop_line := _drop_line(sc)
+	if drop_line != "":
+		watch.push_front(drop_line)
+	sp["watch"] = watch.slice(0, SeasonScenarios.MAX_WATCH)
+	return sp
+
+
+# The dropped rounds of the two likeliest champions, as a safety net: what each one finishes on
+# even scoring nothing more (a dropped result comes back when a worse one replaces it), which the
+# plain standings do not show. Only when the two nets differ (else there is no story).
+func _drop_line(sc: Dictionary) -> String:
+	var drops := LeagueSettings.drops_for(int(sc["total"]))
+	if drops <= 0 or int(sc["left"]) == 0:
+		return ""
+	var top: Array = (sc["rows"] as Array).filter(func(r): return bool(r["alive"]) and float(r.get("title", 0.0)) >= 0.05)
+	top.sort_custom(func(a, b): return float(a["title"]) > float(b["title"]))
+	top = top.slice(0, 2)
+	if top.size() < 2 or int(top[0]["min"]) - int(top[0]["points"]) == int(top[1]["min"]) - int(top[1]["points"]):
+		return ""
+	# "Bad-race insurance: Paret's worst result so far is a 44, Thom's is a missed round. A bad race
+	#  costs Thom more." (a bad race replaces the dropped round, so a high worst result is a cushion)
+	var info := []   # [name, worst, missed]
+	for r in top:
+		var pts := (r["by_round"] as Array).map(func(x): return int(x["pts"]))
+		var raced := (r["by_round"] as Array).filter(func(x): return int(x["pos"]) > 0).size()
+		while pts.size() < int(sc["done"]):
+			pts.append(0)
+		pts.sort()
+		info.append([Elo.pretty(str(r["name"])), int(pts[0]), int(pts[0]) == 0 and raced < int(sc["done"])])
+	if int(info[0][1]) == int(info[1][1]):
+		return ""
+	info.sort_custom(func(a, b): return int(a[1]) > int(b[1]))   # best cushion first
+	var desc := func(x: Array) -> String:
+		return "a missed round" if bool(x[2]) else "a %d" % int(x[1])
+	return "Bad-race insurance: %s's worst result so far is %s, %s's is %s. A bad race costs %s more" % [
+		info[0][0], desc.call(info[0]), info[1][0], desc.call(info[1]), info[1][0]]
+
+
+func _compute_season(season: String, key: String, ck: String) -> void:
+	var sc := SeasonScenarios.build(season, key)
+	if not sc.is_empty():
+		await SeasonScenarios.title_chances(sc)
+	_season_cache[ck] = sc if not sc.is_empty() else {"series": "", "cls": key, "left": 0, "rounds_left": [], "rows": [], "watch": []}
+	if _season_busy == ck:
+		_season_busy = ""
+	if _kind() == "season":
+		_render()
 
 
 func _forecast_spec() -> Dictionary:
@@ -707,7 +850,7 @@ func _standings_spec() -> Dictionary:
 	var rows := []
 	for d in ch.get("drivers", {}):
 		var e: Dictionary = ch["drivers"][d]
-		rows.append({"name": d, "points": e["points"], "wins": e["wins"], "pod": e["pod"]})
+		rows.append({"name": d, "points": e["points"], "wins": e["wins"], "pod": e["pod"], "dropped": e.get("dropped", 0)})
 	rows.sort_custom(func(a, b):
 		if a["points"] != b["points"]:
 			return a["points"] > b["points"]
@@ -719,7 +862,21 @@ func _standings_spec() -> Dictionary:
 	if drops > 0:
 		note += " · worst %d result%s dropped" % [drops, "" if drops == 1 else "s"]
 	var sp := {"kind": "standings", "title": "%s standings" % LeagueSettings.label(key), "subtitle": season, "rows": rows,
-		"rounds_note": note, "empty": rows.is_empty()}
+		"rounds_note": note, "empty": rows.is_empty(), "show_dropped": drops > 0}
+	# stream size: the whole field over pages of 10
+	var size_px: Vector2i = FORMATS[maxi(format_pick.selected, 0)][1]
+	var pages := 1
+	if size_px.x > size_px.y:
+		# 10 a page, the rest on the last page
+		pages = maxi(1, ceili(rows.size() / float(STREAM_PER_PAGE)))
+		var per := STREAM_PER_PAGE
+		_sync_pages(pages, per, rows.size())
+		var page := clampi(page_pick.selected, 0, pages - 1)
+		sp["per_page"] = per
+		sp["page"] = page
+		if pages > 1 and batch_pages.button_pressed:
+			sp["rounds_note"] = note + "  ·  page %d of %d" % [page + 1, pages]
+	sp["pages"] = pages
 	var code := ""
 	var names: Dictionary = LeagueSettings.get_value("series_names")
 	for c in names:   # "Sprint GT3" -> "sc"
@@ -805,7 +962,7 @@ func _pretty_spec(sp: Dictionary) -> Dictionary:
 			for c in out.get("classes", []):
 				for r in c["rows"]:
 					r["name"] = Elo.pretty(str(r["name"]))
-		"standings":
+		"standings", "season":
 			for r in out.get("rows", []):
 				r["name"] = Elo.pretty(str(r["name"]))
 		"ranks":
@@ -976,16 +1133,31 @@ func _out_dir() -> String:
 
 func _save() -> void:
 	_render()
-	await RenderingServer.frame_post_draw
-	await RenderingServer.frame_post_draw
-	var img := viewport.get_texture().get_image()
+	var pages := int(card.spec.get("pages", 1)) if _kind() == "standings" and batch_pages.button_pressed else 1
+	var keep := page_pick.selected
 	var dir := _out_dir()
 	DirAccess.make_dir_recursive_absolute(dir)
 	var label := str(card.spec.get("title", _kind())).to_lower().validate_filename().replace(" ", "_")
-	var path := dir.path_join("%s_%s.png" % [label, Time.get_datetime_string_from_system().replace(":", "-")])
-	var err := img.save_png(path)
+	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
+	var saved := 0
+	var err := OK
+	for p in pages:   # paged standings: every page, same name with _p1, _p2...
+		if pages > 1:
+			page_pick.select(p)
+			_render()
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		var img := viewport.get_texture().get_image()
+		var path := dir.path_join("%s_%s%s.png" % [label, stamp, ("_p%d" % (p + 1)) if pages > 1 else ""])
+		err = img.save_png(path)
+		if err != OK:
+			break
+		saved += 1
+	if pages > 1:
+		page_pick.select(keep)
+		_render()
 	if err == OK:
-		notice.emit("Saved %s" % path)
+		notice.emit("Saved %s" % (dir.path_join("%s_%s.png" % [label, stamp]) if pages <= 1 else "%d pages in %s" % [saved, dir]))
 		OS.shell_open(dir)
 	else:
 		notice.emit("Could not save the image (error %d)." % err)

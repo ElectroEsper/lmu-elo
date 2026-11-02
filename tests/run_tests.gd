@@ -42,6 +42,7 @@ func _ready() -> void:
 		await _test_predict()
 		await _test_forecast_record()
 		_test_penalties()
+		await _test_season_scenarios()
 		await _test_screens()
 	# a script error the run survived is still a bug in the tool
 	var errs := _script_errors()
@@ -588,6 +589,42 @@ func _test_penalties() -> void:
 		if not Elo.ratings.has(k) or absf(float(before[k]["r"]) - float(Elo.ratings[k]["r"])) > 1e-9:
 			same = false
 	check(same and Elo.event_penalties(file).is_empty(), "Undoing every penalty restores every rating exactly")
+
+
+func _test_season_scenarios() -> void:
+	_section("Season scenarios")
+	var pts := LeagueSettings.points()   # 50, 47, 44, 41...
+	# the test data folder starts from the default settings: 1 dropped round, from round 3 on
+	check(LeagueSettings.drops_for(6) == 1, "Default settings: one dropped round at the end of a 6-round season")
+	check(SeasonScenarios.final_score([50, 0, 47, 44], 6) == 141, "Final score drops the worst round (missed rounds count 0)")
+	# leader 4 x 50, rival 4 x 47, two rounds left of 6, worst round dropped:
+	# leader P3 next = 244, rival best = 241 -> settled; P4 (241) would only tie -> not
+	var mk := func(name: String, p: int) -> Dictionary:
+		var br := []
+		for i in 4:
+			br.append({"pts": p, "pos": 1 if p == 50 else 2})
+		return {"name": name, "points": 4 * p, "wins": 4 if p == 50 else 0, "by_round": br, "alive": true}
+	var rows := [mk.call("A", 50), mk.call("B", 47)]
+	var cl := SeasonScenarios.clinch_next(rows, 2, 6, pts)
+	check(int(cl["place"]) == 3, "Clinch maths: leader needs P3 or better next round", "got P%d" % int(cl["place"]))
+	var safe := [mk.call("A", 50), {"name": "B", "points": 40, "wins": 0, "by_round": [{"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}], "alive": true}]
+	check(int(SeasonScenarios.clinch_next(safe, 2, 6, pts)["place"]) == -1, "Clinch maths: a title already out of reach is settled whatever happens")
+	# on the league data: a championship of the latest season builds, chances add up to 1
+	var seasons := Elo.seasons()
+	if seasons.is_empty():
+		_skip("season scenarios on league data", "no league data")
+	else:
+		var season: String = seasons.back()
+		var champs := Reports.season_points(season)
+		if champs.is_empty():
+			_skip("season scenarios on league data", "no championship in %s" % season)
+		else:
+			var sc := SeasonScenarios.build(season, str(champs.keys()[0]))
+			await SeasonScenarios.title_chances(sc)
+			var sum := 0.0
+			for r in sc["rows"]:
+				sum += float(r["title"])
+			check(absf(sum - 1.0) < 1e-6 and int(sc["total"]) >= int(sc["done"]), "Season scenarios on %s: title chances add up (%d of %d rounds run)" % [season, sc["done"], sc["total"]])
 
 
 func _test_screens() -> void:

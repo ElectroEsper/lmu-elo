@@ -651,7 +651,7 @@ func season_points(for_season: String) -> Dictionary:
 			if not ch["results"].has(d):
 				ch["results"][d] = []
 			var p := int(c["pos"])
-			ch["results"][d].append({"pts": POINTS[p - 1] if p <= POINTS.size() else 0, "pos": p})
+			ch["results"][d].append({"pts": POINTS[p - 1] if p <= POINTS.size() else 0, "pos": p, "round": int(ch["rounds"]) - 1})
 	for k in champs:
 		var ch: Dictionary = champs[k]
 		var drivers := {}
@@ -675,8 +675,14 @@ func season_points(for_season: String) -> Dictionary:
 			if n_drop > 0:
 				for i in mini(n_drop, pts.size()):
 					dropped += pts[i]
+			# per round, in order: points and place (0 = did not race)
+			var by_round := []
+			for i in ch["rounds"]:
+				by_round.append({"pts": 0, "pos": 0})
+			for r in res:
+				by_round[int(r["round"])] = {"pts": r["pts"], "pos": r["pos"]}
 			drivers[d] = {"points": total - dropped, "dropped": dropped, "total": total,
-				"wins": wins, "pod": pod, "races": res.size()}
+				"wins": wins, "pod": pod, "races": res.size(), "by_round": by_round}
 		ch["drivers"] = drivers
 		ch.erase("results")
 	return champs

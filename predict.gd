@@ -601,6 +601,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	win_rain.fill(0)
 	var rain_sims := 0
 	var change_total := 0
+	var keep_orders := bool(plan.get("keep_orders", false))   # season scenarios: every run's finishing order
+	var orders := []
 	var tot := []
 	tot.resize(m)
 	var qs := []
@@ -685,6 +687,12 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 				t += 1.0e7 + rng.randf()   # retired: classified behind every finisher
 			tot[i] = t
 		idx.sort_custom(by_total)
+		if keep_orders:
+			var o := PackedInt32Array()
+			for k in m:
+				if tot[idx[k]] < 1.0e7:   # retired drivers score nothing
+					o.append(idx[k])
+			orders.append(o)
 		for k in m:
 			var who: int = idx[k]
 			epos[who] += k + 1
@@ -700,6 +708,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 			await get_tree().process_frame
 	var f := float(sims)
 	var out := {"laps": laps, "stops": stops, "pole": [], "front": [], "exp_grid": [], "win": [], "podium": [], "top10": [], "exp_pos": []}
+	if keep_orders:
+		out["orders"] = orders
 	if wx == "mixed":
 		# win chances split by whether the run saw rain: the "if it rains" swing
 		out["wx"] = {"rain_share": rain_sims / f, "changes": change_total / f, "win_rain": [], "win_dry": []}
@@ -838,6 +848,7 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 	rows.sort_custom(func(a, b): return a["exp_pos"] < b["exp_pos"])
 	var ret := expected_dnfs(inputs.map(func(d): return float(d.get("dnf", 0.0))) if float(params.get("dnf", 0.0)) > 0.0 else [])
 	return {"rows": rows, "track": track, "laps": res["laps"], "notes": notes, "dnf": ret, "weather": wx,
+		"orders": res.get("orders", []), "names": inputs.map(func(d): return d["name"]),
 		"rain": float(plan.get("rain", WX_DEFAULT_RAIN)) if wx == "mixed" else (1.0 if wx == "wet" else 0.0)}
 
 
