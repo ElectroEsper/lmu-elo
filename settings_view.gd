@@ -704,6 +704,18 @@ func _save() -> void:
 	if values["ranks"].is_empty():
 		notice.emit("Keep at least one rank.")
 		return
+	# a driver in two teams of the same championship would score for both: refuse, say who
+	var seen := {}
+	for tm in values.get("teams", []):
+		if tm["drivers"].size() == 2 and tm["drivers"][0] == tm["drivers"][1]:
+			notice.emit("Not saved: team %s has the same driver twice." % tm["name"])
+			return
+		for d in tm["drivers"]:
+			var k := "%d|%s|%s|%s" % [int(tm["season"]), tm["series"], tm["cls"], d]
+			if seen.has(k):
+				notice.emit("Not saved: %s is in two teams of the same championship (%s and %s)." % [Elo.pretty(str(d)), seen[k], tm["name"]])
+				return
+			seen[k] = tm["name"]
 	var err := LeagueSettings.save_all(values)
 	if err != OK:
 		notice.emit("Could not save the settings (error %d)." % err)

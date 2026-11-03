@@ -14,6 +14,7 @@ const TITLE_SIMS := 4000      # seasons simulated for the title chances
 const ROUND_SIMS := 2000      # runs of each remaining round (title sims draw from these)
 const CLOSE_GAP := 5          # points: a "close fight" for a place
 const MAX_WATCH := 3
+const UNKNOWN_TRACK := "(track to be confirmed)"
 
 
 static func build(season: String, key: String) -> Dictionary:
@@ -145,8 +146,11 @@ static func title_chances(sc: Dictionary) -> void:
 		plan["weather"] = str(rd.get("weather", "dry"))
 		plan["rain"] = float(rd.get("rain", 0.5))
 		plan["keep_orders"] = true
+		# a round whose track is not confirmed yet: general form only (a name no track has, so no
+		# track fit and no track-specific pace), never quietly the latest track
+		var course := str(rd.get("course", ""))
 		var res: Dictionary = await Predict.forecast(names, str(sc["cls"]), Predict.Mode.PREDICTED_QUALI,
-			str(rd.get("course", "")), 0, 0.0, str(sc["series"]), {}, plan)
+			course if course != "" else UNKNOWN_TRACK, 0, 0.0, str(sc["series"]), {}, plan)
 		round_orders.append(res["orders"])
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
@@ -229,8 +233,5 @@ static func watch_items(rows: Array, season: String, cls: String) -> Array:
 
 
 static func _series_code(series_name: String) -> String:
-	var names: Dictionary = LeagueSettings.get_value("series_names")
-	for c in names:
-		if str(names[c]) == series_name:
-			return str(c)
-	return series_name.to_lower()
+	var code := LeagueSettings.series_code(series_name)
+	return code if code != "" else series_name.to_lower()

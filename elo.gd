@@ -84,8 +84,7 @@ func series_of(ev: Dictionary) -> String:
 	if m == null:
 		return ""
 	var code := m.get_string(1).to_lower()
-	var names: Dictionary = LeagueSettings.get_value("series_names")
-	return str(names.get(code, code.to_upper()))
+	return LeagueSettings.series_name(code)
 
 
 # Seasons in the order they started
@@ -1182,15 +1181,6 @@ func archive_xml(draft: Dictionary, as_name := "") -> bool:
 func stored_xml_path(file_name: String) -> String:
 	var p := "%s/%s" % [XML_DIR, file_name]
 	return p if FileAccess.file_exists(p) else ""
-
-# Re-reads every archived XML and refreshes stats + track info of the saved events.
-# Nothing is rated again. Returns how many events were updated.
-func refresh_from_archive() -> int:
-	var n := 0
-	for f in DirAccess.get_files_at(XML_DIR):
-		if f.ends_with(".xml") and attach_stats(build_draft("%s/%s" % [XML_DIR, f])):
-			n += 1
-	return n
 
 # Track header fields from a result file: {"TrackVenue", "TrackCourse", "TrackLength", "RaceTime"}.
 func _read_track(path: String) -> Dictionary:

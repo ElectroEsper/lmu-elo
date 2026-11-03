@@ -760,7 +760,7 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 				notes.append("Check the lap time: dry league races here ran %d:%04.1f (%+.0f%% vs telemetry). Type a lap time to override." % [
 					int(league_lap / 60.0), fmod(league_lap, 60.0), 100.0 * (league_lap / tel_lap - 1.0)])
 	var ctx := series_context(series, cls)
-	var series_name := str(LeagueSettings.get_value("series_names").get(series, series.to_upper())) if series != "" else ""
+	var series_name := LeagueSettings.series_name(series)
 	if minutes > 0:
 		track["minutes"] = minutes
 	elif int(ctx["minutes"]) > 0:

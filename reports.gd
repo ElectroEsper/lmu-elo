@@ -651,7 +651,12 @@ func season_points(for_season: String) -> Dictionary:
 			if not ch["results"].has(d):
 				ch["results"][d] = []
 			var p := int(c["pos"])
-			ch["results"][d].append({"pts": POINTS[p - 1] if p <= POINTS.size() else 0, "pos": p, "round": int(ch["rounds"]) - 1})
+			var pts_p: int = POINTS[p - 1] if p <= POINTS.size() else 0
+			# disqualified after the race (Penalties page): classified last but scores nothing, like a
+			# no-start (zero-lap drivers and DQs in the result file never reach the results at all)
+			if str(ev.get("stats", {}).get("race", {}).get(c["cls"], {}).get(d, {}).get("status", "")) == "DQ":
+				pts_p = 0
+			ch["results"][d].append({"pts": pts_p, "pos": p, "round": int(ch["rounds"]) - 1})
 	for k in champs:
 		var ch: Dictionary = champs[k]
 		var drivers := {}
@@ -694,12 +699,11 @@ func season_points(for_season: String) -> Dictionary:
 func team_points(for_season: String) -> Dictionary:
 	var champs := season_points(for_season)
 	var season_n := int(for_season.trim_prefix("Season "))
-	var names: Dictionary = LeagueSettings.get_value("series_names")
 	var out := {}
 	for t in LeagueSettings.get_value("teams"):
 		if not (t is Dictionary) or int(t.get("season", 0)) != season_n:
 			continue
-		var key := ("%s %s" % [str(names.get(str(t.get("series", "")), str(t.get("series", "")).to_upper())), str(t.get("cls", ""))]).strip_edges()
+		var key := ("%s %s" % [LeagueSettings.series_name(str(t.get("series", ""))), str(t.get("cls", ""))]).strip_edges()
 		var ch: Dictionary = champs.get(key, {})
 		if not out.has(key):
 			out[key] = {"series": ch.get("series", ""), "cls": t.get("cls", ""), "rounds": int(ch.get("rounds", 0)), "teams": {}}

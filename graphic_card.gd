@@ -528,7 +528,7 @@ func _build_standings(body: VBoxContainer) -> void:
 func _build_ranks(body: VBoxContainer) -> void:
 	var tiers: Array = spec.get("tiers", [])
 	var grid := GridContainer.new()
-	grid.columns = tiers.size() if landscape else 2
+	grid.columns = maxi(tiers.size(), 1) if landscape else 2   # no ranked drivers yet: no tiers
 	grid.add_theme_constant_override("h_separation", int(24 * s))
 	grid.add_theme_constant_override("v_separation", int(24 * s))
 	grid.size_flags_vertical = Control.SIZE_EXPAND_FILL

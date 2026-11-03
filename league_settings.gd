@@ -175,6 +175,22 @@ static func _escape(s: String) -> String:
 	return out
 
 
+# The name shown for a series code ("mc" -> "Enduro"); an unknown code in capitals; "" for "".
+static func series_name(code: String) -> String:
+	if code == "":
+		return ""
+	return str(get_value("series_names").get(code, code.to_upper()))
+
+
+# The code of a series from its shown name ("Enduro" -> "mc"); "" when no series has that name.
+static func series_code(shown_name: String) -> String:
+	var names: Dictionary = get_value("series_names")
+	for c in names:
+		if str(names[c]) == shown_name:
+			return str(c)
+	return ""
+
+
 # Rounds in a season of a series (6 when not set).
 static func season_rounds(series: String) -> int:
 	return int(get_value("season_rounds").get(series, 6))

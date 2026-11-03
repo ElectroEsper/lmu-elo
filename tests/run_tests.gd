@@ -562,8 +562,8 @@ func _test_penalties() -> void:
 	var dq2: Dictionary = after_sp.get(Elo.resolve(order[0]), {})
 	check(not won.is_empty() and int(won2["wins"]) == int(won["wins"]) + 1 and int(won2["total"]) - int(won["total"]) == p_at.call(1) - p_at.call(2),
 		"Standings: the promoted driver gets the win and the winner's points", "%s -> %s" % [won, won2])
-	check(not dq.is_empty() and int(dq2["wins"]) == int(dq["wins"]) - 1 and int(dq["total"]) - int(dq2["total"]) == p_at.call(1) - p_at.call(order.size()),
-		"Standings: the disqualified driver loses the win and its points", "%s -> %s" % [dq, dq2])
+	check(not dq.is_empty() and int(dq2["wins"]) == int(dq["wins"]) - 1 and int(dq["total"]) - int(dq2["total"]) == p_at.call(1),
+		"Standings: the disqualified driver loses the win and scores nothing for that race", "%s -> %s" % [dq, dq2])
 	# a re-read of the race from the archived XML keeps the penalty (DQ status and order)
 	var xml := Elo.stored_xml_path(file)
 	if xml != "":
@@ -594,6 +594,10 @@ func _test_penalties() -> void:
 func _test_season_scenarios() -> void:
 	_section("Season scenarios")
 	var pts := LeagueSettings.points()   # 50, 47, 44, 41...
+	# series names: code in the file names <-> name shown (defaults: sc Sprint, mc Enduro)
+	check(LeagueSettings.series_name("mc") == "Enduro" and LeagueSettings.series_code("Enduro") == "mc"
+		and LeagueSettings.series_name("") == "" and LeagueSettings.series_code("Nope") == "" and LeagueSettings.series_name("xx") == "XX",
+		"Series name <-> code helpers")
 	# the test data folder starts from the default settings: 1 dropped round, from round 3 on
 	check(LeagueSettings.drops_for(6) == 1, "Default settings: one dropped round at the end of a 6-round season")
 	check(SeasonScenarios.final_score([50, 0, 47, 44], 6) == 141, "Final score drops the worst round (missed rounds count 0)")
@@ -621,6 +625,13 @@ func _test_season_scenarios() -> void:
 		else:
 			var sc := SeasonScenarios.build(season, str(champs.keys()[0]))
 			await SeasonScenarios.title_chances(sc)
+			# a round whose track is not confirmed: general form, no track fit, no error
+			var names3: Array = (sc["rows"] as Array).slice(0, 6).map(func(r): return r["name"])
+			var unk: Dictionary = await Predict.forecast(names3, str(sc["cls"]), Predict.Mode.PREDICTED_QUALI, SeasonScenarios.UNKNOWN_TRACK)
+			var fit0 := true
+			for r in unk["rows"]:
+				fit0 = fit0 and absf(float(r["track_gap"])) < 1e-9
+			check(unk["rows"].size() == names3.size() and fit0, "Forecast at a track not confirmed yet: general form only")
 			var sum := 0.0
 			for r in sc["rows"]:
 				sum += float(r["title"])
