@@ -625,6 +625,24 @@ func _test_season_scenarios() -> void:
 			for r in sc["rows"]:
 				sum += float(r["title"])
 			check(absf(sum - 1.0) < 1e-6 and int(sc["total"]) >= int(sc["done"]), "Season scenarios on %s: title chances add up (%d of %d rounds run)" % [season, sc["done"], sc["total"]])
+			# team championship: a team scores its two drivers' points (each after their own drops)
+			var key := str(champs.keys()[0])
+			var ch: Dictionary = champs[key]
+			var ds: Array = ch["drivers"].keys()
+			if ds.size() >= 2:
+				var before := LeagueSettings.all()
+				var vals := before.duplicate(true)
+				var code := ""
+				var names: Dictionary = LeagueSettings.get_value("series_names")
+				for c in names:
+					if str(names[c]) == str(ch["series"]):
+						code = str(c)
+				vals["teams"] = [{"season": int(season.trim_prefix("Season ")), "series": code, "cls": ch["cls"], "name": "Test Team", "drivers": [ds[0], ds[1]]}]
+				LeagueSettings.save_all(vals)
+				var tp: Dictionary = Reports.team_points(season).get(key, {}).get("teams", {}).get("Test Team", {})
+				var want := int(ch["drivers"][ds[0]]["points"]) + int(ch["drivers"][ds[1]]["points"])
+				check(not tp.is_empty() and int(tp["points"]) == want, "Team points: the sum of both drivers' points after their drops (%d)" % want)
+				LeagueSettings.save_all(before)
 
 
 func _test_screens() -> void:

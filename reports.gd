@@ -688,6 +688,35 @@ func season_points(for_season: String) -> Dictionary:
 	return champs
 
 
+# Team championships of a season, from Settings > Teams: {"<series> <class>": {"series", "cls",
+# "rounds", "teams": {team: {"points", "dropped", "wins", "pod", "drivers": [{"name", "points"}]}}}}.
+# A team scores the sum of its drivers' championship points, each after their own dropped rounds.
+func team_points(for_season: String) -> Dictionary:
+	var champs := season_points(for_season)
+	var season_n := int(for_season.trim_prefix("Season "))
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	var out := {}
+	for t in LeagueSettings.get_value("teams"):
+		if not (t is Dictionary) or int(t.get("season", 0)) != season_n:
+			continue
+		var key := ("%s %s" % [str(names.get(str(t.get("series", "")), str(t.get("series", "")).to_upper())), str(t.get("cls", ""))]).strip_edges()
+		var ch: Dictionary = champs.get(key, {})
+		if not out.has(key):
+			out[key] = {"series": ch.get("series", ""), "cls": t.get("cls", ""), "rounds": int(ch.get("rounds", 0)), "teams": {}}
+		var e := {"points": 0, "dropped": 0, "wins": 0, "pod": 0, "drivers": []}
+		for d in t.get("drivers", []):
+			if str(d) == "":
+				continue
+			var de: Dictionary = ch.get("drivers", {}).get(str(d), {})
+			e["points"] += int(de.get("points", 0))
+			e["dropped"] += int(de.get("dropped", 0))
+			e["wins"] += int(de.get("wins", 0))
+			e["pod"] += int(de.get("pod", 0))
+			e["drivers"].append({"name": str(d), "points": int(de.get("points", 0))})
+		out[key]["teams"][str(t.get("name", "Team"))] = e
+	return out
+
+
 # All seasons together: plain sum, no dropped rounds (those belong to a single season).
 func _standings_all_time() -> Array:
 	var POINTS := LeagueSettings.points()

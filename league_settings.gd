@@ -49,6 +49,8 @@ const DEFAULTS := {
 	"season_rounds": {"sc": 6, "mc": 6},
 	# rounds still to come: {"series", "season", "round", "course", "weather": dry/mixed/wet, "rain": 0-1}
 	"calendar": [],
+	# team championships: {"season", "series" (code), "cls", "name", "drivers": [two stored names]}
+	"teams": [],
 	"race_rules": [
 		{"series": "sc", "from": 1, "fuel": 1.0, "tyre": 1.0, "pits": false, "min_stops": 0},
 		{"series": "mc", "from": 1, "fuel": 2.0, "tyre": 2.0, "pits": true, "min_stops": 0},

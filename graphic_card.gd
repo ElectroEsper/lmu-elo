@@ -475,7 +475,7 @@ func _build_standings(body: VBoxContainer) -> void:
 	var h := HBoxContainer.new()
 	var spacer := _label("", 22, MUTED, "bold", 0, 60)
 	h.add_child(spacer)
-	var dl := _label("DRIVER", 24, MUTED, "bold", 2)
+	var dl := _label("TEAM" if bool(spec.get("team_mode", false)) else "DRIVER", 24, MUTED, "bold", 2)
 	dl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	h.add_child(dl)
 	h.add_child(_label("GAP", 22, MUTED, "bold", 2, 70, HORIZONTAL_ALIGNMENT_RIGHT))
@@ -498,8 +498,19 @@ func _build_standings(body: VBoxContainer) -> void:
 		row.add_theme_constant_override("separation", int(14 * s))
 		panel.add_child(row)
 		row.add_child(_label(str(i + 1), 34, tint if i < 3 else MUTED, "title", 0, 40))
-		var who := _fit(_label(str(r["name"]), 34, TEXT, "bold"))
-		row.add_child(who)
+		if r.has("members"):   # team standings: the team, then its drivers in small type
+			# landscape: drivers beside the team name; portrait (narrow): on a line below it
+			var cell: BoxContainer = HBoxContainer.new() if landscape else VBoxContainer.new()
+			cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			cell.add_theme_constant_override("separation", int((16 if landscape else -2) * s))
+			cell.add_child(_fit(_label(str(r["name"]), 34, TEXT, "bold")) if not landscape else _label(str(r["name"]), 34, TEXT, "bold"))
+			var mem := _fit(_label(str(r["members"] if landscape else r.get("members_short", r["members"])), 22 if not landscape else 24, MUTED, "regular"))
+			mem.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			cell.add_child(mem)
+			row.add_child(cell)
+		else:
+			var who := _fit(_label(str(r["name"]), 34, TEXT, "bold"))
+			row.add_child(who)
 		row.add_child(_label("-%d" % roundi(leader - float(r["points"])) if i > 0 else "", 24, MUTED, "regular", 0, 70, HORIZONTAL_ALIGNMENT_RIGHT))
 		row.add_child(_label(str(int(r["wins"])), 30, TEXT, "bold", 0, 84, HORIZONTAL_ALIGNMENT_RIGHT))
 		row.add_child(_label(str(int(r["pod"])), 30, TEXT, "bold", 0, 124, HORIZONTAL_ALIGNMENT_RIGHT))

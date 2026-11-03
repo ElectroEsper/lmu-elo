@@ -20,6 +20,7 @@ var drop_after_spin := SpinBox.new()
 var class_rows := GridContainer.new()   # game class name -> name shown on screen
 var rule_rows := VBoxContainer.new()     # race rules: one row per series and starting season
 var series_rows := VBoxContainer.new()   # series: code in the file name -> name shown
+var team_rows := VBoxContainer.new()     # team championships: one row per team
 var rounds_box := HBoxContainer.new()    # rounds per season, one spin per series
 var cal_rows := VBoxContainer.new()      # season calendar: rounds still to come
 var brand_name := LineEdit.new()
@@ -110,6 +111,28 @@ func _ready() -> void:
 	var add_series := _btn("Add series", func(): _add_series_row("", ""))
 	add_series.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	se.add_child(add_series)
+
+	# teams
+	var tc := _card("TEAMS")
+	tc.add_child(_note("Team championships: one per series and class. A team scores the sum of its two drivers' championship points, each after their own dropped rounds. Line-ups are fixed for the season. The driver lists show who raced in that season, series and class."))
+	var thead := HBoxContainer.new()
+	for h in [["Season", 80], ["Series", 150], ["Class", 110], ["Team name", 220], ["Driver 1", 210], ["Driver 2", 210]]:
+		var l := _label(h[0])
+		l.theme_type_variation = "TableHeader"
+		l.custom_minimum_size = Vector2(h[1], 0)
+		thead.add_child(l)
+	tc.add_child(thead)
+	tc.add_child(team_rows)
+	var add_team := _btn("Add team", func():
+		var last := {"season": _latest_season_n(), "series": "mc", "cls": "", "name": "", "drivers": []}
+		if team_rows.get_child_count() > 0:
+			var prev := _team_values(team_rows.get_child(team_rows.get_child_count() - 1))
+			last["season"] = prev["season"]
+			last["series"] = prev["series"]
+			last["cls"] = prev["cls"]
+		_add_team_row(last))
+	add_team.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	tc.add_child(add_team)
 
 	# race rules
 	var rr := _card("RACE RULES")
@@ -267,6 +290,12 @@ func refresh() -> void:
 	brand_primary.color = Color.from_string(str(LeagueSettings.get_value("brand_primary")), Color("512f89"))
 	brand_secondary.color = Color.from_string(str(LeagueSettings.get_value("brand_secondary")), Color.WHITE)
 	title_font.text = str(LeagueSettings.get_value("brand_title_font"))
+	for c in team_rows.get_children():
+		team_rows.remove_child(c)
+		c.queue_free()
+	for t in LeagueSettings.get_value("teams"):
+		if t is Dictionary:
+			_add_team_row(t)
 	for c in series_rows.get_children():
 		series_rows.remove_child(c)
 		c.queue_free()
@@ -354,6 +383,122 @@ func _add_rule_row(r: Dictionary) -> void:
 	remove.theme_type_variation = "SmallButton"
 	row.add_child(remove)
 	rule_rows.add_child(row)
+
+
+# ---------- teams ----------
+func _latest_season_n() -> int:
+	var seasons := Elo.seasons()
+	for i in range(seasons.size() - 1, -1, -1):
+		if str(seasons[i]).begins_with("Season "):
+			return int(str(seasons[i]).trim_prefix("Season "))
+	return 1
+
+
+# Classes that raced in any event, sorted.
+func _race_classes() -> Array:
+	var seen := {}
+	for ev in Elo.history:
+		for c in ev["changes"]:
+			if c["sess"] == "race":
+				seen[str(c["cls"])] = true
+	var out := seen.keys()
+	out.sort()
+	return out
+
+
+# Drivers who raced the championship (season, series code, class), by name.
+func _champ_drivers(season: int, code: String, cls: String) -> Array:
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	var key := ("%s %s" % [str(names.get(code, code.to_upper())), cls]).strip_edges()
+	var ch: Dictionary = Reports.season_points("Season %d" % season).get(key, {})
+	var out: Array = ch.get("drivers", {}).keys()
+	out.sort_custom(func(a, b): return Elo.pretty(str(a)).to_lower() < Elo.pretty(str(b)).to_lower())
+	return out
+
+
+func _add_team_row(t: Dictionary) -> void:
+	var row := HBoxContainer.new()
+	var season := SpinBox.new()
+	season.min_value = 1
+	season.max_value = 99
+	season.value = int(t.get("season", 1))
+	season.custom_minimum_size = Vector2(80, 0)
+	row.add_child(season)
+	var series := OptionButton.new()
+	series.custom_minimum_size = Vector2(150, 0)
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	for c in names:
+		series.add_item(str(names[c]))
+		series.set_item_metadata(series.item_count - 1, str(c))
+		if str(c) == str(t.get("series", "")):
+			series.select(series.item_count - 1)
+	row.add_child(series)
+	var cls := OptionButton.new()
+	cls.custom_minimum_size = Vector2(110, 0)
+	for c in _race_classes():
+		cls.add_item(LeagueSettings.label(str(c)))
+		cls.set_item_metadata(cls.item_count - 1, str(c))
+		if str(c) == str(t.get("cls", "")):
+			cls.select(cls.item_count - 1)
+	row.add_child(cls)
+	var name_edit := LineEdit.new()
+	name_edit.text = str(t.get("name", ""))
+	name_edit.placeholder_text = "Team name"
+	name_edit.custom_minimum_size = Vector2(220, 0)
+	row.add_child(name_edit)
+	var picks := []
+	var drivers: Array = t.get("drivers", [])
+	for k in 2:
+		var ob := OptionButton.new()
+		ob.custom_minimum_size = Vector2(210, 0)
+		ob.clip_text = true
+		ob.set_meta("keep", str(drivers[k]) if k < drivers.size() else "")
+		row.add_child(ob)
+		picks.append(ob)
+	var refill := func():
+		var code := str(series.get_item_metadata(maxi(series.selected, 0))) if series.item_count > 0 else ""
+		var cl := str(cls.get_item_metadata(maxi(cls.selected, 0))) if cls.item_count > 0 else ""
+		var list := _champ_drivers(int(season.value), code, cl)
+		for ob in picks:
+			var keep := str(ob.get_meta("keep"))
+			if ob.selected >= 0:
+				keep = str(ob.get_item_metadata(ob.selected))
+			ob.clear()
+			ob.add_item("(choose)")
+			ob.set_item_metadata(0, "")
+			var opts := list.duplicate()
+			if keep != "" and not opts.has(keep):
+				opts.append(keep)   # a stored driver not in that championship: keep them visible
+			for d in opts:
+				ob.add_item(Elo.pretty(str(d)) + ("" if list.has(d) else "  (not in this championship)"))
+				ob.set_item_metadata(ob.item_count - 1, str(d))
+				if str(d) == keep:
+					ob.select(ob.item_count - 1)
+			if ob.selected < 0:
+				ob.select(0)
+	season.value_changed.connect(func(_v): refill.call())
+	series.item_selected.connect(func(_i): refill.call())
+	cls.item_selected.connect(func(_i): refill.call())
+	refill.call()
+	var remove := _btn("Remove", func(): row.queue_free())
+	remove.theme_type_variation = "SmallButton"
+	row.add_child(remove)
+	team_rows.add_child(row)
+
+
+func _team_values(row: Node) -> Dictionary:
+	var sp := row.get_child(1) as OptionButton
+	var cl := row.get_child(2) as OptionButton
+	var drivers := []
+	for k in [4, 5]:
+		var ob := row.get_child(k) as OptionButton
+		var d := str(ob.get_item_metadata(ob.selected)) if ob.selected >= 0 else ""
+		if d != "":
+			drivers.append(d)
+	return {"season": int((row.get_child(0) as SpinBox).value),
+		"series": str(sp.get_item_metadata(sp.selected)) if sp.selected >= 0 else "",
+		"cls": str(cl.get_item_metadata(cl.selected)) if cl.selected >= 0 else "",
+		"name": (row.get_child(3) as LineEdit).text.strip_edges(), "drivers": drivers}
 
 
 func _add_series_row(code: String, series_name: String) -> void:
@@ -533,6 +678,14 @@ func _collect() -> Dictionary:
 		var cp := srow.get_child(1) as ColorPickerButton
 		scols[str(cp.get_meta("series"))] = "#" + cp.color.to_html(false)
 	values["series_colors"] = scols
+	var teams := []
+	for row in team_rows.get_children():
+		if row.is_queued_for_deletion():
+			continue
+		var tv := _team_values(row)
+		if str(tv["name"]) != "":
+			teams.append(tv)
+	values["teams"] = teams
 	var snames := {}
 	for row in series_rows.get_children():
 		if row.is_queued_for_deletion():

@@ -8,7 +8,7 @@ extends HBoxContainer
 
 signal notice(text: String)
 
-const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
+const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["teams", "Team standings"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
 	["track", "Track card"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
@@ -254,7 +254,7 @@ func _fill_sources() -> void:
 				source_pick.add_item("Saved %s: %s, %s" % [Time.get_datetime_string_from_unix_time(int(g[0]["made_at"])).replace("T", " ").left(16),
 					", ".join(classes), str(g[0].get("course", ""))])
 				source_pick.set_item_metadata(source_pick.item_count - 1, i)
-		"standings", "season":
+		"standings", "season", "teams":
 			source_label.text = "Season"
 			var seasons := Elo.seasons()
 			for i in range(seasons.size() - 1, -1, -1):
@@ -313,13 +313,14 @@ func _fill_champs() -> void:
 		_default_minutes()
 		_fill_watch()
 		return
-	if _kind() != "standings" and _kind() != "season":
+	if _kind() != "standings" and _kind() != "season" and _kind() != "teams":
 		return
 	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
 	champ_pick.clear()
 	if source_pick.selected < 0:
 		return
-	var champs := Reports.season_points(source_pick.get_item_text(source_pick.selected))
+	var src := source_pick.get_item_text(source_pick.selected)
+	var champs := Reports.team_points(src) if _kind() == "teams" else Reports.season_points(src)
 	var keys := champs.keys()
 	keys.sort()
 	for k in keys:
@@ -615,11 +616,64 @@ func _render() -> void:
 	sp["tint"] = tint_slider.value
 	card.set_spec(_pretty_spec(sp))
 	save_btn.disabled = bool(sp.get("empty", false))
-	var pages := int(sp.get("pages", 1)) if _kind() == "standings" else 1
+	var pages := int(sp.get("pages", 1)) if _kind() == "standings" or _kind() == "teams" else 1
 	page_label.visible = pages > 1
 	page_pick.visible = pages > 1
 	batch_pages.visible = pages > 1
 	save_btn.text = "Save PNG" if pages <= 1 or not batch_pages.button_pressed else "Save PNG (%d pages)" % pages
+
+
+# Stream size: the whole field over pages of 10 (the rest on the last page); sets "per_page",
+# "page", "pages" and the "page x of y" mark (batch save only).
+func _page_spec(sp: Dictionary, n: int, note: String) -> void:
+	var size_px: Vector2i = FORMATS[maxi(format_pick.selected, 0)][1]
+	var pages := 1
+	if size_px.x > size_px.y:
+		pages = maxi(1, ceili(n / float(STREAM_PER_PAGE)))
+		_sync_pages(pages, STREAM_PER_PAGE, n)
+		var page := clampi(page_pick.selected, 0, pages - 1)
+		sp["per_page"] = STREAM_PER_PAGE
+		sp["page"] = page
+		if pages > 1 and batch_pages.button_pressed:
+			sp["rounds_note"] = note + "  ·  page %d of %d" % [page + 1, pages]
+	sp["pages"] = pages
+
+
+# Team standings: teams by points (sum of both drivers after their own drops), then wins, podiums.
+func _teams_spec() -> Dictionary:
+	if source_pick.selected < 0 or champ_pick.selected < 0:
+		return {"kind": "standings", "title": "Team standings", "subtitle": "No teams yet: add them in Settings > Teams.", "rows": [], "empty": true}
+	var season := source_pick.get_item_text(source_pick.selected)
+	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
+	var ch: Dictionary = Reports.team_points(season).get(key, {})
+	var rows := []
+	for tn in ch.get("teams", {}):
+		var e: Dictionary = ch["teams"][tn]
+		var members := PackedStringArray((e["drivers"] as Array).map(func(d): return Elo.pretty(str(d["name"]))))
+		var short := PackedStringArray((e["drivers"] as Array).map(func(d):   # surnames, for the narrow sizes
+			var parts := Elo.pretty(str(d["name"])).split(" ", false)
+			return parts[parts.size() - 1] if parts.size() > 0 else str(d["name"])))
+		rows.append({"name": str(tn), "members": " · ".join(members), "members_short": " · ".join(short), "points": e["points"], "wins": e["wins"], "pod": e["pod"], "dropped": e["dropped"]})
+	rows.sort_custom(func(a, b):
+		if a["points"] != b["points"]:
+			return a["points"] > b["points"]
+		if a["wins"] != b["wins"]:
+			return a["wins"] > b["wins"]
+		return a["pod"] > b["pod"])
+	var rounds := int(ch.get("rounds", 0))
+	var drops := LeagueSettings.drops_for(rounds)
+	var note := "After %d round%s · both drivers' points, each after their dropped round%s" % [rounds, "" if rounds == 1 else "s", "" if drops <= 1 else "s"] if drops > 0 else "After %d round%s · both drivers' points" % [rounds, "" if rounds == 1 else "s"]
+	var sp := {"kind": "standings", "team_mode": true, "title": "%s team standings" % LeagueSettings.label(key), "subtitle": season,
+		"rows": rows, "rounds_note": note, "empty": rows.is_empty(), "show_dropped": drops > 0}
+	_page_spec(sp, rows.size(), note)
+	var code := ""
+	var names: Dictionary = LeagueSettings.get_value("series_names")
+	for c in names:
+		if str(ch.get("series", "")) == str(names[c]):
+			code = str(c)
+	if code != "":
+		sp["accent"] = LeagueSettings.series_color(code)
+	return sp
 
 
 # Page picker for paged standings: one entry per page, keeping the choice.
@@ -665,6 +719,8 @@ func _spec() -> Dictionary:
 			return _standings_spec()
 		"season":
 			return _season_spec()
+		"teams":
+			return _teams_spec()
 		"ranks":
 			return _ranks_spec()
 		"track":
@@ -863,20 +919,7 @@ func _standings_spec() -> Dictionary:
 		note += " · worst %d result%s dropped" % [drops, "" if drops == 1 else "s"]
 	var sp := {"kind": "standings", "title": "%s standings" % LeagueSettings.label(key), "subtitle": season, "rows": rows,
 		"rounds_note": note, "empty": rows.is_empty(), "show_dropped": drops > 0}
-	# stream size: the whole field over pages of 10
-	var size_px: Vector2i = FORMATS[maxi(format_pick.selected, 0)][1]
-	var pages := 1
-	if size_px.x > size_px.y:
-		# 10 a page, the rest on the last page
-		pages = maxi(1, ceili(rows.size() / float(STREAM_PER_PAGE)))
-		var per := STREAM_PER_PAGE
-		_sync_pages(pages, per, rows.size())
-		var page := clampi(page_pick.selected, 0, pages - 1)
-		sp["per_page"] = per
-		sp["page"] = page
-		if pages > 1 and batch_pages.button_pressed:
-			sp["rounds_note"] = note + "  ·  page %d of %d" % [page + 1, pages]
-	sp["pages"] = pages
+	_page_spec(sp, rows.size(), note)
 	var code := ""
 	var names: Dictionary = LeagueSettings.get_value("series_names")
 	for c in names:   # "Sprint GT3" -> "sc"
@@ -963,8 +1006,9 @@ func _pretty_spec(sp: Dictionary) -> Dictionary:
 				for r in c["rows"]:
 					r["name"] = Elo.pretty(str(r["name"]))
 		"standings", "season":
-			for r in out.get("rows", []):
-				r["name"] = Elo.pretty(str(r["name"]))
+			if not bool(out.get("team_mode", false)):   # team names are shown as typed
+				for r in out.get("rows", []):
+					r["name"] = Elo.pretty(str(r["name"]))
 		"ranks":
 			for t in out.get("tiers", []):
 				t["drivers"] = t["drivers"].map(func(n): return Elo.pretty(str(n)))
@@ -1133,7 +1177,7 @@ func _out_dir() -> String:
 
 func _save() -> void:
 	_render()
-	var pages := int(card.spec.get("pages", 1)) if _kind() == "standings" and batch_pages.button_pressed else 1
+	var pages := int(card.spec.get("pages", 1)) if (_kind() == "standings" or _kind() == "teams") and batch_pages.button_pressed else 1
 	var keep := page_pick.selected
 	var dir := _out_dir()
 	DirAccess.make_dir_recursive_absolute(dir)
