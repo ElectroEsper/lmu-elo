@@ -49,15 +49,15 @@ func rebuild() -> void:
 	revision += 1
 	days.clear()
 	hist.clear()
-	if not DirAccess.dir_exists_absolute("user://events"):
+	if not DirAccess.dir_exists_absolute(AppPaths.file("events")):
 		return   # nothing imported yet (first start)
 	var by_date := {}
 	# events in the order they happened, so a quali is met before its race
 	var drafts := []
-	for f in DirAccess.get_files_at("user://events"):
+	for f in DirAccess.get_files_at(AppPaths.file("events")):
 		if not f.ends_with(".json"):
 			continue
-		var loaded = JSON.parse_string(FileAccess.get_file_as_string("user://events/" + f))
+		var loaded = JSON.parse_string(FileAccess.get_file_as_string(AppPaths.file("events/" + f)))
 		if loaded is Dictionary and loaded.has("fp") and loaded.has("file"):
 			drafts.append(loaded)
 	drafts.sort_custom(func(a, b):
@@ -376,6 +376,23 @@ func courses() -> Array:
 		seen[day["course"]] = day["date"]
 	var out := seen.keys()
 	out.sort_custom(func(a, b): return seen[a] > seen[b])   # most recent first
+	return out
+
+
+# For alphabetical lists of tracks: lower case, accents and leading "The" ignored, so
+# "Autódromo José Carlos Pace" sorts with the A's next to "Autodromo Nazionale Monza".
+static func sort_key(s: String) -> String:
+	var t := s.strip_edges().to_lower()
+	for pair in [["á", "a"], ["à", "a"], ["â", "a"], ["ä", "a"], ["ã", "a"], ["é", "e"], ["è", "e"], ["ê", "e"], ["ë", "e"],
+			["í", "i"], ["î", "i"], ["ï", "i"], ["ó", "o"], ["ô", "o"], ["ö", "o"], ["õ", "o"], ["ú", "u"], ["ü", "u"], ["ç", "c"], ["ñ", "n"]]:
+		t = t.replace(pair[0], pair[1])
+	return t.trim_prefix("the ")
+
+
+# Tracks in alphabetical order, for drop-down menus.
+func courses_sorted() -> Array:
+	var out := courses().duplicate()
+	out.sort_custom(func(a, b): return sort_key(a) < sort_key(b))
 	return out
 
 

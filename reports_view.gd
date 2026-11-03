@@ -183,7 +183,7 @@ func _export() -> void:
 	var report_name: String = REPORTS[report_picker.selected]["name"]
 	if Reports.season != "":
 		report_name += " " + Reports.season
-	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	var dir := AppPaths.exports()
 	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
 	var path := "%s/lmu_%s_%s.xlsx" % [dir, report_name.to_lower().replace(" ", "_"), stamp]
 	var err := Elo.write_xlsx(path, sheets)

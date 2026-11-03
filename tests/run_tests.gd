@@ -27,6 +27,7 @@ func _ready() -> void:
 	_test_settings()
 	_test_traffic_formula()
 	_test_unreadable()
+	_test_data_folder()
 	var files := _league_files()
 	if files.is_empty():
 		_skip("league data", "put your result XMLs in tests/data/xml to run the import, duplicate, naming, training and prediction checks")
@@ -44,6 +45,7 @@ func _ready() -> void:
 		_test_penalties()
 		await _test_season_scenarios()
 		await _test_screens()
+		_test_backup_restore()
 	# a script error the run survived is still a bug in the tool
 	var errs := _script_errors()
 	if not errs.is_empty():
@@ -153,6 +155,116 @@ func _test_settings() -> void:
 	check(Elo.league_name(6, "SC", 3, true) == "s6-sc3-r.xml" and Elo.league_name(2, "mc", 1, false) == "s2-mc1.xml", "League file names")
 	check(Elo.season_number("s5-mc2-r.xml") == 5 and Elo.series_code("s5-mc2-r.xml") == "mc", "Season and series from the file name")
 	check(Elo.season_number("2025_03_12_21_04_56-55R1.xml") == 0 and not Elo.is_league_name("2025_03_12_21_04_56-55R1.xml"), "Game default names have no season")
+
+
+func _write(path: String, text: String) -> void:
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(text)
+	f.close()
+
+
+func _test_data_folder() -> void:
+	_section("Data folder")
+	check(AppPaths.in_user_dir() and AppPaths.data() == "user://", "Tests keep their data in the test folder", AppPaths.data())
+	check(AppPaths.file("events/x.json") == "user://events/x.json", "Data paths", AppPaths.file("events/x.json"))
+	# the first-start copy: everything but Godot's own folders, any depth, .tmp files left out
+	var old := tmp.path_join("old_appdata")
+	var new := tmp.path_join("Grid Ledger/Data")
+	_write(old.path_join("elo.json"), "{}")
+	_write(old.path_join("events/a.json"), "{\"a\": 1}")
+	_write(old.path_join("xml/s6-mc2-r.xml"), "<x/>")
+	_write(old.path_join("tracks/deep/t.json"), "{}")
+	_write(old.path_join("logs/godot.log"), "log")
+	_write(old.path_join("events/b.json.tmp"), "half")
+	var err := AppPaths.copy_tree(old, new, AppPaths.GODOT_DIRS, ["elo.json"])
+	check(err == OK and FileAccess.file_exists(new.path_join("events/a.json")) and FileAccess.file_exists(new.path_join("xml/s6-mc2-r.xml"))
+		and FileAccess.file_exists(new.path_join("tracks/deep/t.json")), "First start copies the data over", str(err))
+	check(not DirAccess.dir_exists_absolute(new.path_join("logs")) and not FileAccess.file_exists(new.path_join("events/b.json.tmp")),
+		"Godot's logs and half-written files are not copied")
+	check(not FileAccess.file_exists(new.path_join("elo.json")), "Ratings file copied last (a stopped copy is redone next start)")
+	check(FileAccess.file_exists(old.path_join("events/a.json")), "The old copy is left in place")
+	# a backup zip made by hand, with everything one folder down (Windows "Extract all", zipped again)
+	var hand := tmp.path_join("hand.zip")
+	var zp := ZIPPacker.new()
+	zp.open(hand)
+	for n in ["My backup/elo.json", "My backup/events/a.json", "My backup/events/b.json", "My backup/logs/x.log", "My backup/../evil.txt"]:
+		zp.start_file(n)
+		zp.write_file("{}".to_utf8_buffer())
+		zp.close_file()
+	zp.close()
+	var info := AppPaths.inspect_backup(hand)
+	check(info["ok"] and info["prefix"] == "My backup/" and info["events"] == 2 and info["files"] == 3,
+		"Backup inside a folder of the zip is found", str(info))
+	_write(tmp.path_join("not_a_backup/readme.txt"), "hi")
+	zp = ZIPPacker.new()
+	zp.open(tmp.path_join("other.zip"))
+	zp.start_file("readme.txt")
+	zp.write_file("hi".to_utf8_buffer())
+	zp.close_file()
+	zp.close()
+	check(not AppPaths.inspect_backup(tmp.path_join("other.zip"))["ok"], "Any other zip is refused")
+	# image folders: s6_r5, and folders from earlier versions renamed
+	check(AppPaths.round_folder("Season 6", 5) == "s6_r5" and AppPaths.round_folder("Season 2", 7) == "s2_r7", "Round folder names")
+	var gfx := tmp.path_join("gfx")
+	DirAccess.make_dir_recursive_absolute(gfx.path_join("Season6_R4/Enduro"))
+	DirAccess.make_dir_recursive_absolute(gfx.path_join("Season5_R6"))
+	DirAccess.make_dir_recursive_absolute(gfx.path_join("s5_r6"))
+	AppPaths.rename_round_folders(gfx)
+	check(DirAccess.dir_exists_absolute(gfx.path_join("s6_r4/Enduro")) and not DirAccess.dir_exists_absolute(gfx.path_join("Season6_R4")),
+		"Old round folders renamed")
+	check(DirAccess.dir_exists_absolute(gfx.path_join("Season5_R6")), "An old folder is left alone when the new name is taken")
+
+
+# Backs the test data up, changes it, restores: the data comes back exactly, the changed data
+# is set aside, never deleted.
+func _test_backup_restore() -> void:
+	_section("Backup and restore")
+	var before := _data_fingerprint()
+	var zip := tmp.path_join("backup.zip")
+	var r := AppPaths.write_backup(zip)
+	check(r[0] == OK and r[1] > 0, "Backup written", str(r))
+	var info := AppPaths.inspect_backup(zip)
+	check(info["ok"] and info["prefix"] == "" and info["has_ratings"] and info["events"] > 0, "Backup recognised", str(info))
+	var zr := ZIPReader.new()
+	zr.open(zip)
+	var names := zr.get_files()
+	zr.close()
+	check(not Array(names).any(func(n): return n.begins_with("test_tmp/") or n.begins_with("logs/") or n.begins_with("Backups/")),
+		"Only the data goes in the backup")
+	# change the data, then restore
+	_write(AppPaths.file("elo.json"), "{\"changed\": true}")
+	_write(AppPaths.file("events/zz_extra.json"), "{}")
+	var safety := AppPaths.backups().path_join("Before restore test")
+	var res := AppPaths.restore_backup(zip, safety)
+	check(res["ok"] and res["files"] == r[1], "Backup restored", str(res))
+	check(_data_fingerprint() == before, "Restored data is identical to the backup")
+	check(FileAccess.get_file_as_string(safety.path_join("elo.json")).contains("changed")
+		and FileAccess.file_exists(safety.path_join("events/zz_extra.json")), "The replaced data is kept in Backups")
+	check(not FileAccess.file_exists(AppPaths.file("events/zz_extra.json")), "Nothing from the replaced data is left behind")
+	# a zip that cannot be read: nothing changes
+	_write(tmp.path_join("broken.zip"), "not a zip")
+	var bad := AppPaths.restore_backup(tmp.path_join("broken.zip"), AppPaths.backups().path_join("Before restore bad"))
+	check(not bad["ok"] and _data_fingerprint() == before, "A broken zip changes nothing")
+
+
+# every data file (path and content hash), outside Godot's and the test's own folders
+func _data_fingerprint() -> Dictionary:
+	var out := {}
+	var root := ProjectSettings.globalize_path(AppPaths.data())
+	var todo := []
+	for e in AppPaths._data_entries():
+		if DirAccess.dir_exists_absolute(root.path_join(e)):
+			todo.append(e)
+		else:
+			out[e] = FileAccess.get_md5(root.path_join(e))
+	while not todo.is_empty():
+		var rel: String = todo.pop_back()
+		for d in DirAccess.get_directories_at(root.path_join(rel)):
+			todo.append(rel.path_join(d))
+		for f in DirAccess.get_files_at(root.path_join(rel)):
+			out[rel.path_join(f)] = FileAccess.get_md5(root.path_join(rel).path_join(f))
+	return out
 
 
 func _test_traffic_formula() -> void:
@@ -350,8 +462,8 @@ func _test_predict() -> void:
 	res = await Predict.forecast(names, cls, Predict.Mode.ACTUAL_GRID, "", 60, 0.0, "", {}, plan)
 	# race lap: a typed lap time first, else the telemetry lap x class factor, else the league results
 	var tl_course := Profiles.latest_course()
-	var tl_file := TrackStore.DIR + "/test_telemetry.json"
-	DirAccess.make_dir_recursive_absolute(TrackStore.DIR)
+	var tl_file := TrackStore.dir() + "/test_telemetry.json"
+	DirAccess.make_dir_recursive_absolute(TrackStore.dir())
 	var fa := FileAccess.open(tl_file, FileAccess.WRITE)
 	fa.store_string(JSON.stringify({"course": tl_course, "class": cls, "map": [], "lap": {"time_s": 100.0}}))
 	fa.close()
@@ -654,6 +766,41 @@ func _test_season_scenarios() -> void:
 				var want := int(ch["drivers"][ds[0]]["points"]) + int(ch["drivers"][ds[1]]["points"])
 				check(not tp.is_empty() and int(tp["points"]) == want, "Team points: the sum of both drivers' points after their drops (%d)" % want)
 				LeagueSettings.save_all(before)
+	# race recap of the latest race: a block per class, podium of 3, a surprise only when deserved
+	var last_race := ""
+	for i in range(Elo.history.size() - 1, -1, -1):
+		for c in Elo.history[i]["changes"]:
+			if c["sess"] == "race":
+				last_race = str(Elo.history[i]["file"])
+				break
+		if last_race != "":
+			break
+	if last_race != "":
+		var rc := RaceRecap.build(last_race)
+		var ok := not rc.is_empty() and int(rc["round"]) >= 1 and not (rc["classes"] as Array).is_empty()
+		for b in rc.get("classes", []):
+			ok = ok and (b["podium"] as Array).size() == mini(3, (b["podium"] as Array).size()) and int(b["podium"][0]["pos"]) == 1
+			for h in b["highlights"]:
+				if str(h["tag"]) == "BIGGEST SURPRISE":
+					var parts := str(h["text"]).replace("P", "").split(", expected ")
+					ok = ok and int(parts[0]) < int(parts[1])
+		check(ok, "Race recap of %s: every class has its podium; a surprise beat its expected place" % last_race)
+		# lap-by-lap leaders, clean chargers and firsts are consistent with the results
+		var leads := RaceRecap._lead_info(last_race)
+		var ok2 := true
+		for b in rc.get("classes", []):
+			var li: Dictionary = leads.get(b["cls"], {})
+			if not li.is_empty():
+				var sum := 0
+				for d in li["led"]:
+					sum += int(li["led"][d])
+				ok2 = ok2 and sum == int(li["laps"]) and int(li["changes"]) < int(li["laps"])
+			for h in b["highlights"]:
+				if str(h["tag"]) == "CLEAN CHARGER":
+					ok2 = ok2 and str(h["text"]).ends_with("no contact")
+				if str(h["tag"]) == "FIRST WIN":
+					ok2 = ok2 and str(b["podium"][0]["name"]) == str(h["name"])
+		check(ok2, "Race recap highlights: laps led add up, clean chargers had no contact, a first win is the winner")
 
 
 func _test_screens() -> void:

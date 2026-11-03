@@ -95,7 +95,8 @@ const N_SIMS := 4000
 const BACKTEST_SIMS := 300
 const STRENGTHS := [0.5, 1.5]    # extra strengths tried for a kept upgrade (1.0 is the first test)
 const UPGRADE_MARGIN := 0.0005   # an upgrade must lower the backtest error by more than this to be kept
-const SETTINGS_PATH := "user://predict.json"
+var SETTINGS_PATH: String:
+	get: return AppPaths.file("predict.json")
 
 var params := DEFAULTS.duplicate()
 var rng := RandomNumberGenerator.new()
@@ -1100,7 +1101,8 @@ func _load_settings() -> void:
 # ---------- Forecast record ----------
 # Saved forecasts (Predict screen, "Save for the record") are scored against the first race of
 # their class imported after they were made, so the league can see how good the forecasts are.
-const FORECAST_DIR := "user://forecasts"
+var FORECAST_DIR: String:
+	get: return AppPaths.file("forecasts")
 const MATCH_DAYS := 14   # a forecast is matched to a race of its class within this many days
 
 

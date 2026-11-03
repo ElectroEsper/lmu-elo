@@ -53,7 +53,7 @@ var _busy := false
 
 func _ready() -> void:
 	# two columns: settings and actions on the left, the forecast on the right, with a divider
-	# that can be dragged (its position is remembered in user://ui.cfg)
+	# that can be dragged (its position is remembered in ui.cfg)
 	var cols := HSplitContainer.new()
 	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	cols.add_theme_constant_override("separation", 16)
@@ -315,8 +315,9 @@ func refresh() -> void:
 	var keep_track := track_pick.get_item_text(track_pick.selected) if track_pick.item_count > 0 and track_pick.selected >= 0 else ""
 	track_pick.clear()
 	track_pick.add_item("Latest event", 0)
-	for i in Profiles.courses().size():
-		track_pick.add_item(Profiles.courses()[i], i + 1)
+	var tracks_az := Profiles.courses_sorted()
+	for i in tracks_az.size():
+		track_pick.add_item(tracks_az[i], i + 1)
 	for i in track_pick.item_count:
 		if track_pick.get_item_text(i) == keep_track:
 			track_pick.select(i)
@@ -562,7 +563,8 @@ func _on_grid_pick(index: int) -> void:
 # ---------- Layout ----------
 const LEFT_MIN := 280      # the settings column can be dragged down to this width
 const LEFT_DEFAULT := 320  # ...and starts at this one
-const UI_CFG := "user://ui.cfg"
+var UI_CFG: String:
+	get: return AppPaths.file("ui.cfg")
 
 
 # HSplitContainer offset: how far the divider sits from the left panel's minimum width

@@ -110,6 +110,8 @@ func _build() -> void:
 			_build_standings(body)
 		"season":
 			_build_season(body)
+		"recap":
+			_build_recap(body)
 		"ranks":
 			_build_ranks(body)
 		"driver":
@@ -351,6 +353,78 @@ func _forecast_row(i: int, r: Dictionary, top_win: float) -> Control:
 	row.add_child(bar_box)
 	row.add_child(_label("%d%%" % roundi(100.0 * float(r["podium"])), 30, MUTED, "bold", 0, 130, HORIZONTAL_ALIGNMENT_RIGHT))
 	return panel
+
+
+# ---------- race recap ----------
+# All classes: one column per class (stream) or stacked (post / story), compact. One class: a big
+# podium, the highlights as tiles, and the storylines in an accent panel.
+func _build_recap(body: VBoxContainer) -> void:
+	var blocks: Array = spec.get("blocks", [])
+	var one := bool(spec.get("per_class", false))
+	var holder: BoxContainer = HBoxContainer.new() if landscape and blocks.size() > 1 else VBoxContainer.new()
+	holder.add_theme_constant_override("separation", int((36 if landscape else 22) * s))
+	holder.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(holder)
+	for b in blocks:
+		var col := VBoxContainer.new()
+		col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		col.add_theme_constant_override("separation", int((12 if one else 8) * s))
+		holder.add_child(col)
+		if not one:
+			col.add_child(_label(str(b["cls"]).to_upper(), 36, HEAD.lightened(0.15), "title"))
+		# podium
+		for p in b["podium"]:
+			var i: int = int(p["pos"]) - 1
+			var tint: Color = PODIUM[i]
+			var panel := _panel(Color(tint, 0.18), tint)
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", int(14 * s))
+			panel.add_child(row)
+			row.add_child(_label("P%d" % int(p["pos"]), 40 if one else 32, tint, "title", 0, 70 if one else 56))
+			row.add_child(_fit(_label(str(p["name"]), 40 if one else 32, TEXT, "bold")))
+			if str(p["note"]) != "":
+				row.add_child(_label(str(p["note"]), 24 if one else 22, MUTED, "regular", 0, 0.0, HORIZONTAL_ALIGNMENT_RIGHT))
+			col.add_child(panel)
+		# highlights: tiles for one class, short lines for all classes
+		var hl: Array = b["highlights"]
+		if one and not hl.is_empty():
+			col.add_child(_label("HIGHLIGHTS", 24, MUTED, "bold", 3))
+			var grid := GridContainer.new()
+			grid.columns = 2 if not landscape else mini(hl.size(), 4)
+			grid.add_theme_constant_override("h_separation", int(14 * s))
+			grid.add_theme_constant_override("v_separation", int(14 * s))
+			col.add_child(grid)
+			for h in hl:
+				var tp := _panel(PANEL, Color(0, 0, 0, 0))
+				tp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				var tb := VBoxContainer.new()
+				tb.add_theme_constant_override("separation", int(2 * s))
+				tp.add_child(tb)
+				tb.add_child(_label(str(h["tag"]), 20, accent, "bold", 2))
+				tb.add_child(_fit(_label(str(h["name"]), 30, TEXT, "bold")))
+				tb.add_child(_label(str(h["text"]), 24, MUTED, "regular"))
+				grid.add_child(tp)
+		else:
+			for h in hl.slice(0, 6 if landscape else 4):   # in order of priority: clean racing first
+				var hr := HBoxContainer.new()
+				hr.add_theme_constant_override("separation", int(12 * s))
+				hr.add_child(_label(str(h["tag"]), 20, accent, "bold", 2, 214))
+				hr.add_child(_fit(_label("%s  ·  %s" % [h["name"], h["text"]], 24, TEXT, "regular")))
+				col.add_child(hr)
+		# storylines: pole, championship, forecast
+		var lines: Array = b["lines"]
+		if not lines.is_empty():
+			if one:
+				var lp := _panel(Color(accent, 0.12), accent)
+				var lb := VBoxContainer.new()
+				lb.add_theme_constant_override("separation", int(6 * s))
+				lp.add_child(lb)
+				for ln in lines:
+					lb.add_child(_wrap(_label(str(ln), 28, TEXT, "regular")))
+				col.add_child(lp)
+			else:
+				for ln in lines:
+					col.add_child(_wrap(_label(str(ln), 22, MUTED, "regular")))
 
 
 # ---------- season scenarios ----------

@@ -1,6 +1,6 @@
 class_name SettingsView
 extends ScrollContainer
-## The Settings screen: league settings kept in user://league_settings.json (league_settings.gd).
+## The Settings screen: league settings kept in league_settings.json (league_settings.gd).
 ## Nothing is saved until "Save settings" is pressed.
 
 signal notice(text: String)
@@ -542,7 +542,7 @@ func _add_cal_row(r: Dictionary) -> void:
 	track.clip_text = true
 	track.add_item("(not known)")
 	track.set_item_metadata(0, "")
-	for c in Profiles.courses():
+	for c in Profiles.courses_sorted():
 		track.add_item(str(c))
 		track.set_item_metadata(track.item_count - 1, str(c))
 		if str(c) == str(r.get("course", "")):

@@ -2,20 +2,23 @@ class_name UiTheme
 extends RefCounted
 ## The look of the whole tool: colours, font, sizes and spacing, built in code.
 ## review_screen.gd applies it to the window once, so every screen, dialog, popup and tooltip uses it.
-## To restyle the tool, change the constants below.
+## The palette follows the league's brand colours (Settings > Graphics), like the images do:
+## surfaces are dark shades of the primary colour, the accent is the league accent, text and
+## muted text match the graphics. Built again whenever the settings are saved.
 
-# ---------- Palette (dark) ----------
-const BG := Color("14171c")          # window background
-const SURFACE := Color("1b1f26")     # sidebar, panels, tables
-const SURFACE_2 := Color("232933")   # inputs, buttons, table headers
-const SURFACE_3 := Color("2c333f")   # hover
-const BORDER := Color("323a46")
-const TEXT := Color("e6e8eb")
-const MUTED := Color("97a1ad")
-const ACCENT := Color("e8833a")      # racing orange: active screen, main buttons, sorted column
-const ACCENT_HOVER := Color("f09a55")
-const ACCENT_SOFT := Color("f2b98c")  # table and grid headers
-const SELECT := Color(0.91, 0.51, 0.23, 0.22)
+# ---------- Palette (dark), set from the brand colours by _apply_brand() ----------
+static var BG := Color("120d1b")          # window background
+static var SURFACE := Color("19132a")     # sidebar, panels, tables
+static var SURFACE_2 := Color("231b3a")   # inputs, buttons, table headers
+static var SURFACE_3 := Color("2d2449")   # hover
+static var BORDER := Color("372b57")
+static var TEXT := Color("f4f2f8")        # as on the graphics
+static var MUTED := Color("a39bbd")       # as on the graphics
+static var ACCENT := Color("cdfe02")      # league accent: active screen, main buttons, sorted column
+static var ACCENT_HOVER := Color("dbff4d")
+static var ACCENT_INK := Color("15111d")  # text on accent buttons (dark on a bright accent)
+static var ACCENT_SOFT := Color("b89ce8")  # table and grid headers: the lavender of class names on the graphics
+static var SELECT := Color(0.8, 1.0, 0.0, 0.16)
 const GOOD := Color("5cc98a")
 const BAD := Color("e06666")
 # track grades 1 to 5 (5 = the most of something): blue -> red
@@ -35,7 +38,25 @@ static func driver_grade_color(g: int) -> Color:
 	return DRIVER_GRADES[clampi(g, 1, 5) - 1] if g > 0 else MUTED
 
 
+# Dark surfaces tinted with the league's primary colour, and its accent.
+static func _apply_brand() -> void:
+	var primary := Color.from_string(str(LeagueSettings.get_value("brand_primary")), Color("512f89"))
+	var accent := Color.from_string(str(LeagueSettings.get_value("brand_accent")), Color("cdfe02"))
+	var base := Color("0f0c14")
+	BG = base.lerp(primary, 0.10)
+	SURFACE = base.lerp(primary, 0.17)
+	SURFACE_2 = base.lerp(primary, 0.27)
+	SURFACE_3 = base.lerp(primary, 0.38)
+	BORDER = base.lerp(primary, 0.45)
+	ACCENT = accent
+	ACCENT_HOVER = accent.lightened(0.25)
+	ACCENT_INK = Color("15111d") if accent.get_luminance() > 0.45 else Color.WHITE
+	ACCENT_SOFT = primary.lightened(0.55)
+	SELECT = Color(accent, 0.16)
+
+
 static func build() -> Theme:
+	_apply_brand()
 	var t := Theme.new()
 	var font := SystemFont.new()
 	font.font_names = PackedStringArray(["Segoe UI", "Inter", "Roboto", "Noto Sans", "Open Sans", "sans-serif"])
@@ -92,7 +113,7 @@ static func build() -> Theme:
 	_buttons(t, "Button", SURFACE_2, SURFACE_3, BORDER, TEXT)
 	t.set_constant("h_separation", "Button", 6)
 	_variation(t, "AccentButton", "Button")  # the main action of a screen
-	_buttons(t, "AccentButton", ACCENT, ACCENT_HOVER, ACCENT, Color("1a1208"))
+	_buttons(t, "AccentButton", ACCENT, ACCENT_HOVER, ACCENT, ACCENT_INK)
 	t.set_font("font", "AccentButton", bold)
 	_variation(t, "SmallButton", "Button")   # Up / Down / Drop on the review lists
 	var sm := _box(Color(0, 0, 0, 0), 4)

@@ -14,7 +14,8 @@ const SETTLED_DUELS := 120.0  # below this many duels a rating is shown as "sett
 # Ratings saved by an older model are replayed with this one at start-up (see _ready).
 # 2: bigger K, and a driver's first quali (or race) rating starts from their race (or quali) one.
 const RATING_MODEL := 2
-const SAVE_PATH := "user://elo.json"
+var SAVE_PATH: String:
+	get: return AppPaths.file("elo.json")
 const INCIDENT_GAP := 5.0    # contact reports closer than this (seconds) count as one incident
 
 # XML section -> which rating session it feeds, and which field gives the order
@@ -43,7 +44,7 @@ func _ready() -> void:
 	load_ratings()
 	if _needs_backfill:
 		_backfill_sessions()
-	if _model_loaded < RATING_MODEL and not history.is_empty() and DirAccess.dir_exists_absolute("user://events"):
+	if _model_loaded < RATING_MODEL and not history.is_empty() and DirAccess.dir_exists_absolute(AppPaths.file("events")):
 		rebuild_all()   # ratings from an older model: replay every event once with the new one
 		load_error = ("" if load_error == "" else load_error + " ") + "Ratings were recalculated with the updated rating model (bigger steps, so they spread wider than before)."
 
@@ -499,8 +500,8 @@ func confirm_draft(draft: Dictionary) -> void:
 	saved.erase("replaces_training")
 	saved.erase("new_drivers")
 	saved.erase("path")
-	DirAccess.make_dir_recursive_absolute("user://events")
-	var f := FileAccess.open("user://events/%s.json" % draft["file"], FileAccess.WRITE)
+	DirAccess.make_dir_recursive_absolute(AppPaths.file("events"))
+	var f := FileAccess.open(AppPaths.file("events/%s.json" % draft["file"]), FileAccess.WRITE)
 	f.store_string(JSON.stringify(saved))
 	f.close()
 	save_ratings()
@@ -524,7 +525,7 @@ func attach_stats(draft: Dictionary) -> bool:
 		return false
 	var original: String = processed[draft["hash"]]
 	archive_xml(draft, original)
-	var path := "user://events/%s.json" % original
+	var path := AppPaths.file("events/%s.json" % original)
 	if not FileAccess.file_exists(path):
 		return false
 	var saved = JSON.parse_string(FileAccess.get_file_as_string(path))
@@ -678,10 +679,10 @@ func _name_time(file_name: String) -> int:
 func rebuild_all() -> Dictionary:
 	var events := []   # {"time": int, "draft": Dictionary}
 	var undated := PackedStringArray()
-	for f in DirAccess.get_files_at("user://events"):
+	for f in DirAccess.get_files_at(AppPaths.file("events")):
 		if not f.ends_with(".json"):
 			continue
-		var path := "user://events/" + f
+		var path := AppPaths.file("events/" + f)
 		var draft = JSON.parse_string(FileAccess.get_file_as_string(path))
 		if not (draft is Dictionary) or not draft.has("file") or not (draft.has("orders") or draft.get("kind", "") == "training"):
 			continue
@@ -705,7 +706,7 @@ func rebuild_all() -> Dictionary:
 		return a["draft"]["file"] < b["draft"]["file"])
 
 	if FileAccess.file_exists(SAVE_PATH):
-		DirAccess.copy_absolute(SAVE_PATH, "user://elo.backup.json")
+		DirAccess.copy_absolute(SAVE_PATH, AppPaths.file("elo.backup.json"))
 	ratings.clear()
 	processed.clear()
 	sessions_seen.clear()
@@ -790,13 +791,13 @@ static func penalised_order(order: Array, stats: Dictionary, pens: Array) -> Dic
 
 
 func event_penalties(file: String) -> Array:
-	var d = JSON.parse_string(FileAccess.get_file_as_string("user://events/%s.json" % file)) if FileAccess.file_exists("user://events/%s.json" % file) else null
+	var d = JSON.parse_string(FileAccess.get_file_as_string(AppPaths.file("events/%s.json" % file))) if FileAccess.file_exists(AppPaths.file("events/%s.json" % file)) else null
 	return d.get("penalties", []) if d is Dictionary else []
 
 
 # The original (as imported) race result of an event: {"orders": {cls: [names]}, "stats": {cls: {...}}}
 func original_race(file: String) -> Dictionary:
-	var path := "user://events/%s.json" % file
+	var path := AppPaths.file("events/%s.json" % file)
 	if not FileAccess.file_exists(path):
 		return {}
 	var d = JSON.parse_string(FileAccess.get_file_as_string(path))
@@ -810,7 +811,7 @@ func original_race(file: String) -> Dictionary:
 # Saves the race's penalty list, rewrites its result from the original, and rebuilds every rating.
 # Returns "" or a message for penalties that could not be applied.
 func set_race_penalties(file: String, pens: Array) -> String:
-	var path := "user://events/%s.json" % file
+	var path := AppPaths.file("events/%s.json" % file)
 	var d = JSON.parse_string(FileAccess.get_file_as_string(path)) if FileAccess.file_exists(path) else null
 	if not (d is Dictionary) or not d.get("orders", {}).has("race"):
 		return "That event has no race result."
@@ -1145,11 +1146,11 @@ func load_ratings() -> void:
 		return
 	var data = JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))
 	if not data is Dictionary:
-		var keep := "user://elo.unreadable-%s.json" % Time.get_datetime_string_from_system().replace(":", "-")
+		var keep := AppPaths.file("elo.unreadable-%s.json" % Time.get_datetime_string_from_system().replace(":", "-"))
 		DirAccess.copy_absolute(SAVE_PATH, keep)
 		load_error = "Your ratings file could not be read; a copy was kept as %s." % keep.get_file()
-		if FileAccess.file_exists("user://elo.backup.json"):
-			data = JSON.parse_string(FileAccess.get_file_as_string("user://elo.backup.json"))
+		if FileAccess.file_exists(AppPaths.file("elo.backup.json")):
+			data = JSON.parse_string(FileAccess.get_file_as_string(AppPaths.file("elo.backup.json")))
 			if data is Dictionary:
 				load_error += " The backup from the last Recompute all was loaded instead; press Recompute all to bring it up to date."
 	if data is Dictionary:
@@ -1164,9 +1165,10 @@ func load_ratings() -> void:
 
 # ---------- XML archive ----------
 # Every confirmed result file is copied here so it can be re-read later (new stats, tracks, etc.).
-const XML_DIR := "user://xml"
+var XML_DIR: String:
+	get: return AppPaths.file("xml")
 
-# Copies the original XML into user://xml/<file name>. Returns true if the copy exists afterwards.
+# Copies the original XML into the data folder's xml/<file name>. Returns true if the copy exists afterwards.
 func archive_xml(draft: Dictionary, as_name := "") -> bool:
 	var src: String = draft.get("path", "")
 	if src == "" or not FileAccess.file_exists(src):
@@ -1209,13 +1211,13 @@ func _read_track(path: String) -> Dictionary:
 # Saved events whose lap data was read by an older version of fingerprint.gd (re-read them from
 # the archive to bring in what the new version measures).
 func stale_fingerprints() -> int:
-	if not DirAccess.dir_exists_absolute("user://events"):
+	if not DirAccess.dir_exists_absolute(AppPaths.file("events")):
 		return 0
 	var n := 0
-	for f in DirAccess.get_files_at("user://events"):
+	for f in DirAccess.get_files_at(AppPaths.file("events")):
 		if not f.ends_with(".json"):
 			continue
-		var saved = JSON.parse_string(FileAccess.get_file_as_string("user://events/" + f))
+		var saved = JSON.parse_string(FileAccess.get_file_as_string(AppPaths.file("events/" + f)))
 		if saved is Dictionary and saved.get("fp") is Dictionary and not saved["fp"].is_empty() \
 				and int(saved["fp"].get("v", 0)) < Fingerprint.VERSION and stored_xml_path(str(saved.get("file", ""))) != "":
 			n += 1
@@ -1224,7 +1226,7 @@ func stale_fingerprints() -> int:
 
 # True if the saved event file already holds a lap-data fingerprint.
 func _saved_has_fp(file_name: String) -> bool:
-	var path := "user://events/%s.json" % file_name
+	var path := AppPaths.file("events/%s.json" % file_name)
 	if not FileAccess.file_exists(path):
 		return false
 	var saved = JSON.parse_string(FileAccess.get_file_as_string(path))
@@ -1280,8 +1282,8 @@ func import_training(path: String) -> String:
 		sessions_seen[id] = draft["file"]
 	var saved := draft.duplicate(true)
 	saved.erase("path")
-	DirAccess.make_dir_recursive_absolute("user://events")
-	var f := FileAccess.open("user://events/%s.json" % draft["file"], FileAccess.WRITE)
+	DirAccess.make_dir_recursive_absolute(AppPaths.file("events"))
+	var f := FileAccess.open(AppPaths.file("events/%s.json" % draft["file"]), FileAccess.WRITE)
 	f.store_string(JSON.stringify(saved))
 	f.close()
 	save_ratings()
@@ -1345,7 +1347,7 @@ func _is_rated(file_name: String) -> bool:
 
 # Removes a training import (its saved event and ids). Its archived XML stays.
 func _drop_training(file_name: String) -> void:
-	DirAccess.remove_absolute("user://events/%s.json" % file_name)
+	DirAccess.remove_absolute(AppPaths.file("events/%s.json" % file_name))
 	for id in sessions_seen.keys():
 		if sessions_seen[id] == file_name:
 			sessions_seen.erase(id)
@@ -1367,13 +1369,13 @@ func _ids_from_archive(file_name: String) -> Array:
 var backfill_removed := PackedStringArray()
 
 func _backfill_sessions() -> void:
-	if not DirAccess.dir_exists_absolute("user://events"):
+	if not DirAccess.dir_exists_absolute(AppPaths.file("events")):
 		return
 	var training := []
-	for f in DirAccess.get_files_at("user://events"):
+	for f in DirAccess.get_files_at(AppPaths.file("events")):
 		if not f.ends_with(".json"):
 			continue
-		var path := "user://events/" + f
+		var path := AppPaths.file("events/" + f)
 		var ev = JSON.parse_string(FileAccess.get_file_as_string(path))
 		if not ev is Dictionary or not ev.has("file"):
 			continue
@@ -1425,7 +1427,7 @@ func name_taken(file_name: String) -> bool:
 	for h in history:
 		if str(h["file"]) == file_name:
 			return true
-	return FileAccess.file_exists("user://events/%s.json" % file_name)
+	return FileAccess.file_exists(AppPaths.file("events/%s.json" % file_name))
 
 
 # Best guess of {"season", "code", "round"} for a draft without a league name:

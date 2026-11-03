@@ -400,9 +400,7 @@ func _export() -> void:
 	if sheets[0]["rows"].is_empty():
 		notice.emit("No penalties to export yet.")
 		return
-	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
-	if dir == "":
-		dir = OS.get_user_data_dir()
+	var dir := AppPaths.exports()
 	var path := "%s/lmu_penalties_%s.xlsx" % [dir, Time.get_datetime_string_from_system().replace(":", "-")]
 	var err := Elo.write_xlsx(path, sheets)
 	if err == OK:

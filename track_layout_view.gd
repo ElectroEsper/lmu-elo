@@ -4,7 +4,8 @@ extends VBoxContainer
 ## exports) and see its map, grades, corners, straights and lap summary.
 ## Needs table_view.gd and track_grades.gd.
 
-var picker := OptionButton.new()
+var picker := OptionButton.new()         # the track (each one once, A to Z)
+var class_pick := OptionButton.new()     # the classes with a profile at that track, fastest first
 var tabs := TabContainer.new()
 var profiles: Array = []
 var last_tab := 0
@@ -13,8 +14,12 @@ var last_tab := 0
 func _ready() -> void:
 	var bar := HFlowContainer.new()
 	add_child(bar)
-	picker.item_selected.connect(_on_pick)
+	picker.item_selected.connect(func(_i):
+		_fill_classes()
+		_show())
 	bar.add_child(picker)
+	class_pick.item_selected.connect(_on_pick)
+	bar.add_child(class_pick)
 	var hint := Label.new()
 	hint.text = "Drop MoTeC CSV exports on the window to add profiles. You pick the track (from the tracks in your result files) and the class for each file; one profile is kept per track and class, the fastest lap wins."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -25,17 +30,49 @@ func _ready() -> void:
 
 
 func refresh() -> void:
-	var keep := ""
-	if picker.selected >= 0 and picker.item_count > 0:
-		keep = picker.get_item_text(picker.selected)
+	var keep := picker.get_item_text(picker.selected) if picker.selected >= 0 and picker.item_count > 0 else ""
 	profiles = TrackStore.list()
-	picker.clear()
+	var tracks := {}
 	for p in profiles:
-		picker.add_item(LeagueSettings.label("%s - %s" % [p["course"], p["class"]]))
+		tracks[str(p["course"])] = true
+	var names := tracks.keys()
+	names.sort_custom(func(a, b): return Profiles.sort_key(a) < Profiles.sort_key(b))
+	picker.clear()
+	for n in names:
+		picker.add_item(str(n))
 	for i in picker.item_count:
 		if picker.get_item_text(i) == keep:
 			picker.select(i)
+	_fill_classes()
 	_show()
+
+
+# The classes with a profile at the chosen track, fastest lap first; keeps the class picked before.
+func _fill_classes() -> void:
+	var keep := str(class_pick.get_item_metadata(class_pick.selected)) if class_pick.selected >= 0 and class_pick.item_count > 0 else ""
+	class_pick.clear()
+	if picker.selected < 0:
+		return
+	var course := picker.get_item_text(picker.selected)
+	var idx := []
+	for i in profiles.size():
+		if str(profiles[i]["course"]) == course:
+			idx.append(i)
+	idx.sort_custom(func(a, b): return float(profiles[a]["lap"].get("time_s", 0.0)) < float(profiles[b]["lap"].get("time_s", 0.0)))
+	for i in idx:
+		class_pick.add_item(LeagueSettings.label(str(profiles[i]["class"])))
+		class_pick.set_item_metadata(class_pick.item_count - 1, str(profiles[i]["class"]))
+		class_pick.set_meta("i%d" % (class_pick.item_count - 1), i)
+	for k in class_pick.item_count:
+		if str(class_pick.get_item_metadata(k)) == keep:
+			class_pick.select(k)
+
+
+# The profile on screen ({} when none).
+func _current() -> Dictionary:
+	if class_pick.selected < 0 or not class_pick.has_meta("i%d" % class_pick.selected):
+		return {}
+	return profiles[int(class_pick.get_meta("i%d" % class_pick.selected))]
 
 
 func _on_pick(_index: int) -> void:
@@ -58,13 +95,13 @@ func _show() -> void:
 	if tabs.get_tab_count() > 1:
 		last_tab = tabs.current_tab
 	_clear()
-	if profiles.is_empty() or picker.selected < 0:
+	if profiles.is_empty() or _current().is_empty():
 		var l := Label.new()
 		l.text = "No track profiles yet. Drop one or more MoTeC CSV exports on the window."
 		tabs.add_child(l)
 		tabs.set_tab_title(0, "Info")
 		return
-	var p: Dictionary = profiles[picker.selected]
+	var p: Dictionary = _current()
 	var lap: Dictionary = p["lap"]
 
 	# map

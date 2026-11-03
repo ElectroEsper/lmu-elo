@@ -2,7 +2,8 @@ class_name TrackStore
 extends RefCounted
 ## Saved track profiles, one per course and class.
 
-const DIR := "user://tracks"
+static func dir() -> String:
+	return AppPaths.file("tracks")
 
 
 static func _safe(s: String) -> String:
@@ -10,13 +11,13 @@ static func _safe(s: String) -> String:
 
 
 static func path_for(course: String, cls: String) -> String:
-	return "%s/%s__%s.json" % [DIR, _safe(course), _safe(cls)]
+	return "%s/%s__%s.json" % [dir(), _safe(course), _safe(cls)]
 
 
 # Saves a profile unless a faster lap for the same course and class is already stored.
 # Returns "saved", "replaced" or "kept" (the stored lap was faster).
 static func save(profile: Dictionary) -> String:
-	DirAccess.make_dir_recursive_absolute(DIR)
+	DirAccess.make_dir_recursive_absolute(dir())
 	var path := path_for(profile["course"], profile["class"])
 	var verdict := "saved"
 	if FileAccess.file_exists(path):
@@ -47,13 +48,13 @@ static func list() -> Array:
 	if _list_cache != null:
 		return _list_cache
 	var out := []
-	if not DirAccess.dir_exists_absolute(DIR):
+	if not DirAccess.dir_exists_absolute(dir()):
 		_list_cache = out
 		return out
-	for f in DirAccess.get_files_at(DIR):
+	for f in DirAccess.get_files_at(dir()):
 		if not f.ends_with(".json"):
 			continue
-		var p = JSON.parse_string(FileAccess.get_file_as_string(DIR + "/" + f))
+		var p = JSON.parse_string(FileAccess.get_file_as_string(dir() + "/" + f))
 		if p is Dictionary and p.has("map") and p.has("course"):
 			out.append(p)
 	out.sort_custom(func(a, b): return (str(a["course"]) + str(a["class"])) < (str(b["course"]) + str(b["class"])))

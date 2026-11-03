@@ -1,10 +1,11 @@
 class_name LeagueSettings
 extends RefCounted
 ## League settings that can be changed in the app (Settings screen), kept in
-## user://league_settings.json. Anything missing from the file falls back to DEFAULTS, so new
+## league_settings.json in the data folder. Anything missing from the file falls back to DEFAULTS, so new
 ## settings added later never break an older file. Read with LeagueSettings.get_value("key").
 
-const PATH := "user://league_settings.json"
+static func _path() -> String:
+	return AppPaths.file("league_settings.json")
 
 const DEFAULTS := {
 	# Driver ranks, lowest first. A driver gets the highest rank whose "min" their rating reaches.
@@ -82,7 +83,7 @@ static func all() -> Dictionary:
 static func save_all(values: Dictionary) -> Error:
 	_data = values.duplicate(true)
 	revision += 1
-	var f := FileAccess.open(PATH, FileAccess.WRITE)
+	var f := FileAccess.open(_path(), FileAccess.WRITE)
 	if f == null:
 		return FileAccess.get_open_error()
 	f.store_string(JSON.stringify(_data, "\t"))
@@ -98,8 +99,8 @@ static func _ensure() -> void:
 	if _data != null:
 		return
 	_data = {}
-	if FileAccess.file_exists(PATH):
-		var loaded = JSON.parse_string(FileAccess.get_file_as_string(PATH))
+	if FileAccess.file_exists(_path()):
+		var loaded = JSON.parse_string(FileAccess.get_file_as_string(_path()))
 		if loaded is Dictionary:
 			_data = loaded
 			if int(_data.get("rating_model", 1)) < 2:
@@ -125,7 +126,7 @@ static func _convert_from_model1() -> void:
 		var b := int(_data["rank_buffer"])
 		_data["rank_buffer"] = 30 if b == 15 else int(snappedf(float(b) * MODEL1_TO_2, 5.0))
 	_data["rating_model"] = 2
-	var f := FileAccess.open(PATH, FileAccess.WRITE)
+	var f := FileAccess.open(_path(), FileAccess.WRITE)
 	if f != null:
 		f.store_string(JSON.stringify(_data, "\t"))
 		f.close()

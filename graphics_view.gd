@@ -1,19 +1,19 @@
 class_name GraphicsView
 extends HBoxContainer
 ## "Graphics" screen: images for social media and the stream (graphic_card.gd), previewed here and
-## saved as PNG in Documents/LMU_Elo graphics. League name, colour and logo: Settings > Graphics.
+## saved as PNG in Documents/Grid Ledger/Graphics. League name, colour and logo: Settings > Graphics.
 ## The background photo (it changes from race to race) is chosen here and remembered in
-## user://ui.cfg, not in the league settings. Driver cards can also be saved in one go for every
+## ui.cfg in the data folder, not in the league settings. Driver cards can also be saved in one go for every
 ## driver of a class (in a series and season).
 
 signal notice(text: String)
 
-const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["teams", "Team standings"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
+const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["teams", "Team standings"], ["recap", "Race recap"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
 	["track", "Track card"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
-const OUT_DIR_NAME := "LMU_Elo graphics"
-const UI_CFG := "user://ui.cfg"
+var UI_CFG: String:
+	get: return AppPaths.file("ui.cfg")
 
 var shell: Node   # the main screen: the Predict screen's current forecast lives there
 
@@ -197,7 +197,7 @@ func _ready() -> void:
 
 	info.theme_type_variation = "Muted"
 	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	info.text = "League name, colour and logo: Settings > Graphics. Images are saved in Documents/%s." % OUT_DIR_NAME
+	info.text = "League name, colour and logo: Settings > Graphics. Images are saved in %s." % _out_dir()
 	left.add_child(info)
 
 	kind_pick.item_selected.connect(func(_i):
@@ -262,6 +262,21 @@ func _fill_sources() -> void:
 			champ_label.text = "Championship"
 			champ_label.visible = true
 			champ_pick.visible = true
+		"recap":
+			source_label.text = "Race"
+			for i in range(Elo.history.size() - 1, -1, -1):   # newest first, races only
+				var h: Dictionary = Elo.history[i]
+				var is_race := false
+				for c in h["changes"]:
+					if c["sess"] == "race":
+						is_race = true
+						break
+				if is_race:
+					source_pick.add_item("%s · %s · %s" % [Elo.season_of(h), Elo.series_of(h), str(h.get("course", h["file"]))])
+					source_pick.set_item_metadata(source_pick.item_count - 1, str(h["file"]))
+			champ_label.text = "Classes"
+			champ_label.visible = true
+			champ_pick.visible = true
 		"ranks":
 			source_label.text = "Class"
 			var classes := Ranks.all().keys()
@@ -313,6 +328,9 @@ func _fill_champs() -> void:
 		_default_minutes()
 		_fill_watch()
 		return
+	if _kind() == "recap":
+		_fill_recap_classes()
+		return
 	if _kind() != "standings" and _kind() != "season" and _kind() != "teams":
 		return
 	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
@@ -340,7 +358,7 @@ func _track_courses() -> Array:
 		if str(ev.get("course", "")) != "":
 			seen[str(ev["course"])] = true
 	var out := seen.keys()
-	out.sort()
+	out.sort_custom(func(a, b): return Profiles.sort_key(a) < Profiles.sort_key(b))
 	return out
 
 
@@ -719,6 +737,8 @@ func _spec() -> Dictionary:
 			return _season_spec()
 		"teams":
 			return _teams_spec()
+		"recap":
+			return _recap_spec()
 		"ranks":
 			return _ranks_spec()
 		"track":
@@ -731,6 +751,89 @@ func _spec() -> Dictionary:
 			var cls := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
 			return _driver_spec(source_pick.get_item_text(source_pick.selected), cls)
 	return {"kind": "standings", "title": "", "rows": [], "empty": true}
+
+
+# ---------- race recap ----------
+# Classes of the race picked: "All classes" (one image for the race) or one class.
+func _fill_recap_classes() -> void:
+	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
+	champ_pick.clear()
+	champ_pick.add_item("All classes")
+	champ_pick.set_item_metadata(0, "")
+	if source_pick.selected < 0:
+		return
+	var file := str(source_pick.get_item_metadata(source_pick.selected))
+	var seen := {}
+	for h in Elo.history:
+		if str(h["file"]) == file:
+			for c in h["changes"]:
+				if c["sess"] == "race" and not seen.has(c["cls"]):
+					seen[c["cls"]] = true
+	var order: Array = Predict.series_classes("")
+	var cls_list := seen.keys()
+	cls_list.sort_custom(func(a, b): return (order.find(a) if order.has(a) else 99) < (order.find(b) if order.has(b) else 99))
+	for c in cls_list:
+		champ_pick.add_item(LeagueSettings.label(str(c)))
+		champ_pick.set_item_metadata(champ_pick.item_count - 1, str(c))
+	for i in champ_pick.item_count:
+		if champ_pick.get_item_text(i) == keep:
+			champ_pick.select(i)
+
+
+func _recap_spec() -> Dictionary:
+	if source_pick.selected < 0:
+		return {"kind": "recap", "title": "Race recap", "subtitle": "No race imported yet.", "empty": true}
+	var rc := RaceRecap.build(str(source_pick.get_item_metadata(source_pick.selected)))
+	if rc.is_empty():
+		return {"kind": "recap", "title": "Race recap", "subtitle": "", "empty": true}
+	var only := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
+	var blocks := []
+	for b in rc["classes"]:
+		if only == "" or str(b["cls"]) == only:
+			blocks.append(_recap_block(b))
+	var order: Array = Predict.series_classes(LeagueSettings.series_code(str(rc["series"])))
+	blocks.sort_custom(func(a, b): return (order.find(a["cls_raw"]) if order.has(a["cls_raw"]) else 99) < (order.find(b["cls_raw"]) if order.has(b["cls_raw"]) else 99))
+	var title := "Race recap" if only == "" else "%s race recap" % LeagueSettings.label(only)
+	var sp := {"kind": "recap", "title": title, "subtitle": "%s · Round %d · %s" % [rc["series"], int(rc["round"]), rc["course"]],
+		"blocks": blocks, "per_class": only != "", "empty": blocks.is_empty()}
+	var code := LeagueSettings.series_code(str(rc["series"]))
+	if code != "":
+		sp["accent"] = LeagueSettings.series_color(code)
+	return sp
+
+
+# One class of the recap, as display text (names tidied).
+func _recap_block(b: Dictionary) -> Dictionary:
+	var out := {"cls": LeagueSettings.label(str(b["cls"])), "cls_raw": str(b["cls"]), "podium": [], "highlights": [], "lines": []}
+	for p in b["podium"]:
+		var note := str(p["gap"])
+		if int(p["grid"]) > 3:
+			note += ("  ·  " if note != "" else "") + "from P%d" % int(p["grid"])
+		out["podium"].append({"pos": p["pos"], "name": Elo.pretty(str(p["name"])), "note": note})
+	for h in b["highlights"]:
+		out["highlights"].append({"tag": h["tag"], "name": Elo.pretty(str(h["name"])), "text": h["text"]})
+	if b.has("pole"):
+		var pp: Dictionary = b["pole"]
+		out["lines"].append("Pole: %s → %s" % [Elo.pretty(str(pp["name"])), "won" if int(pp["pos"]) == 1 else "finished P%d" % int(pp["pos"])])
+	var ch: Dictionary = b.get("champ", {})
+	if not ch.is_empty():
+		var lead := Elo.pretty(str(ch["leader"]))
+		if bool(ch.get("new_leader", false)):
+			out["lines"].append("New championship leader: %s, %d ahead of %s" % [lead, int(ch["gap"]), Elo.pretty(str(ch["second"]))])
+		elif ch.has("gap_before") and int(ch["gap"]) != int(ch["gap_before"]):
+			if int(ch["gap"]) > int(ch["gap_before"]):
+				out["lines"].append("%s extends the championship lead to %d" % [lead, int(ch["gap"])])
+			else:
+				out["lines"].append("%s's championship lead cut to %d" % [lead, int(ch["gap"])])
+		else:
+			out["lines"].append("Championship: %s leads by %d" % [lead, int(ch["gap"])])
+	var fc: Dictionary = b.get("forecast", {})
+	if not fc.is_empty():
+		if bool(fc["fav_won"]):
+			out["lines"].append("Forecast: favourite %s won (%d%% chance)" % [Elo.pretty(str(fc["fav"])), roundi(100.0 * float(fc["chance"]))])
+		else:
+			out["lines"].append("Forecast upset: %s won from %d%% (favourite %s)" % [Elo.pretty(str(fc["winner"])), roundi(100.0 * float(fc["chance"])), Elo.pretty(str(fc["fav"]))])
+	return out
 
 
 # ---------- season scenarios ----------
@@ -1132,8 +1235,8 @@ func _save_batch() -> void:
 		return
 	_batch_running = true
 	batch_btn.disabled = true
-	# Season6_R4/Enduro/Driver Cards/GT3/ (all seasons: a folder of their own)
-	var dir := _out_dir().path_join(_round_folder(ch[2], ch[0]) if ch[2] != "" else "All seasons")
+	# s6_r4/Enduro/Driver Cards/GT3/ (all seasons: a folder of their own)
+	var dir := _out_dir().path_join(_round_folder(ch[2], ch[0]) if ch[2] != "" else "all_seasons")
 	dir = dir.path_join(_series_name(ch[0])).path_join(CATEGORY["driver"]).path_join(LeagueSettings.label(ch[1]))
 	DirAccess.make_dir_recursive_absolute(dir)
 	var size_px: Vector2i = FORMATS[maxi(format_pick.selected, 0)][1]
@@ -1164,11 +1267,14 @@ func _save_batch() -> void:
 
 # ---------- saving ----------
 # Saved images are filed the way they go to the broadcaster:
-#   LMU_Elo graphics/Season6_R4/Enduro/Standings/enduro_gt3_standings_p1.png
-# round folder (season and rounds run so far) / series / kind of graphic / a descriptive name.
+#   Grid Ledger/Graphics/s6_r4/Enduro/Standings/enduro_gt3_standings_p1.png
+# round folder / series / kind of graphic / a descriptive name. The round folder is the round the
+# image is for: s6_r5 for the round 5 forecast, track card and title fight (calendar round at that
+# track, else the next one), s6_r4 for standings, ranks and driver cards after round 4 and for the
+# round 4 recap.
 # Saving again replaces the file of the same name.
 const CATEGORY := {"forecast": "Forecast", "standings": "Standings", "teams": "Standings",
-	"season": "Championship Scenario", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks"}
+	"season": "Championship Scenario", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks", "recap": "Recap"}
 
 
 static func _slug(s: String) -> String:
@@ -1181,18 +1287,42 @@ func _series_name(code: String) -> String:
 	return LeagueSettings.series_name(code)
 
 
-# "Season6_R4": the season and how many rounds of it a series (or any series) has run.
+# "s6_r4": the season and the last round a series (or any series) has run in it (the latest
+# season when `season` is "").
 func _round_folder(season: String, code: String) -> String:
 	if season == "":
-		var seasons := Elo.seasons()
-		season = str(seasons.back()) if not seasons.is_empty() else "Season"
+		season = _latest_season()
+	return AppPaths.round_folder(season, _rounds_run(season, code))
+
+
+# The round a series races next: the calendar round at `course` when the calendar has it, else
+# the one after the last round run (round 1 of the next season once a season is complete).
+func _next_round_folder(code: String, course := "") -> String:
+	var season := _latest_season()
+	var n := int(season.trim_prefix("Season").strip_edges())
+	var done := _rounds_run(season, code)
+	if course != "":
+		for c in LeagueSettings.calendar_for(code, n):
+			if str(c.get("course", "")) == course and int(c["round"]) > done:
+				return AppPaths.round_folder(season, int(c["round"]))
+	if code != "" and n > 0 and done >= LeagueSettings.season_rounds(code):
+		return AppPaths.round_folder("Season %d" % (n + 1), 1)
+	return AppPaths.round_folder(season, done + 1)
+
+
+func _latest_season() -> String:
+	var seasons := Elo.seasons()
+	return str(seasons.back()) if not seasons.is_empty() else "Season"
+
+
+func _rounds_run(season: String, code: String) -> int:
 	var rounds := 0
 	var sname := _series_name(code)
 	var champs := Reports.season_points(season)
 	for k in champs:
 		if code == "" or str(champs[k].get("series", "")) == sname:
 			rounds = maxi(rounds, int(champs[k].get("rounds", 0)))
-	return "%s_R%d" % [season.replace(" ", ""), rounds]
+	return rounds
 
 
 # Where the image on screen goes: [folder, file name without page or format part].
@@ -1201,6 +1331,7 @@ func _save_target() -> Array:
 	var season := ""
 	var code := ""
 	var base := kind
+	var next_dir := ""   # set for graphics about the next race (forecast, track, title fight)
 	match kind:
 		"standings", "teams", "season":
 			season = source_pick.get_item_text(source_pick.selected) if source_pick.selected >= 0 else ""
@@ -1211,22 +1342,44 @@ func _save_target() -> Array:
 			var sname := _slug(_series_name(code))
 			base = {"standings": "%s_%s_standings" % [sname, cls], "teams": "%s_%s_team_standings" % [sname, cls],
 				"season": "%s_title_fight" % cls}[kind]
+			if kind == "season":   # about what comes next: the next round's folder
+				var total := LeagueSettings.season_rounds(code)
+				var done := int(ch.get("rounds", 0))
+				next_dir = AppPaths.round_folder(season, done + 1 if done < total else done)
 		"forecast":
 			var src := int(source_pick.get_item_metadata(source_pick.selected)) if source_pick.selected >= 0 else -1
+			var course := ""
 			if src >= 0:
 				var g: Array = _saved_forecast_groups()[src]
 				code = str(g[0].get("series", "")) if not g.is_empty() else ""
+				course = str(g[0].get("course", "")) if not g.is_empty() else ""
 			elif shell != null and shell.predict_view != null:
 				code = str(shell.predict_view._current_series())
+				var tp: OptionButton = shell.predict_view.track_pick
+				if tp.selected > 0:
+					course = tp.get_item_text(tp.selected)
 			base = "event_predictions"
+			next_dir = _next_round_folder(code, course)
 		"track":
 			code = str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
 			base = _slug(source_pick.get_item_text(source_pick.selected)) if source_pick.selected >= 0 else "track"
+			next_dir = _next_round_folder(code, source_pick.get_item_text(source_pick.selected) if source_pick.selected >= 0 else "")
 		"driver":
 			base = _slug(Elo.pretty(source_pick.get_item_text(source_pick.selected))) if source_pick.selected >= 0 else "driver"
+		"recap":
+			# the race's own round folder: s6_r4/Enduro/Recap/race_recap.png (or gt3_race_recap)
+			var file := str(source_pick.get_item_metadata(source_pick.selected)) if source_pick.selected >= 0 else ""
+			var rc := RaceRecap.build(file) if file != "" else {}
+			var only := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
+			base = "race_recap" if only == "" else "%s_race_recap" % _slug(LeagueSettings.label(only))
+			if not rc.is_empty():
+				var sname := str(rc["series"])
+				var rdir := AppPaths.round_folder(str(rc["season"]), int(rc["round"]))
+				return [_out_dir().path_join(rdir).path_join(sname if sname != "" else "League").path_join(CATEGORY["recap"]), base]
 		"ranks":
 			base = "%s_ranks" % _slug(LeagueSettings.label(source_pick.get_item_text(source_pick.selected))) if source_pick.selected >= 0 else "ranks"
-	var dir := _out_dir().path_join(_round_folder(season, code)).path_join(_series_name(code)).path_join(CATEGORY.get(kind, "Other"))
+	var rdir := next_dir if next_dir != "" else _round_folder(season, code)
+	var dir := _out_dir().path_join(rdir).path_join(_series_name(code)).path_join(CATEGORY.get(kind, "Other"))
 	return [dir, base]
 
 
@@ -1243,10 +1396,7 @@ func _size_suffix() -> String:
 
 
 func _out_dir() -> String:
-	var docs := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
-	if docs == "":   # no Documents folder on this system: the app's data folder instead
-		docs = OS.get_user_data_dir()
-	return docs.path_join(OUT_DIR_NAME)
+	return AppPaths.graphics()
 
 
 func _save() -> void:

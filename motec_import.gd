@@ -70,7 +70,7 @@ func _guess_class(file_name: String, classes: Array) -> String:
 
 
 func start(paths: Array) -> void:
-	motec_courses = Profiles.courses().duplicate()
+	motec_courses = Profiles.courses_sorted()
 	motec_classes = Profiles.classes().duplicate()
 	motec_courses.erase("")
 	# alphabetical, ignoring case

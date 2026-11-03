@@ -1,8 +1,8 @@
-# LMU Elo
+# Grid Ledger
 
-A league tool for **Le Mans Ultimate**, built in Godot 4.7. It reads the game's result XML files and
-turns them into driver ratings, standings, reports, race forecasts and broadcast graphics for the
-OOFS Racing league.
+A league tool for **Le Mans Ultimate**, built in Godot 4.7 (working name; the project's internal
+name is still `LMU_Elo`). It reads the game's result XML files and turns them into driver ratings,
+standings, reports, race forecasts and broadcast graphics for the OOFS Racing league.
 
 ## Getting started
 
@@ -54,35 +54,48 @@ Event predictions, championship standings (driver and team), season scenarios (t
 track cards, driver cards (single or batch) and ranks, each in three sizes: Instagram post,
 Instagram story and stream (1920 × 1080). Stream standings show the whole field, 10 per page.
 
-Saved images go to `Documents/LMU_Elo graphics/`, filed the way they are sent to the broadcaster:
+Saved images go to `Documents/Grid Ledger/Graphics/`, filed the way they are sent to the broadcaster:
 
 ```
-Season6_R4/Enduro/Standings/enduro_gt3_standings_p1.png
-Season6_R4/Enduro/Championship Scenario/gt3_title_fight.png
+s6_r4/Enduro/Standings/enduro_gt3_standings_p1.png
+s6_r4/Enduro/Championship Scenario/gt3_title_fight.png
 ```
 
-(`R4` = rounds run so far). Saving again replaces the file of the same name.
+(`s6_r4` = season 6, round 4: the round the image is for. Forecasts, track cards and title fights go in the next race's folder, standings, ranks, driver cards and recaps in the folder of the round they show. Folders from earlier versions named `Season6_R4` are renamed on start). Saving again replaces the file of the same name.
 
 ## Your data
 
-Everything is stored in Godot's user data folder:
+Everything lives in `Documents/Grid Ledger/`:
 
-- Windows: `%APPDATA%\Godot\app_userdata\LMU_Elo\`
-- Linux: `~/.local/share/godot/app_userdata/LMU_Elo/`
-- macOS: `~/Library/Application Support/Godot/app_userdata/LMU_Elo/`
+| Folder | Contents |
+|---|---|
+| `Data/` | Ratings, events, archived results, track profiles, forecasts, settings (table below) |
+| `Graphics/` | Saved images (`s6_r4/...`: season 6, round 4) |
+| `Backups/` | Backup zips, and the data set aside by a restore (`Before restore <date>`) |
+| `Exports/` | Excel files |
 
-| Path | Contents |
+| In `Data/` | Contents |
 |---|---|
 | `elo.json` | Ratings and rating history (`elo.backup.json`: the previous save) |
-| `events/` | One file per rated event: results, stats, penalties |
+| `events/` | One file per rated session: results, stats, penalties |
 | `xml/` | Archived copies of every imported result file |
 | `tracks/` | Telemetry track profiles |
 | `forecasts/` | Saved forecasts (for the Forecast record report) |
 | `league_settings.json` | Settings |
+| `predict.json`, `ui.cfg` | Predictor training and screen choices |
 
-**Back up data** (sidebar) zips the whole folder into Documents. To restore, close the tool and
-unzip the backup over the data folder. **Recompute all** rebuilds every rating from the saved
-events; **Re-read archived XML** refreshes stats from the archived files without re-rating.
+Earlier versions kept the data in Godot's user data folder (`%APPDATA%\Godot\app_userdata\LMU_Elo\`
+on Windows) and the images in `Documents/LMU_Elo graphics/`. On the first start of this version both
+are copied into `Documents/Grid Ledger/`, and the old copies are left as they were (delete them once
+you are happy). If Documents cannot be written (a folder protection such as Windows "Controlled
+folder access" blocking it), the tool says so and keeps using the user data folder.
+
+**Back up data** (sidebar) zips the `Data/` folder into `Backups/`. **Restore backup...** picks a
+zip, shows what is in it and asks first; the current data is then moved (not deleted) to
+`Backups/Before restore <date>/`, the backup is unpacked, and the tool restarts. A zip whose files
+sit inside a folder (unzipped and zipped again) works too; any other zip is refused.
+**Recompute all** rebuilds every rating from the saved events; **Re-read archived XML** refreshes
+stats from the archived files without re-rating.
 
 ## Tests
 
@@ -103,5 +116,6 @@ gets stuck. See `tests/README.md` for details.
 - Screens: `review_screen.gd` (frame and sidebar) and one `*_view.gd` per screen.
 - Graphics: `graphics_view.gd` (screen, data for each image, saving) and `graphic_card.gd`
   (drawing).
+- Files: `app_paths.gd` (where everything is kept, first-start copy, backup and restore).
 - Models: `driver_grades.gd`, `ranks.gd`, `track_grades.gd`, `driver_track_fit.gd`,
   `wet_weather.gd`, `season_scenarios.gd`, `league_settings.gd`.

@@ -18,7 +18,7 @@ const VIEWS := [
 	["profiles", "Profiles", "Lap-data fingerprints of drivers, cars and tracks, and the telemetry track layouts."],
 	["predict", "Predict", "Monte Carlo forecast of qualifying and the race."],
 	["penalties", "Penalties", "Steward decisions after a race was rated: time penalties, dropped positions, disqualifications. Ratings, ranks and standings are recomputed."],
-	["graphics", "Graphics", "Images for social media and the stream: race forecasts, standings, ranks and driver cards. Saved as PNG in Documents."],
+	["graphics", "Graphics", "Images for social media and the stream: race forecasts, standings, ranks and driver cards. Saved as PNG in Documents/Grid Ledger/Graphics."],
 	["settings", "Settings", "League settings: rank names and limits, standings points, grading. Saved in league_settings.json in the app's data folder."],
 ]
 
@@ -27,6 +27,10 @@ var status := Label.new()
 var clear_btn := Button.new()   # empties the status bar
 const STATUS_LINES := 6         # the bar shows at most this many lines; hover it for the rest
 var confirm_dialog := ConfirmationDialog.new()
+var restore_picker := FileDialog.new()
+var restore_dialog := ConfirmationDialog.new()
+var restore_path := ""
+var restore_safety := ""   # folder in Backups the current data is moved to
 var nav_buttons := {}               # view key -> sidebar Button
 var progress_bar := ProgressBar.new()   # status bar, shown while files are being read
 var busy := false                   # an import is running: further drops wait
@@ -44,6 +48,10 @@ var settings_view := SettingsView.new()
 var graphics_view := GraphicsView.new()
 var penalties_view := PenaltiesView.new()
 var motec := MotecImport.new()
+# The name people see (window title, sidebar). The project's internal name stays "LMU_Elo" in
+# project.godot: Godot keeps the data folder under that name, so renaming the app never moves it.
+const APP_NAME := "Grid Ledger"
+var brand_box := HBoxContainer.new()   # sidebar header: league logo, name, tool name
 
 
 func _ready() -> void:
@@ -53,6 +61,7 @@ func _ready() -> void:
 	get_window().theme = look
 	theme = look
 	get_window().min_size = Vector2i(960, 600)
+	get_window().title = APP_NAME
 	RenderingServer.set_default_clear_color(UiTheme.BG)
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	var bg := Panel.new()
@@ -72,15 +81,9 @@ func _ready() -> void:
 	var nav := VBoxContainer.new()
 	nav.add_theme_constant_override("separation", 4)
 	side.add_child(nav)
-	var app := Label.new()
-	app.text = "LMU Elo"
-	app.theme_type_variation = "HeaderLarge"
-	nav.add_child(app)
-	var tagline := Label.new()
-	tagline.text = "Le Mans Ultimate league tool"
-	tagline.theme_type_variation = "Muted"
-	tagline.add_theme_font_size_override("font_size", 12)
-	nav.add_child(tagline)
+	# header like the top of every graphic: league logo, league name in the accent, the tool's name
+	nav.add_child(brand_box)
+	_fill_brand()
 	nav.add_child(_gap(18))
 	nav.add_child(_section("SCREENS"))
 	var group := ButtonGroup.new()
@@ -102,11 +105,13 @@ func _ready() -> void:
 	nav.add_child(_side_btn("Recompute all...", confirm_dialog.popup_centered,
 		"Rebuild every rating from the saved events, oldest to newest."))
 	nav.add_child(_side_btn("Export all to Excel", _export,
-		"Ratings, history and events in one workbook, saved to Documents."))
+		"Ratings, history and events in one workbook, saved to Documents/Grid Ledger/Exports."))
 	nav.add_child(_side_btn("Re-read archived XML", _reread,
 		"Read the archived result files again, so newer lap-data measures are filled in."))
 	nav.add_child(_side_btn("Back up data", _backup,
-		"Save everything (ratings, events, archived results, track profiles, settings) in one .zip in Documents."))
+		"Save everything (ratings, events, archived results, track profiles, settings) in one .zip in Documents/Grid Ledger/Backups."))
+	nav.add_child(_side_btn("Restore backup...", _pick_backup,
+		"Replace your data with a backup zip. Your current data is set aside in Backups first, then Grid Ledger restarts."))
 
 	# main column: title, the screen, status bar
 	var main := VBoxContainer.new()
@@ -135,7 +140,7 @@ func _ready() -> void:
 	main.add_child(status_bar)
 	status.theme_type_variation = "Muted"
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status.text = "Ready." if Elo.load_error == "" else Elo.load_error
+	status.text = _start_message()
 	_update_lap_data.call_deferred()
 	status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var status_row := HBoxContainer.new()
@@ -168,15 +173,39 @@ func _ready() -> void:
 	for v in [driver_view, reports_view, profiles_view, predict_view, penalties_view, graphics_view, settings_view]:
 		v.notice.connect(set_status)
 	settings_view.saved.connect(data_changed)
+	settings_view.saved.connect(_restyle)
 	add_child(motec)
 
 	# recompute confirmation
 	confirm_dialog.dialog_text = "Rebuild every rating from the saved events, oldest to newest?\nThe current ratings are backed up first."
 	confirm_dialog.confirmed.connect(_recompute)
 	add_child(confirm_dialog)
+	restore_picker.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	restore_picker.access = FileDialog.ACCESS_FILESYSTEM
+	restore_picker.filters = PackedStringArray(["*.zip ; Backup zips"])
+	restore_picker.title = "Pick a backup to restore"
+	restore_picker.use_native_dialog = true
+	restore_picker.file_selected.connect(_confirm_restore)
+	add_child(restore_picker)
+	restore_dialog.title = "Restore backup"
+	restore_dialog.ok_button_text = "Restore and restart"
+	restore_dialog.confirmed.connect(_restore)
+	add_child(restore_dialog)
 
 	show_view("review")
 	get_window().files_dropped.connect(_on_files_dropped)
+
+
+# First line in the status bar: where the data is (when that changed or is unusual), load problems.
+func _start_message() -> String:
+	var lines := []
+	if AppPaths.migrated_from != "":
+		lines.append("Your data now lives in %s (copied from %s, where the old copy was left as it was)." % [AppPaths.root(), AppPaths.migrated_from])
+	if AppPaths.fallback_reason != "":
+		lines.append(AppPaths.fallback_reason + " Data is kept in " + OS.get_user_data_dir() + ".")
+	if Elo.load_error != "":
+		lines.append(Elo.load_error)
+	return "\n".join(lines) if not lines.is_empty() else "Ready."
 
 
 # ---------- Screens ----------
@@ -230,6 +259,52 @@ func refresh_profiles() -> void:
 # After any change to the data: driver history (Profiles) is rebuilt and the screen on display
 # is redrawn, so profiles, track fit and predictions never show data from before an import,
 # merge or recompute.
+func _fill_brand() -> void:
+	for c in brand_box.get_children():
+		brand_box.remove_child(c)
+		c.queue_free()
+	brand_box.add_theme_constant_override("separation", 10)
+	var path := str(LeagueSettings.get_value("brand_logo"))
+	if path != "" and FileAccess.file_exists(path):
+		var img := Image.load_from_file(path)
+		if img != null and not img.is_empty():
+			var logo := TextureRect.new()
+			logo.texture = ImageTexture.create_from_image(img)
+			logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			logo.custom_minimum_size = Vector2(46, 46)
+			brand_box.add_child(logo)
+	var words := VBoxContainer.new()
+	words.add_theme_constant_override("separation", 0)
+	brand_box.add_child(words)
+	var league := str(LeagueSettings.get_value("brand_name")).strip_edges()
+	if league != "":
+		var ll := Label.new()
+		ll.text = league.to_upper()
+		ll.add_theme_color_override("font_color", UiTheme.ACCENT)
+		ll.add_theme_font_size_override("font_size", 12)
+		words.add_child(ll)
+	var app := Label.new()
+	app.text = APP_NAME
+	app.theme_type_variation = "HeaderLarge"
+	words.add_child(app)
+	if league == "":
+		var tagline := Label.new()
+		tagline.text = "Le Mans Ultimate league tool"
+		tagline.theme_type_variation = "Muted"
+		tagline.add_theme_font_size_override("font_size", 12)
+		words.add_child(tagline)
+
+
+# Settings saved: the brand colours, logo and name may have changed, so the look follows.
+func _restyle() -> void:
+	var look := UiTheme.build()
+	get_window().theme = look
+	theme = look
+	RenderingServer.set_default_clear_color(UiTheme.BG)
+	_fill_brand()
+
+
 func data_changed() -> void:
 	Profiles.rebuild()
 	for v in [ratings_view, driver_view, reports_view, profiles_view, predict_view]:
@@ -270,16 +345,15 @@ func _recompute() -> void:
 	data_changed()
 
 
-# ---------- Backup ----------
-# One zip with the whole data folder except Godot's own logs and caches. To restore: close the
-# app, unzip into the data folder (Project > Open User Data Folder in the editor), start again.
+# ---------- Backup and restore ----------
+# One zip with the whole data folder (see app_paths.gd), in Documents/Grid Ledger/Backups.
 func _backup() -> void:
 	if busy:
 		return
-	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
-	var path := "%s/lmu_elo_backup_%s.zip" % [dir, Time.get_datetime_string_from_system().replace(":", "-")]
+	var dir := AppPaths.backups()
+	var path := "%s/grid_ledger_backup_%s.zip" % [dir, Time.get_datetime_string_from_system().replace(":", "-")]
 	progress(0, 1, "Backing up...")
-	var result: Array = await in_background(func(): return _write_backup(path))
+	var result: Array = await in_background(func(): return AppPaths.write_backup(path))
 	progress_done()
 	if result[0] == OK:
 		status.text = "Backed up %d files to %s" % [result[1], path]
@@ -288,31 +362,40 @@ func _backup() -> void:
 		status.text = "Backup failed (error %d)." % result[0]
 
 
-# Runs on the background thread: [error, files written]
-static func _write_backup(path: String) -> Array:
-	var zip := ZIPPacker.new()
-	var err := zip.open(path)
-	if err != OK:
-		return [err, 0]
-	var count := 0
-	var todo := [""]
-	var root := ProjectSettings.globalize_path("user://")
-	while not todo.is_empty():
-		var rel: String = todo.pop_back()
-		var abs_dir := root.path_join(rel)
-		for d in DirAccess.get_directories_at(abs_dir):
-			if rel == "" and d in ["logs", "shader_cache", "objectdb_snapshots", "vulkan"]:
-				continue
-			todo.append(rel.path_join(d))
-		for f in DirAccess.get_files_at(abs_dir):
-			if f.ends_with(".tmp"):
-				continue
-			zip.start_file(rel.path_join(f))
-			zip.write_file(FileAccess.get_file_as_bytes(abs_dir.path_join(f)))
-			zip.close_file()
-			count += 1
-	zip.close()
-	return [OK, count]
+# Restore: pick a zip, check it, confirm, set the current data aside, unpack, restart.
+func _pick_backup() -> void:
+	if busy:
+		status.text = "Wait until the files being read are done, then restore."
+		return
+	restore_picker.current_dir = AppPaths.backups()
+	restore_picker.popup_centered_ratio(0.6)
+
+
+func _confirm_restore(path: String) -> void:
+	var info := AppPaths.inspect_backup(path)
+	if not info["ok"]:
+		status.text = "Not restored: " + info["error"]
+		return
+	restore_path = path
+	restore_safety = "Before restore " + Time.get_datetime_string_from_system().replace(":", "-").replace("T", " ")
+	var local := FileAccess.get_modified_time(path) + int(Time.get_time_zone_from_system().get("bias", 0)) * 60
+	var modified := Time.get_datetime_string_from_unix_time(local, true).left(16)
+	restore_dialog.dialog_text = ("Replace your current data with this backup?\n\n%s\nmade %s, %d files%s\n\n"
+		+ "Your current data is not deleted: it is moved to Backups/%s first.\nGrid Ledger restarts when the restore is done.") \
+		% [path.get_file(), modified, info["files"],
+		"" if info["has_ratings"] else " (no ratings file: they are rebuilt with Recompute all)", restore_safety]
+	restore_dialog.popup_centered()
+
+
+func _restore() -> void:
+	var safety := AppPaths.backups().path_join(restore_safety)
+	var r := AppPaths.restore_backup(restore_path, safety)
+	if not r["ok"]:
+		status.text = "Not restored: " + r["error"]
+		return
+	# everything in memory is the old data: start again on the restored files
+	OS.set_restart_on_exit(true, OS.get_cmdline_args())
+	get_tree().quit()
 
 
 # On start: if the lap-data reader was improved since the events were saved, re-read the
@@ -349,13 +432,13 @@ func _export() -> void:
 	if Elo.boards().is_empty():
 		status.text = "Nothing to export yet."
 		return
-	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	var dir := AppPaths.exports()
 	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
 	var path := "%s/lmu_ratings_%s.xlsx" % [dir, stamp]
 	var err := Elo.export_xlsx(path)
 	if err == OK:
 		status.text = "Exported: " + path
-		OS.shell_open(dir)   # opens the Documents folder
+		OS.shell_open(dir)   # opens the Exports folder
 	else:
 		status.text = "Export failed (error %d)" % err
 

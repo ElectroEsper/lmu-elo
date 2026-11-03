@@ -125,7 +125,7 @@ func _export() -> void:
 	for t in shown:
 		sheets.append({"name": LeagueSettings.label(t["title"]), "headers": t["headers"], "rows": t["rows"]})
 	var driver_name := Elo.pretty(_picked())
-	var dir := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	var dir := AppPaths.exports()
 	var stamp := Time.get_datetime_string_from_system().replace(":", "-")
 	var path := "%s/lmu_profile_%s_%s.xlsx" % [dir, driver_name.validate_filename().replace(" ", "_"), stamp]
 	var err := Elo.write_xlsx(path, sheets)
