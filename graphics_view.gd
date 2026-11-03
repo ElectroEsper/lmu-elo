@@ -649,6 +649,8 @@ func _teams_spec() -> Dictionary:
 	var rows := []
 	for tn in ch.get("teams", {}):
 		var e: Dictionary = ch["teams"][tn]
+		if (e["drivers"] as Array).size() < 2:
+			continue   # line-up not complete yet (one driver set): not shown
 		var members := PackedStringArray((e["drivers"] as Array).map(func(d): return Elo.pretty(str(d["name"]))))
 		var short := PackedStringArray((e["drivers"] as Array).map(func(d):   # surnames, for the narrow sizes
 			var parts := Elo.pretty(str(d["name"])).split(" ", false)
