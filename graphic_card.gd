@@ -546,19 +546,26 @@ func _build_standings(body: VBoxContainer) -> void:
 	if int(spec.get("per_page", 0)) > 0:
 		per = int(spec["per_page"])
 		first = int(spec.get("page", 0)) * per
+	var show_dropped := bool(spec.get("show_dropped", false))
+	var show_ballast := bool(spec.get("show_ballast", false)) and not bool(spec.get("team_mode", false))
+	# column widths; portrait images with every column get short headers so names keep their room
+	var tight := not landscape and show_dropped and show_ballast
+	var W := {"gap": 70, "wins": 84, "pod": 124, "drop": 124, "kg": 124, "pts": 120} if not tight else \
+		{"gap": 58, "wins": 66, "pod": 70, "drop": 78, "kg": 110, "pts": 90}
 	var h := HBoxContainer.new()
 	var spacer := _label("", 22, MUTED, "bold", 0, 60)
 	h.add_child(spacer)
 	var dl := _label("TEAM" if bool(spec.get("team_mode", false)) else "DRIVER", 24, MUTED, "bold", 2)
 	dl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	h.add_child(dl)
-	h.add_child(_label("GAP", 22, MUTED, "bold", 2, 70, HORIZONTAL_ALIGNMENT_RIGHT))
-	h.add_child(_label("WINS", 22, MUTED, "bold", 2, 84, HORIZONTAL_ALIGNMENT_RIGHT))
-	h.add_child(_label("PODIUMS", 22, MUTED, "bold", 2, 124, HORIZONTAL_ALIGNMENT_RIGHT))
-	var show_dropped := bool(spec.get("show_dropped", false))
+	h.add_child(_label("GAP", 22, MUTED, "bold", 2, W["gap"], HORIZONTAL_ALIGNMENT_RIGHT))
+	h.add_child(_label("WINS" if not tight else "WIN", 22, MUTED, "bold", 2, W["wins"], HORIZONTAL_ALIGNMENT_RIGHT))
+	h.add_child(_label("PODIUMS" if not tight else "POD", 22, MUTED, "bold", 2, W["pod"], HORIZONTAL_ALIGNMENT_RIGHT))
 	if show_dropped:
-		h.add_child(_label("DROPPED", 22, MUTED, "bold", 2, 124, HORIZONTAL_ALIGNMENT_RIGHT))
-	h.add_child(_label("POINTS", 22, MUTED, "bold", 2, 120, HORIZONTAL_ALIGNMENT_RIGHT))
+		h.add_child(_label("DROPPED" if not tight else "DROP", 22, MUTED, "bold", 2, W["drop"], HORIZONTAL_ALIGNMENT_RIGHT))
+	if show_ballast:   # success ballast carried into the next race
+		h.add_child(_label("BALLAST", 22, MUTED, "bold", 2, W["kg"], HORIZONTAL_ALIGNMENT_RIGHT))
+	h.add_child(_label("POINTS" if not tight else "PTS", 22, MUTED, "bold", 2, W["pts"], HORIZONTAL_ALIGNMENT_RIGHT))
 	body.add_child(h)
 	var leader := float(rows[0]["points"]) if not rows.is_empty() else 0.0
 	var list := VBoxContainer.new()
@@ -585,13 +592,17 @@ func _build_standings(body: VBoxContainer) -> void:
 		else:
 			var who := _fit(_label(str(r["name"]), 34, TEXT, "bold"))
 			row.add_child(who)
-		row.add_child(_label("-%d" % roundi(leader - float(r["points"])) if i > 0 else "", 24, MUTED, "regular", 0, 70, HORIZONTAL_ALIGNMENT_RIGHT))
-		row.add_child(_label(str(int(r["wins"])), 30, TEXT, "bold", 0, 84, HORIZONTAL_ALIGNMENT_RIGHT))
-		row.add_child(_label(str(int(r["pod"])), 30, TEXT, "bold", 0, 124, HORIZONTAL_ALIGNMENT_RIGHT))
+		row.add_child(_label("-%d" % roundi(leader - float(r["points"])) if i > 0 else "", 24, MUTED, "regular", 0, W["gap"], HORIZONTAL_ALIGNMENT_RIGHT))
+		row.add_child(_label(str(int(r["wins"])), 30, TEXT, "bold", 0, W["wins"], HORIZONTAL_ALIGNMENT_RIGHT))
+		row.add_child(_label(str(int(r["pod"])), 30, TEXT, "bold", 0, W["pod"], HORIZONTAL_ALIGNMENT_RIGHT))
 		if show_dropped:   # points the dropped round(s) took off the total ("-" when nothing scored was dropped)
 			var dp := int(r.get("dropped", 0))
-			row.add_child(_label("-%d" % dp if dp > 0 else "-", 26, MUTED, "regular", 0, 124, HORIZONTAL_ALIGNMENT_RIGHT))
-		row.add_child(_label(str(int(r["points"])), 36, accent if i == 0 else TEXT, "title", 0, 100, HORIZONTAL_ALIGNMENT_RIGHT))
+			row.add_child(_label("-%d" % dp if dp > 0 else "-", 26, MUTED, "regular", 0, W["drop"], HORIZONTAL_ALIGNMENT_RIGHT))
+		if show_ballast:
+			var kg := int(r.get("ballast", 0))
+			row.add_child(_label("%d kg" % kg if kg > 0 else "-", 26, TEXT if kg > 0 else MUTED, "bold" if kg > 0 else "regular",
+				0, W["kg"], HORIZONTAL_ALIGNMENT_RIGHT))
+		row.add_child(_label(str(int(r["points"])), 36, accent if i == 0 else TEXT, "title", 0, W["pts"] - 20, HORIZONTAL_ALIGNMENT_RIGHT))
 		list.add_child(panel)
 	if str(spec.get("rounds_note", "")) != "":
 		body.add_child(_label(str(spec["rounds_note"]), 24, MUTED, "regular"))

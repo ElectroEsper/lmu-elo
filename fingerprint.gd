@@ -11,7 +11,7 @@ extends RefCounted
 ##             "classes": {cls: {"ref_s", "kmh", "top", "wear_km", "fuel_km", "tl", "con", "n",
 ##                               "passes", "passes_10", "lap1_moves", "pit_swaps"}},
 ##             "drivers": {name: {"cls", "car", "laps", "grid", "pos", "pace", "pace_rel", "cons",
-##                                "top_rel", "wear_rel", "fuel_rel", "tl", "con", "pen"}}},
+##                                "top_rel", "wear_rel", "fuel_rel", "tl", "con", "pen", "mass"}}},
 ##   "quali": {"classes": {cls: {"best_s", "kmh", "top", "s1", "s2", "s3"}},
 ##             "drivers": {name: {"cls", "car", "best", "rel"}}}
 ## }
@@ -19,7 +19,7 @@ extends RefCounted
 ## tl = track-limit events per lap, con = contacts with other cars per lap,
 ## cons = lap-time spread in % of the median clean lap, wear_km / fuel_km are % per km.
 
-const VERSION := 6   # 6: virtual energy per km ("ve_km") for the pit-stop forecast. 5: 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
+const VERSION := 7   # 7: success ballast carried ("mass", kg). 6: virtual energy per km ("ve_km") for the pit-stop forecast. 5: 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
 const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5 median are not "clean"
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
@@ -275,6 +275,7 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			"tl": cur["tl"].get(nm, {}).size() / float(n),
 			"con": cur["con"].get(nm, 0) / float(n),
 			"pen": cur["pens"].get(nm, 0),
+			"mass": float(d.get("PenaltyMass", "0")),   # success ballast carried (kg)
 		}
 		var x := {}
 		if ratio > 0.0:
@@ -535,7 +536,7 @@ static func _quali(cur: Dictionary, length: float) -> Dictionary:
 			if bl <= 0.0:
 				continue
 			best = bl
-		rows[nm] = {"cls": cls, "car": d.get("CarType", ""), "best": best}
+		rows[nm] = {"cls": cls, "car": d.get("CarType", ""), "best": best, "mass": float(d.get("PenaltyMass", "0"))}
 		info[nm] = {"best": best, "top": top, "sec": sec}
 	var by_class := {}
 	for nm in rows:

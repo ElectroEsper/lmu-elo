@@ -1010,7 +1010,8 @@ func _standings_spec() -> Dictionary:
 	var rows := []
 	for d in ch.get("drivers", {}):
 		var e: Dictionary = ch["drivers"][d]
-		rows.append({"name": d, "points": e["points"], "wins": e["wins"], "pod": e["pod"], "dropped": e.get("dropped", 0)})
+		rows.append({"name": d, "points": e["points"], "wins": e["wins"], "pod": e["pod"], "dropped": e.get("dropped", 0),
+			"ballast": int(e.get("ballast", -1))})
 	rows.sort_custom(func(a, b):
 		if a["points"] != b["points"]:
 			return a["points"] > b["points"]
@@ -1021,10 +1022,13 @@ func _standings_spec() -> Dictionary:
 	var note := "After %d round%s" % [int(ch.get("rounds", 0)), "" if int(ch.get("rounds", 0)) == 1 else "s"]
 	if drops > 0:
 		note += " · worst %d result%s dropped" % [drops, "" if drops == 1 else "s"]
-	var sp := {"kind": "standings", "title": "%s standings" % LeagueSettings.label(key), "subtitle": season, "rows": rows,
-		"rounds_note": note, "empty": rows.is_empty(), "show_dropped": drops > 0}
-	_page_spec(sp, rows.size(), note)
 	var code := LeagueSettings.series_code(str(ch.get("series", "")))   # "Sprint" -> "sc"
+	# success ballast for the next race: while the season still has races to run, in classes that carry it
+	var show_ballast := not SuccessBallast.table_for(str(ch.get("cls", ""))).is_empty() \
+		and (code == "" or int(ch.get("rounds", 0)) < LeagueSettings.season_rounds(code))
+	var sp := {"kind": "standings", "title": "%s standings" % LeagueSettings.label(key), "subtitle": season, "rows": rows,
+		"rounds_note": note, "empty": rows.is_empty(), "show_dropped": drops > 0, "show_ballast": show_ballast}
+	_page_spec(sp, rows.size(), note)
 	if code != "":
 		sp["accent"] = LeagueSettings.series_color(code)
 	return sp

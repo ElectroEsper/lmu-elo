@@ -47,13 +47,19 @@ const DEFAULTS := {
 	# log-loss 1.550 -> 1.566 (winners given a little less). Kept: Brier is the main measure.
 	# Heavier incident costs (contact 4 or 8 s, damage 0.40%/lap) were all worse: kept at 1 s, 0.15%.
 	"dnf": 1.0,
+	# 1 = the success ballast a driver carries into the race slows them (ballast_effect). An upgrade
+	# (Test upgrades keeps it only if it helps). Backtest on the 30 races run with ballast (autumn
+	# 2026): worse, Brier 0.2179 -> 0.2219 (predicted quali), 0.2071 -> 0.2092 (actual grid): the
+	# drivers carrying the most kept beating what the slower pace says (ballast follows form).
+	"ballast": 1.0,
+	"ballast_hist": 1.0,   # past pace taken without the ballast carried that day (neutral in the backtest)
 }
 const K_TRACK := 2.0   # sessions at a track before the driver's own history there gets half weight
 const PIT_SD := 3.0    # seconds of scatter per pit stop
 # Pit stops are not an upgrade any more: they follow the race rules (Settings > Race rules, or the
 # Predict screen), and the backtest replays every past race under its own rules.
 const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track tendencies"],
-	["traffic", "Traffic (multiclass)"]]
+	["traffic", "Traffic (multiclass)"], ["ballast", "Success ballast"]]
 # The telemetry laps are very competitive. Over 66 dry league races the top five's typical clean
 # race lap was this much slower (the winner's best lap was about 2% slower); other classes: x1.03.
 const TEL_RACE_RATIO := {"Hyper": 1.045, "GT3": 1.03, "LMP3": 1.03}
@@ -91,6 +97,16 @@ const B_TOP := -0.1    # high-top-speed drivers gain at top-speed tracks
 const B_FUEL := 0.1    # thirsty drivers lose at fuel-hungry tracks
 const ELO_TO_PACE := -0.009  # fallback when a driver has no lap data: % pace per Elo point above 1500
 							 # (was -0.03 before the rating model change spread ratings ~3.4x wider)
+# Success ballast slows a car by about k % of its lap per kg. k is learned from the league's races
+# (the result files record each car's ballast): within each driver, laps with more ballast vs
+# laps with less, pulled towards the rule of thumb (0.1 s per 10 kg on a 100 s lap) by how
+# uncertain the league's own figure still is.
+const BALLAST_PRIOR := 0.01      # % lap time per kg
+const BALLAST_PRIOR_SD := 0.005
+const BALLAST_MAX_GAP := 5.0     # % off the class median: a race this far off (spin, damage) is left out
+var _ballast_fit := {}
+var _ballast_fit_rev := -1
+
 const N_SIMS := 4000
 const BACKTEST_SIMS := 300
 const STRENGTHS := [0.5, 1.5]    # extra strengths tried for a kept upgrade (1.0 is the first test)
@@ -161,8 +177,97 @@ func driver_inputs(names: Array, cls: String, before := "", course := "") -> Arr
 			"track_gap_q": fit["gap_q"],
 			"tend": fit["tend"],
 			"dnf": dnf_rate(nm, cls, before),
+			"ballast": 0.0,   # kg; set by forecast() (and the backtest: what the car carried)
 		})
 	return out
+
+
+## % lap time per kg of success ballast (see ballast_effect); 0 when switched off in the params.
+func ballast_k() -> float:
+	return float(ballast_effect()["k"]) * float(params.get("ballast", 1.0))
+
+
+## The same, for taking ballast out of past races: always on ("ballast_hist"). Backtest on the 30
+## races run with ballast (autumn 2026): no change (Brier 0.2179 -> 0.2183 / 0.2071 -> 0.2068).
+func ballast_k_history() -> float:
+	return float(ballast_effect()["k"]) * float(params.get("ballast_hist", 1.0))
+
+
+## The ballast effect learned from the league's races: {"k" (% per kg, used), "k_data", "se"
+## (the league's own figure and its uncertainty; se < 0 = no data), "n" (driver-races), "races",
+## "text"}. Recomputed when the lap data changes.
+func ballast_effect() -> Dictionary:
+	if _ballast_fit_rev == Profiles.revision and not _ballast_fit.is_empty():
+		return _ballast_fit
+	_ballast_fit_rev = Profiles.revision
+	_ballast_fit = {"k": BALLAST_PRIOR, "k_data": 0.0, "se": -1.0, "n": 0, "races": 0, "text": ""}   # no recursion while fitting
+	# per driver and class: [kg, pace %] in dry races where ballast was in use
+	var by_driver := {}
+	var races := 0
+	for day in Profiles.days:
+		var race: Dictionary = day["race"]
+		if race.is_empty() or day.get("training", false) or float(race.get("wet", 0.0)) > 0.0:
+			continue
+		var drivers: Dictionary = race.get("drivers", {})
+		var used := false
+		for nm in drivers:
+			if float(drivers[nm].get("mass", 0.0)) > 0.0:
+				used = true
+				break
+		if not used:
+			continue
+		races += 1
+		for nm in drivers:
+			var r: Dictionary = drivers[nm]
+			if absf(float(r.get("pace_rel", 0.0))) > BALLAST_MAX_GAP:
+				continue
+			var key := "%s|%s" % [r["cls"], nm]
+			if not by_driver.has(key):
+				by_driver[key] = []
+			by_driver[key].append([float(r.get("mass", 0.0)), float(r.get("pace_rel", 0.0))])
+	# within each driver: deviations from their own averages
+	var sxx := 0.0
+	var sxy := 0.0
+	var n := 0
+	var groups := 0
+	var dev := []
+	for key in by_driver:
+		var pts: Array = by_driver[key]
+		if pts.size() < 2:
+			continue
+		var mx := 0.0
+		var my := 0.0
+		for p in pts:
+			mx += p[0]
+			my += p[1]
+		mx /= pts.size()
+		my /= pts.size()
+		for p in pts:
+			sxx += (p[0] - mx) * (p[0] - mx)
+			sxy += (p[0] - mx) * (p[1] - my)
+			dev.append([p[0] - mx, p[1] - my])
+		n += pts.size()
+		groups += 1
+	var fit := {"k": BALLAST_PRIOR, "k_data": 0.0, "se": -1.0, "n": n, "races": races}
+	if sxx > 0.0 and n - groups > 2:
+		var k_data := sxy / sxx
+		var ss := 0.0
+		for d in dev:
+			ss += pow(d[1] - k_data * d[0], 2)
+		var se := sqrt(ss / (n - groups - 1) / sxx)
+		var w_data := 1.0 / (se * se)
+		var w_prior := 1.0 / (BALLAST_PRIOR_SD * BALLAST_PRIOR_SD)
+		fit["k_data"] = k_data
+		fit["se"] = se
+		fit["k"] = maxf((k_data * w_data + BALLAST_PRIOR * w_prior) / (w_data + w_prior), 0.0)
+	var per10 := func(k: float) -> String: return String.num(k * 10.0, 2)   # s per 10 kg on a 100 s lap
+	if float(fit["se"]) < 0.0:
+		fit["text"] = "10 kg of ballast = %s s on a 100 s lap (rule of thumb: no race with ballast in the lap data yet; Re-read archived XML brings it in)." % per10.call(BALLAST_PRIOR)
+	else:
+		fit["text"] = "10 kg of ballast = %s s on a 100 s lap. The league's own races (%d with ballast) say %s s, give or take %s, so it is pulled towards the %s s rule of thumb; it firms up as more races come in." % [
+			per10.call(fit["k"]), races, per10.call(fit["k_data"]), per10.call(fit["se"]), per10.call(BALLAST_PRIOR)]
+	_ballast_fit = fit
+	return fit
 
 
 # Chance that a driver retires (DNF or disqualification), from their finishing record in the
@@ -560,8 +665,9 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 			+ B_TOP * d["top_z"] * track["top_z"] + B_FUEL * d["fuel_z"] * track["fuel_z"])
 		var p_track := float(P.get("p_track", 0.0))
 		var p_tend := float(P.get("p_tend", 0.0))
-		base.append(d["pace"] + adj + p_track * float(d.get("track_gap_r", 0.0)) + p_tend * float(d.get("tend", 0.0)))
-		qbase.append(d["qpace"] + p_track * float(d.get("track_gap_q", 0.0)) + p_tend * float(d.get("tend", 0.0)))
+		var kg_slow := float(ballast_effect()["k"]) * float(P.get("ballast", 1.0)) * float(d.get("ballast", 0.0))
+		base.append(d["pace"] + adj + p_track * float(d.get("track_gap_r", 0.0)) + p_tend * float(d.get("tend", 0.0)) + kg_slow)
+		qbase.append(d["qpace"] + p_track * float(d.get("track_gap_q", 0.0)) + p_tend * float(d.get("tend", 0.0)) + kg_slow)
 		var n_stops := 0
 		if bool(plan.get("pits", false)) and pit_loss > 0.0:
 			# Everyone gets the class's number of stops: drivers save fuel to make the strategy rather
@@ -793,6 +899,18 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 		notes.append("No earlier race at this track: %s, and tyre / fuel track effects are off." % [
 			"lap time from telemetry" if tel_lap > 0.0 and lap_s <= 0.0 else "lap time comes from quali (or a default)"])
 	var inputs := driver_inputs(names, cls, "", course)
+	# success ballast for the next race of the series
+	var kg := SuccessBallast.current(series_name) if series_name != "" else {}
+	var n_kg := 0
+	for d in inputs:
+		d["ballast"] = float(kg.get(d["name"], 0))
+		n_kg += 1 if float(d["ballast"]) > 0.0 else 0
+	if n_kg > 0:
+		if float(params.get("ballast", 0.0)) > 0.0:
+			notes.append("Success ballast: %d driver%s carry some; 10 kg costs about %s s per 100 s of lap." % [
+				n_kg, "" if n_kg == 1 else "s", String.num(ballast_k() * 10.0, 2)])
+		else:
+			notes.append("Success ballast: %d driver%s carry some, not applied (the Success ballast upgrade is off)." % [n_kg, "" if n_kg == 1 else "s"])
 	var on := []
 	for u in UPGRADES:
 		if float(params.get(u[0], 0.0)) > 0.0:
@@ -843,6 +961,7 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 			"stops": res["stops"][i],
 			"track_gap": d["track_gap_r"], "tend": d["tend"],
 			"wet": d["wet"],
+			"ballast": d["ballast"],
 			"win_rain": res["wx"]["win_rain"][i] if res.has("wx") else -1.0,
 			"win_dry": res["wx"]["win_dry"][i] if res.has("wx") else -1.0,
 		})
@@ -899,7 +1018,7 @@ func backtest_races() -> Array:
 			for nm in day["race"]["drivers"]:
 				var r: Dictionary = day["race"]["drivers"][nm]
 				if r["cls"] == cls and r["grid"] > 0 and r["pos"] > 0:
-					rows.append({"name": nm, "grid": r["grid"], "pos": r["pos"]})
+					rows.append({"name": nm, "grid": r["grid"], "pos": r["pos"], "mass": float(r.get("mass", 0.0))})
 			if rows.size() < 8:
 				continue
 			var known := 0
@@ -911,15 +1030,17 @@ func backtest_races() -> Array:
 			rows.sort_custom(func(a, b): return a["grid"] < b["grid"])
 			var names := []
 			var pos := []
+			var mass := []
 			for r in rows:
 				names.append(r["name"])
 				pos.append(r["pos"])
+				mass.append(r["mass"])
 			var others := {}
 			var cs: Dictionary = day["race"]["classes"]
 			for c in cs:
 				if c != cls and float(cs[c].get("ref_s", 0.0)) > 0.0 and float(cs[cls].get("ref_s", 0.0)) > 0.0:
 					others[c] = {"n": float(cs[c].get("n", 0)), "ratio": float(cs[c]["ref_s"]) / float(cs[cls]["ref_s"])}
-			races.append({"date": day["date"], "cls": cls, "course": day["course"], "names": names, "pos": pos,
+			races.append({"date": day["date"], "cls": cls, "course": day["course"], "names": names, "pos": pos, "mass": mass,
 				"others": others, "series": str(day.get("series", "")), "rules": day.get("rules", {})})
 	return races
 
@@ -937,6 +1058,8 @@ func _score(races: Array, mode: int, sims: int, prm: Dictionary, cache := {}) ->
 				"inputs": driver_inputs(r["names"], r["cls"], r["date"], r["course"]),
 				"track": Profiles.track_info(r["course"], r["cls"], r["date"], r["date"]),
 			}
+			for i in r.get("mass", []).size():   # the ballast each car carried that day
+				cache[ri]["inputs"][i]["ballast"] = r["mass"][i]
 			cache[ri]["track"]["traffic"] = traffic_rates(r.get("others", {}))
 			cache[ri]["track"]["plan"] = r.get("rules", {})
 			if bool(r.get("rules", {}).get("pits", false)):

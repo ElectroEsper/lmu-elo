@@ -44,6 +44,7 @@ func _ready() -> void:
 		await _test_forecast_record()
 		_test_penalties()
 		await _test_season_scenarios()
+		_test_ballast()
 		await _test_screens()
 		_test_backup_restore()
 	# a script error the run survived is still a bug in the tool
@@ -265,6 +266,51 @@ func _data_fingerprint() -> Dictionary:
 		for f in DirAccess.get_files_at(root.path_join(rel)):
 			out[rel.path_join(f)] = FileAccess.get_md5(root.path_join(rel).path_join(f))
 	return out
+
+
+# Success ballast: the rules table, and season 6 replayed against the ballast the result files
+# say each car carried (the test data has no Penalties-page decisions, so a few cars differ).
+func _test_ballast() -> void:
+	_section("Success ballast")
+	check(SuccessBallast.delta("GT3", 1, "Finished Normally") == 15 and SuccessBallast.delta("GT3", 4, "Finished Normally") == 0
+		and SuccessBallast.delta("GT3", 12, "Finished Normally") == -15, "GT3 table (P1, P4, P12)")
+	check(SuccessBallast.delta("Hyper", 3, "Finished Normally") == 2 and SuccessBallast.delta("LMP3", 6, "Finished Normally") == -5,
+		"Hyper and LMP3 tables")
+	check(SuccessBallast.delta("GT3", 2, "DNF") == -15 and SuccessBallast.delta("GT3", 1, "DQ") == 0, "DNF = P7 or lower, DQ changes nothing")
+	check(SuccessBallast.delta("LMP2", 1, "Finished Normally") == 0, "A class without a table carries none")
+	check(SuccessBallast.cap("GT3") == 45 and SuccessBallast.cap("Hyper") == 30 and SuccessBallast.cap("LMP3") == 30
+		and SuccessBallast._clamp(60, "GT3") == 45 and SuccessBallast._clamp(40, "Hyper") == 30 and SuccessBallast._clamp(-5, "GT3") == 0,
+		"Caps: GT3 45 kg, Hyper and LMP3 30 kg, never below 0")
+	var same := 0
+	var total := 0
+	var worst := ""
+	for series in ["Sprint", "Enduro"]:
+		var sb := SuccessBallast.season("Season 6", series)
+		var rnd := 0
+		for ev in Elo.history:
+			if Elo.season_of(ev) != "Season 6" or Elo.series_of(ev) != series:
+				continue
+			if not (ev["changes"] as Array).any(func(c): return c["sess"] == "race"):
+				continue
+			rnd += 1
+			var saved = JSON.parse_string(FileAccess.get_file_as_string(AppPaths.file("events/%s.json" % ev["file"])))
+			var drv: Dictionary = saved.get("fp", {}).get("race", {}).get("drivers", {}) if saved is Dictionary else {}
+			for nm in drv:
+				if not sb.has(nm):
+					continue
+				for r in sb[nm]["rounds"]:
+					if int(r["round"]) == rnd:
+						total += 1
+						if int(r["before"]) == int(drv[nm].get("mass", -1)):
+							same += 1
+						elif worst == "":
+							worst = "%s R%d %s: rules %d kg, file %d kg" % [series, rnd, nm, r["before"], drv[nm].get("mass", -1)]
+	check(total > 50 and same >= total * 0.95, "Season 6 replays to the recorded ballast (%d of %d cars)" % [same, total], worst)
+	var fit := Predict.ballast_effect()
+	check(int(fit["races"]) > 0 and float(fit["k"]) > 0.0 and float(fit["k"]) < 0.03, "Ballast effect learned from the races with ballast", str(fit))
+	var rows: Array = Reports.season_points("Season 6").values()
+	check(rows.any(func(ch): return (ch["drivers"] as Dictionary).values().any(func(e): return int(e["ballast"]) > 0)),
+		"Standings carry each driver's ballast")
 
 
 func _test_traffic_formula() -> void:

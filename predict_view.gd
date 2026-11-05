@@ -877,7 +877,8 @@ func _add_rows(root: TreeItem, rows: Array, mode: int, overall_offset: int) -> v
 			it.set_tooltip_text(0, "Predicted starting place in class: ranked by expected grid place (%.1f)." % float(r["exp_grid"]))
 		else:
 			it.set_text(0, "-")
-		it.set_text(1, Elo.pretty(r["name"]) + ("" if r["known"] else " (new)"))
+		var kg := int(r.get("ballast", 0.0))
+		it.set_text(1, Elo.pretty(r["name"]) + ("" if r["known"] else " (new)") + ("  · %d kg" % kg if kg > 0 else ""))
 		if place > podium.size():   # podium rows already carry their own tooltip
 			it.set_tooltip_text(1, "In the results files: %s" % r["name"])
 		it.set_text(2, "%.1f" % (100.0 * r["pole"]) if has_quali else "-")
@@ -896,6 +897,8 @@ func _add_rows(root: TreeItem, rows: Array, mode: int, overall_offset: int) -> v
 			it.set_text(11, str(overall_offset + place))
 		var tip := "Race pace vs class median, in %%. Track history here: %+.2f%%, track tendencies: %+.2f%% (negative = quicker; applied only when that upgrade is on)." % [
 			float(r.get("track_gap", 0.0)), float(r.get("tend", 0.0))]
+		if kg > 0:
+			tip += " Success ballast %d kg: about %+.2f%% slower (shown pace is without it)." % [kg, Predict.ballast_k() * kg]
 		it.set_tooltip_text(9, tip)
 		for c in range(2, tree.columns):
 			it.set_text_alignment(c, HORIZONTAL_ALIGNMENT_RIGHT)

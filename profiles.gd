@@ -178,7 +178,8 @@ func raw_stats(who: String, cls: String, before := "") -> Dictionary:
 		var r: Dictionary = rec["r"]
 		if not r.is_empty():
 			s["n_r"] += 1
-			s["pace"] += r.get("pace_rel", 0.0)
+			# the pace the driver would have had without success ballast (see Predict.ballast_effect)
+			s["pace"] += r.get("pace_rel", 0.0) - Predict.ballast_k_history() * float(r.get("mass", 0.0))
 			s["tl"] += r.get("tl", 0.0)
 			s["con"] += r.get("con", 0.0)
 			s["cons"] += r.get("cons", 0.0)
@@ -195,7 +196,7 @@ func raw_stats(who: String, cls: String, before := "") -> Dictionary:
 		var q: Dictionary = rec["q"]
 		if not q.is_empty():
 			s["n_q"] += 1
-			s["qpace"] += q.get("rel", 0.0)
+			s["qpace"] += q.get("rel", 0.0) - Predict.ballast_k_history() * float(q.get("mass", 0.0))
 			if s["car"] == "":
 				s["car"] = q.get("car", "")
 	# sums -> means

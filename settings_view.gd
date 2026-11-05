@@ -17,6 +17,8 @@ var points_edit := LineEdit.new()
 var grade_spin := SpinBox.new()
 var drop_spin := SpinBox.new()
 var drop_after_spin := SpinBox.new()
+var ballast_rows := VBoxContainer.new()   # one row per class: name, kg for P1, P2, ...
+var ballast_note := Label.new()
 var class_rows := GridContainer.new()   # game class name -> name shown on screen
 var rule_rows := VBoxContainer.new()     # race rules: one row per series and starting season
 var series_rows := VBoxContainer.new()   # series: code in the file name -> name shown
@@ -96,6 +98,24 @@ func _ready() -> void:
 	drop_after_spin.min_value = 0
 	drop_after_spin.max_value = 20
 	_form_row(st_form, "Drops apply after round", drop_after_spin, "No round is dropped until this many rounds of the season are done (2 = the first drop shows in the standings after round 3).")
+
+	# success ballast
+	var sb := _card("SUCCESS BALLAST")
+	sb.add_child(_note("Kg added or taken off for a class finish of P1, P2, P3...; the last number is for that place or lower, and for a DNF. A disqualification, a no-start or a missed race changes nothing. Ballast never goes below 0 or above the class's most, starts at 0 each season, and is kept per series (it follows a driver who changes class). Shown in the standings and used by the forecast."))
+	var bhead := HBoxContainer.new()
+	for hd in [["Class", 150], ["Kg for P1, P2, P3...", 320], ["Most kg", 120]]:
+		var hl := _label(hd[0])
+		hl.theme_type_variation = "TableHeader"
+		hl.custom_minimum_size = Vector2(hd[1], 0)
+		bhead.add_child(hl)
+	sb.add_child(bhead)
+	sb.add_child(ballast_rows)
+	var add_b := _btn("Add class", func(): _add_ballast_row("", [], 0))
+	add_b.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	sb.add_child(add_b)
+	ballast_note.theme_type_variation = "Muted"
+	ballast_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	sb.add_child(ballast_note)
 
 	# series names
 	var se := _card("SERIES")
@@ -262,6 +282,15 @@ func refresh() -> void:
 	grade_spin.value = float(LeagueSettings.get_value("grade_min_sessions"))
 	drop_spin.value = float(LeagueSettings.get_value("drop_rounds"))
 	drop_after_spin.value = float(LeagueSettings.get_value("drop_after"))
+	for c in ballast_rows.get_children():
+		ballast_rows.remove_child(c)
+		c.queue_free()
+	var tables: Dictionary = LeagueSettings.get_value("ballast")
+	var caps: Dictionary = LeagueSettings.get_value("ballast_caps")
+	for k in tables:
+		_add_ballast_row(str(k), tables[k], int(caps.get(k, 0)))
+	var fit: Dictionary = Predict.ballast_effect()
+	ballast_note.text = "Forecast: %s" % fit["text"]
 	for c in class_rows.get_children():
 		class_rows.remove_child(c)
 		c.queue_free()
@@ -345,6 +374,33 @@ func refresh() -> void:
 		if r is Dictionary:
 			_add_cal_row(r)
 	_show_preview()
+
+
+func _add_ballast_row(cls_name: String, kgs: Array, most: int) -> void:
+	var row := HBoxContainer.new()
+	var c := LineEdit.new()
+	c.text = cls_name
+	c.placeholder_text = "Class (GT3)"
+	c.custom_minimum_size = Vector2(150, 0)
+	c.tooltip_text = "The class as the result files name it; \"GT3\" also covers names that contain it."
+	row.add_child(c)
+	var t := LineEdit.new()
+	t.text = ", ".join(PackedStringArray(kgs.map(func(k): return "%+d" % int(k) if int(k) != 0 else "0")))
+	t.placeholder_text = "15, 10, 5, 0, -5, -10, -15"
+	t.custom_minimum_size = Vector2(320, 0)
+	t.tooltip_text = "Kg for P1, P2, P3..., separated by commas; the last one is for that place or lower and for a DNF."
+	row.add_child(t)
+	var cap_spin := SpinBox.new()
+	cap_spin.max_value = 500
+	cap_spin.suffix = "kg"
+	cap_spin.value = most
+	cap_spin.custom_minimum_size = Vector2(120, 0)
+	cap_spin.tooltip_text = "Most a car of this class carries (0 = no cap). OOFS: 45 kg for GT3, 30 kg for Hypercars and LMP3."
+	row.add_child(cap_spin)
+	var del := _btn("Remove", func(): row.queue_free())
+	del.theme_type_variation = "SmallButton"
+	row.add_child(del)
+	ballast_rows.add_child(row)
 
 
 func _add_rule_row(r: Dictionary) -> void:
@@ -628,6 +684,21 @@ func _collect() -> Dictionary:
 	values["grade_min_sessions"] = int(grade_spin.value)
 	values["drop_rounds"] = int(drop_spin.value)
 	values["drop_after"] = int(drop_after_spin.value)
+	var tables := {}
+	var caps := {}
+	for row in ballast_rows.get_children():
+		if row.is_queued_for_deletion():
+			continue
+		var cls_name := (row.get_child(0) as LineEdit).text.strip_edges()
+		var kgs := []
+		for part in (row.get_child(1) as LineEdit).text.split(",", false):
+			if part.strip_edges().is_valid_int():
+				kgs.append(int(part.strip_edges()))
+		if cls_name != "" and not kgs.is_empty():
+			tables[cls_name] = kgs
+			caps[cls_name] = int((row.get_child(2) as SpinBox).value)
+	values["ballast"] = tables
+	values["ballast_caps"] = caps
 	var labels := {}
 	for c in class_rows.get_children():
 		if c is LineEdit and (c as LineEdit).text.strip_edges() != "":

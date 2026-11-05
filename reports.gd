@@ -603,7 +603,8 @@ func standings() -> Array:
 		var rows := []
 		for d in ch["drivers"]:
 			var e: Dictionary = ch["drivers"][d]
-			rows.append([0, d, e["points"], e["dropped"], e["total"], e["wins"], e["pod"], e["races"]])
+			rows.append([0, d, e["points"], e["dropped"], e["total"], e["wins"], e["pod"], e["races"],
+				e["ballast"] if int(e["ballast"]) >= 0 else ""])
 		rows.sort_custom(func(r1, r2):
 			if r1[2] != r2[2]:
 				return r1[2] > r2[2]
@@ -617,8 +618,8 @@ func standings() -> Array:
 			("No rounds dropped yet: drops count once %d rounds are done (%d of the season so far)." % [int(LeagueSettings.get_value("drop_after")), ch["rounds"]]))
 		if drops > 0 and ch["rounds"] <= drops:
 			drop_txt = "Only %d round%s so far: nothing is dropped until there are more rounds than drops." % [ch["rounds"], "" if ch["rounds"] == 1 else "s"]
-		tables.append(_table(str(k), ["Pos", "Driver", "Points", "Dropped", "Total", "Wins", "Podiums", "Races"], rows,
-			"%s %s championship. %s Points for P1 onwards: %s (Settings). Ties: more wins, then more podiums." % [
+		tables.append(_table(str(k), ["Pos", "Driver", "Points", "Dropped", "Total", "Wins", "Podiums", "Races", "Ballast kg"], rows,
+			"%s %s championship. %s Points for P1 onwards: %s (Settings). Ties: more wins, then more podiums. Ballast kg: success ballast carried into the next race (Settings > Success ballast)." % [
 				season, ch["series"] if ch["series"] != "" else ch["cls"], drop_txt, "-".join(PackedStringArray(POINTS.map(func(p): return str(p))))]))
 	return tables
 
@@ -659,6 +660,8 @@ func season_points(for_season: String) -> Dictionary:
 			ch["results"][d].append({"pts": pts_p, "pos": p, "round": int(ch["rounds"]) - 1})
 	for k in champs:
 		var ch: Dictionary = champs[k]
+		var sb := SuccessBallast.season(for_season, str(ch["series"]))
+		var has_ballast := not SuccessBallast.table_for(str(ch["cls"])).is_empty()
 		var drivers := {}
 		for d in ch["results"]:
 			var res: Array = ch["results"][d]
@@ -687,7 +690,8 @@ func season_points(for_season: String) -> Dictionary:
 			for r in res:
 				by_round[int(r["round"])] = {"pts": r["pts"], "pos": r["pos"]}
 			drivers[d] = {"points": total - dropped, "dropped": dropped, "total": total,
-				"wins": wins, "pod": pod, "races": res.size(), "by_round": by_round}
+				"wins": wins, "pod": pod, "races": res.size(), "by_round": by_round,
+				"ballast": int(sb.get(d, {}).get("kg", 0)) if has_ballast else -1}   # kg into the next race; -1 = class has none
 		ch["drivers"] = drivers
 		ch.erase("results")
 	return champs

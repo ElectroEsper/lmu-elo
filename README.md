@@ -36,6 +36,16 @@ race (`-q` = qualifying). The series code is mapped to a name in Settings → Se
   and is dropped first.
 - **Scoring**: a driver must complete at least 1 lap to score. 0 laps (no-start or lap-1 crash) =
   DNS = 0 points. A disqualification (in the file or applied on the Penalties page) = 0 points.
+- **Success ballast**: each class finish adds or takes off kg for the next race (GT3 +15/+10/+5/0/-5/-10/-15,
+  Hyper and LMP3 +10/+5/+2/0/-2/-5/-10 for P1 to P7 or lower; editable in Settings). A DNF counts as P7
+  or lower; a disqualification, a no-start or a missed race changes nothing. Never below 0, at most
+  45 kg for GT3 and 30 kg for Hypercars and LMP3 (the result files show both caps), per season and series, and it follows a driver
+  who changes class. Positions are taken after the Penalties page. The result files record what
+  each car carried, and season 6 replays to it. Shown in the standings report and graphic and on the
+  Predict screen; in the forecast it slows each car by an amount learned from the league's races
+  (about 0.07-0.09 s per 10 kg on a 100 s lap). That slowdown is an upgrade on the Predict screen:
+  on the 30 races run with ballast so far it made the forecast slightly worse, because the drivers
+  carrying the most kept winning anyway, so Test upgrades may switch it off.
 - **Championships**: one per season, series and class. Team championships: one per series and
   class, the sum of both drivers' points after their own drops (line-ups in Settings → Teams).
 

@@ -33,6 +33,12 @@ const DEFAULTS := {
 	"drop_rounds": 1,
 	"drop_after": 2,   # dropped rounds only count once this many rounds of the season are done
 
+	# Success ballast (OOFS rules): kg added (or taken off) for a class finish of P1, P2, ...; the
+	# last entry is for that place or lower and for a DNF. Never below 0 kg; ballast_caps: most a
+	# car of the class carries (0 = no cap). See success_ballast.gd.
+	"ballast": {"GT3": [15, 10, 5, 0, -5, -10, -15], "Hyper": [10, 5, 2, 0, -2, -5, -10],
+		"LMP3": [10, 5, 2, 0, -2, -5, -10]},
+	"ballast_caps": {"GT3": 45, "Hyper": 30, "LMP3": 30},
 	"series_names": {"sc": "Sprint", "mc": "Enduro"},   # code in the file name -> name shown (Settings > Series)
 	# Race rules per series, from a season on (a later row for the same series takes over from its
 	# season): fuel / virtual-energy use and tyre wear multipliers set on the server, whether
