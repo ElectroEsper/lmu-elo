@@ -118,6 +118,8 @@ func _build() -> void:
 			_build_driver(body)
 		"track":
 			_build_track(body)
+		"season_recap":
+			_build_season_recap(body)
 
 
 func _header() -> Control:
@@ -427,6 +429,107 @@ func _build_recap(body: VBoxContainer) -> void:
 					col.add_child(_wrap(_label(str(ln), 22, MUTED, "regular")))
 
 
+# ---------- season recap ----------
+# One championship's season over three pages: 0 champion (and the top 10), 1 the season in
+# numbers, 2 the awards.
+func _build_season_recap(body: VBoxContainer) -> void:
+	match int(spec.get("page", 0)):
+		0:
+			_recap_champion(body)
+		1:
+			_recap_tiles(body, "THE SEASON IN NUMBERS", (spec.get("numbers", []) as Array).map(func(n): return [n["label"], n["value"], n["who"]]), 4 if landscape else 2, 56)
+		2:
+			_recap_tiles(body, "AWARDS", (spec.get("awards", []) as Array).map(func(a): return [a["tag"], a["name"], a["text"]]), 3 if landscape else 1, 52)
+
+
+func _recap_champion(body: VBoxContainer) -> void:
+	var rows: Array = spec.get("standings", [])
+	if rows.is_empty():
+		return
+	var final := bool(spec.get("final", false))
+	var main: BoxContainer = HBoxContainer.new() if landscape else VBoxContainer.new()
+	main.add_theme_constant_override("separation", int((40 if landscape else 18) * s))
+	main.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(main)
+	var left := VBoxContainer.new()
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.size_flags_stretch_ratio = 1.3
+	left.add_theme_constant_override("separation", int(12 * s))
+	main.add_child(left)
+	left.add_child(_label("CHAMPION" if final else "LEADING THE WAY", 24, MUTED, "bold", 3))
+	# the champion
+	var c: Dictionary = rows[0]
+	var gold: Color = PODIUM[0]
+	var cp := _panel(Color(gold, 0.20), gold)
+	var cb := VBoxContainer.new()
+	cb.add_theme_constant_override("separation", int(4 * s))
+	cp.add_child(cb)
+	cb.add_child(_fit(_label(str(c["name"]), 64, TEXT, "title")))
+	cb.add_child(_label("%d points  ·  %d win%s  ·  %d podium%s" % [c["points"], c["wins"], "" if int(c["wins"]) == 1 else "s",
+		c["pod"], "" if int(c["pod"]) == 1 else "s"], 28, gold, "bold"))
+	for k in ["margin_line", "decided_line"]:
+		if str(spec.get(k, "")) != "":
+			cb.add_child(_wrap(_label(str(spec[k]), 24, TEXT, "regular")))
+	left.add_child(cp)
+	# second and third
+	for i in range(1, mini(3, rows.size())):
+		var tint: Color = PODIUM[i]
+		var panel := _panel(Color(tint, 0.15), tint)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", int(14 * s))
+		panel.add_child(row)
+		row.add_child(_label("P%d" % (i + 1), 34, tint, "title", 0, 64))
+		row.add_child(_fit(_label(str(rows[i]["name"]), 34, TEXT, "bold")))
+		row.add_child(_label("%d pts" % int(rows[i]["points"]), 28, TEXT, "bold", 0, 0.0, HORIZONTAL_ALIGNMENT_RIGHT))
+		left.add_child(panel)
+	if str(spec.get("team_line", "")) != "":
+		var tp := _panel(Color(accent, 0.12), accent)
+		tp.add_child(_wrap(_label(str(spec["team_line"]), 26, TEXT, "bold")))
+		left.add_child(tp)
+	# the rest of the top 10
+	var rest := rows.slice(3, 10)
+	if rest.is_empty():
+		return
+	var right := VBoxContainer.new()
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right.add_theme_constant_override("separation", int(6 * s))
+	main.add_child(right)
+	right.add_child(_label("P4-P%d" % (3 + rest.size()), 24, MUTED, "bold", 3))
+	for i in rest.size():
+		var pr := _panel(PANEL, Color(0, 0, 0, 0))
+		var h := HBoxContainer.new()
+		h.add_theme_constant_override("separation", int(14 * s))
+		pr.add_child(h)
+		h.add_child(_label(str(i + 4), 26, MUTED, "title", 0, 44))
+		h.add_child(_fit(_label(str(rest[i]["name"]), 26 if landscape else 24, TEXT, "bold")))
+		h.add_child(_label("%d" % int(rest[i]["points"]), 26, TEXT, "bold", 0, 0.0, HORIZONTAL_ALIGNMENT_RIGHT))
+		right.add_child(pr)
+
+
+# Tiles: [small label, big value, line under it], in a grid.
+func _recap_tiles(body: VBoxContainer, heading: String, tiles: Array, columns: int, big: float) -> void:
+	body.add_child(_label(heading, 24, MUTED, "bold", 3))
+	if tiles.is_empty():
+		body.add_child(_label("Nothing to show yet.", 28, MUTED, "regular"))
+		return
+	var grid := GridContainer.new()
+	grid.columns = columns
+	grid.add_theme_constant_override("h_separation", int(16 * s))
+	grid.add_theme_constant_override("v_separation", int(16 * s))
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	body.add_child(grid)
+	for t in tiles:
+		var tp := _panel(PANEL, Color(0, 0, 0, 0))
+		tp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var tb := VBoxContainer.new()
+		tb.add_theme_constant_override("separation", int(4 * s))
+		tp.add_child(tb)
+		tb.add_child(_label(str(t[0]), 22, accent, "bold", 2))
+		tb.add_child(_fit(_label(str(t[1]), big, TEXT, "title")))
+		tb.add_child(_wrap(_label(str(t[2]), 24, MUTED, "regular")))
+		grid.add_child(tp)
+
+
 # ---------- season scenarios ----------
 # Title fight: the rounds still to come, the contenders with their points, best possible total and
 # title chance, what settles it at the next round, and a few things to watch. Stream size: two columns.
@@ -471,7 +574,7 @@ func _build_season(body: VBoxContainer) -> void:
 	left_col.add_child(_label("TITLE CHANCES", 24, MUTED, "bold", 3))
 	var head := HBoxContainer.new()
 	head.add_theme_constant_override("separation", int(14 * s))
-	var dl := _label("DRIVER", 22, MUTED, "bold", 2)
+	var dl := _label("TEAM" if bool(spec.get("team_mode", false)) else "DRIVER", 22, MUTED, "bold", 2)
 	dl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(_label("", 22, MUTED, "bold", 0, 40))
 	head.add_child(dl)

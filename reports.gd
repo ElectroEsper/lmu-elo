@@ -589,6 +589,45 @@ func wet_colour(e: Dictionary) -> Variant:
 	return UiTheme.driver_grade_color(5 if quick else 1)
 
 
+# Season recap (season_recap.gd), one table per championship: champion (or leader), the season
+# in numbers, the awards. "All seasons" shows the latest season.
+func season_recap() -> Array:
+	var for_season := season
+	if for_season == "":
+		var all := Elo.seasons()
+		if all.is_empty():
+			return []
+		for_season = str(all.back())
+	var tables := []
+	var keys := season_points(for_season).keys()
+	keys.sort()
+	for k in keys:
+		var sr := SeasonRecap.build(for_season, str(k))
+		if sr.is_empty():
+			continue
+		var rows := []
+		var st: Array = sr["standings"]
+		var final := bool(sr["final"])
+		for i in mini(3, st.size()):
+			rows.append(["Champion" if i == 0 and final else ("Leader" if i == 0 else "P%d" % (i + 1)), "%d points" % st[i]["points"],
+				"%d wins, %d podiums" % [st[i]["wins"], st[i]["pod"]], Elo.pretty(str(st[i]["name"]))])
+		var dec: Dictionary = sr["decided"]
+		if not dec.is_empty():
+			rows.append(["Title settled", "R%d" % dec["round"], "%d round%s to spare" % [dec["left"], "" if int(dec["left"]) == 1 else "s"],
+				str(sr["rounds"][int(dec["round"]) - 1])])
+		if not (sr["team"] as Dictionary).is_empty():
+			rows.append(["Team champions" if final else "Leading team", "%d points" % sr["team"]["points"], " & ".join(PackedStringArray(
+				(sr["team"]["members"] as Array).map(func(m): return Elo.pretty(str(m))))), sr["team"]["name"]])
+		for n in sr["numbers"]:
+			rows.append([str(n["label"]).capitalize(), n["value"], "", n["who"]])
+		for a in sr["awards"]:
+			rows.append([str(a["tag"]).capitalize(), "", a["text"], Elo.pretty(str(a["name"]))])
+		tables.append(_table("%s recap" % k, ["Item", "Value", "Detail", "Who"], rows,
+			"%s, %s. %s Awards need half the rounds raced; one award per driver where possible (the cleanest driver always gets theirs)." % [
+				for_season, k, "Final." if final else "Season so far: %d of %d rounds." % [sr["done"], sr["total"]]]))
+	return tables
+
+
 func standings() -> Array:
 	if season == "":
 		return _standings_all_time()

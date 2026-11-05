@@ -126,32 +126,24 @@ static func _safe_with(rows: Array, lead_final_pts: Array, total: int, p1: int, 
 
 
 # Simulates the rounds left with the predictor; adds "title" (chance) to each row. Async.
+# A team scenario (build_teams) simulates its drivers' championship and adds up each team.
 static func title_chances(sc: Dictionary) -> void:
+	var team_mode := bool(sc.get("team_mode", false))
+	var dsc: Dictionary = sc["drivers_sc"] if team_mode else sc
 	var rows: Array = sc["rows"]
 	for r in rows:
 		r["title"] = 0.0
+	if rows.is_empty():
+		return
 	if int(sc["left"]) == 0:
 		rows[0]["title"] = 1.0
 		return
-	var names := []
+	var drows: Array = dsc["rows"]
 	var attend := []
-	for r in rows:
-		names.append(r["name"])
-		attend.append(clampf(float(r["races"]) / maxf(float(sc["done"]), 1.0), 0.05, 1.0))
+	for r in drows:
+		attend.append(clampf(float(r["races"]) / maxf(float(dsc["done"]), 1.0), 0.05, 1.0))
 	var pts_table: Array = LeagueSettings.points()
-	# each round left: ROUND_SIMS finishing orders at its track and weather
-	var round_orders := []
-	for rd in sc["rounds_left"]:
-		var plan := LeagueSettings.rules_for(str(sc["series"]), int(str(sc["season"]).trim_prefix("Season ")))
-		plan["weather"] = str(rd.get("weather", "dry"))
-		plan["rain"] = float(rd.get("rain", 0.5))
-		plan["keep_orders"] = true
-		# a round whose track is not confirmed yet: general form only (a name no track has, so no
-		# track fit and no track-specific pace), never quietly the latest track
-		var course := str(rd.get("course", ""))
-		var res: Dictionary = await Predict.forecast(names, str(sc["cls"]), Predict.Mode.PREDICTED_QUALI,
-			course if course != "" else UNKNOWN_TRACK, 0, 0.0, str(sc["series"]), {}, plan)
-		round_orders.append(res["orders"])
+	var round_orders := await _round_orders(dsc)
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
 	var wins := []
@@ -159,31 +151,35 @@ static func title_chances(sc: Dictionary) -> void:
 	wins.fill(0)
 	var base := []
 	var base_wins := []
-	for r in rows:
+	for r in drows:
 		base.append((r["by_round"] as Array).map(func(x): return int(x["pts"])))
 		base_wins.append(int(r["wins"]))
+	var total := int(sc["total"])
 	for s in TITLE_SIMS:
-		var extra := []
-		for i in rows.size():
-			extra.append([])
-		for ro in round_orders:
-			var order: PackedInt32Array = ro[rng.randi() % ro.size()]
-			var place := 0
-			var got := {}
-			for idx in order:
-				if rng.randf() > attend[idx]:
-					continue   # did not turn up this round
-				place += 1
-				got[idx] = int(pts_table[place - 1]) if place <= pts_table.size() else 0
-			for i in rows.size():
-				extra[i].append(int(got.get(i, 0)))
+		var extra := _one_season(rng, round_orders, attend, pts_table, drows.size())
+		# each driver's final score and wins
+		var fin := []
+		var w := []
+		for i in drows.size():
+			fin.append(final_score(base[i] + extra[i], total))
+			w.append(int(base_wins[i]) + (extra[i] as Array).count(int(pts_table[0])))
 		# champion: most points, ties to the most wins (level on both: either, by chance)
 		var best := -1
 		var best_score := -1
 		var best_wins := -1
 		for i in rows.size():
-			var sc_i := final_score(base[i] + extra[i], int(sc["total"]))
-			var w_i: int = int(base_wins[i]) + (extra[i] as Array).count(int(pts_table[0]))
+			var sc_i := 0
+			var w_i := 0
+			if team_mode:
+				for m in rows[i]["member_idx"]:
+					if int(m) >= 0:
+						sc_i += int(fin[m])
+						w_i += int(w[m])
+					else:
+						sc_i += 0
+			else:
+				sc_i = fin[i]
+				w_i = w[i]
 			if sc_i > best_score or (sc_i == best_score and (w_i > best_wins or (w_i == best_wins and rng.randf() < 0.5))):
 				best_score = sc_i
 				best_wins = w_i
@@ -191,6 +187,139 @@ static func title_chances(sc: Dictionary) -> void:
 		wins[best] += 1
 	for i in rows.size():
 		rows[i]["title"] = wins[i] / float(TITLE_SIMS)
+
+
+# Each round left: ROUND_SIMS finishing orders at its track and weather (indices into dsc rows).
+static func _round_orders(dsc: Dictionary) -> Array:
+	var names := (dsc["rows"] as Array).map(func(r): return r["name"])
+	var round_orders := []
+	for rd in dsc["rounds_left"]:
+		var plan := LeagueSettings.rules_for(str(dsc["series"]), int(str(dsc["season"]).trim_prefix("Season ")))
+		plan["weather"] = str(rd.get("weather", "dry"))
+		plan["rain"] = float(rd.get("rain", 0.5))
+		plan["keep_orders"] = true
+		# a round whose track is not confirmed yet: general form only (a name no track has, so no
+		# track fit and no track-specific pace), never quietly the latest track
+		var course := str(rd.get("course", ""))
+		var res: Dictionary = await Predict.forecast(names, str(dsc["cls"]), Predict.Mode.PREDICTED_QUALI,
+			course if course != "" else UNKNOWN_TRACK, 0, 0.0, str(dsc["series"]), {}, plan)
+		round_orders.append(res["orders"])
+	return round_orders
+
+
+# One simulated rest of the season: per driver, the points of each round left.
+static func _one_season(rng: RandomNumberGenerator, round_orders: Array, attend: Array, pts_table: Array, n: int) -> Array:
+	var extra := []
+	for i in n:
+		extra.append([])
+	for ro in round_orders:
+		var order: PackedInt32Array = ro[rng.randi() % ro.size()]
+		var place := 0
+		var got := {}
+		for idx in order:
+			if rng.randf() > attend[idx]:
+				continue   # did not turn up this round
+			place += 1
+			got[idx] = int(pts_table[place - 1]) if place <= pts_table.size() else 0
+		for i in n:
+			extra[i].append(int(got.get(i, 0)))
+	return extra
+
+
+# ---------- teams ----------
+# A team championship (one per series and class, Settings > Teams): each team scores both its
+# drivers' points, each after their own dropped rounds. Teams with one driver set are left out (as
+# in the team standings). Same shape as build(), rows being teams: "name", "members", "points",
+# "wins", "pod", "max", "min", "alive", "member_idx" (rows of the drivers' scenario, -1 = no
+# result yet); "drivers_sc" = the drivers' scenario the title chances are simulated with.
+#   max: the two drivers finish 1-2 in every round left; min: neither scores again.
+#   clinch: "place" -1 = champions whatever happens, 1 = champions with a 1-2 at the next round
+#   (rivals at best 3-4 there, then 1-2 in every round after), 0 = not settled at the next round.
+static func build_teams(season: String, key: String) -> Dictionary:
+	var tp: Dictionary = Reports.team_points(season).get(key, {})
+	var dsc := build(season, key)
+	if tp.is_empty() or dsc.is_empty():
+		return {}
+	var left := int(dsc["left"])
+	var total := int(dsc["total"])
+	var pts_table: Array = LeagueSettings.points()
+	var pt := func(place: int) -> int: return int(pts_table[place - 1]) if place <= pts_table.size() else 0
+	var idx := {}
+	for i in (dsc["rows"] as Array).size():
+		idx[dsc["rows"][i]["name"]] = i
+	var rows := []
+	for tn in tp["teams"]:
+		var e: Dictionary = tp["teams"][tn]
+		var members: Array = (e["drivers"] as Array).map(func(d): return str(d["name"]))
+		if members.size() < 2:
+			continue
+		var pts := []   # each member's points per round so far
+		var mi := []
+		for m in members:
+			var i := int(idx.get(m, -1))
+			mi.append(i)
+			pts.append((dsc["rows"][i]["by_round"] as Array).map(func(x): return int(x["pts"])) if i >= 0 else [])
+		rows.append({"name": str(tn), "members": members, "member_idx": mi, "pts": pts,
+			"points": int(e["points"]), "wins": int(e["wins"]), "pod": int(e["pod"]),
+			"max": _pair_score(pts, [pt.call(1), pt.call(2)], left, total),
+			"min": _pair_score(pts, [0, 0], left, total)})
+	rows.sort_custom(func(a, b):
+		if a["points"] != b["points"]:
+			return a["points"] > b["points"]
+		return a["wins"] > b["wins"])
+	for r in rows:
+		var bar := 0
+		for o in rows:
+			if o != r:
+				bar = maxi(bar, int(o["min"]))
+		r["alive"] = (left > 0 and int(r["max"]) >= bar) or (left == 0 and r == rows[0])
+	var out := {"season": season, "key": key, "series": dsc["series"], "cls": dsc["cls"], "done": dsc["done"],
+		"total": total, "left": left, "rounds_left": dsc["rounds_left"], "rows": rows, "team_mode": true, "drivers_sc": dsc}
+	if left > 0 and rows.size() >= 2:
+		var lead: Dictionary = rows[0]
+		var place := 0
+		var safe := true
+		for o in rows.slice(1):
+			if int(o["max"]) >= int(lead["min"]):
+				safe = false
+		if safe:
+			place = -1
+		else:
+			# a 1-2 at the next round, nothing after; each rival 3-4 there, then 1-2 in every round after
+			var mine := _pair_score_next(lead["pts"], [pt.call(1), pt.call(2)], [0, 0], left, total)
+			var settled := true
+			for o in rows.slice(1):
+				if bool(o["alive"]) and _pair_score_next(o["pts"], [pt.call(3), pt.call(4)], [pt.call(1), pt.call(2)], left, total) >= mine:
+					settled = false
+			place = 1 if settled else 0
+		out["clinch"] = {"driver": lead["name"], "place": place}
+	var watch := []
+	for i in range(1, mini(rows.size() - 1, 6)):
+		var gap := int(rows[i]["points"]) - int(rows[i + 1]["points"])
+		if gap <= CLOSE_GAP and watch.size() < MAX_WATCH:
+			watch.append({"kind": "fight", "text": "P%d-P%d: %s and %s, %s" % [i + 1, i + 2, rows[i]["name"], rows[i + 1]["name"],
+				"level on points" if gap == 0 else "%d point%s apart" % [gap, "" if gap == 1 else "s"]]})
+	out["watch"] = watch
+	return out
+
+
+# A team's final score when its two drivers score `each` (one value each) in every round left,
+# whichever driver gets which (the better split, since drops are per driver).
+static func _pair_score(pts: Array, each: Array, left: int, total: int) -> int:
+	var a := final_score(pts[0] + _filled(left, each[0]), total) + final_score(pts[1] + _filled(left, each[1]), total)
+	var b := final_score(pts[0] + _filled(left, each[1]), total) + final_score(pts[1] + _filled(left, each[0]), total)
+	return maxi(a, b)
+
+
+# The same with `next` at the next round and `after` in each round after it.
+static func _pair_score_next(pts: Array, next: Array, after: Array, left: int, total: int) -> int:
+	var best := 0
+	for swap in [false, true]:
+		var n0: int = next[1] if swap else next[0]
+		var n1: int = next[0] if swap else next[1]
+		var s := final_score(pts[0] + [n0] + _filled(left - 1, after[0]), total) + final_score(pts[1] + [n1] + _filled(left - 1, after[1]), total)
+		best = maxi(best, s)
+	return best
 
 
 # Close fights for places (not the title: that is the main table), ongoing podium streaks, the

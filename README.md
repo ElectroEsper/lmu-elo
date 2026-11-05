@@ -46,6 +46,9 @@ race (`-q` = qualifying). The series code is mapped to a name in Settings → Se
   (about 0.07-0.09 s per 10 kg on a 100 s lap). That slowdown is an upgrade on the Predict screen:
   on the 30 races run with ballast so far it made the forecast slightly worse, because the drivers
   carrying the most kept winning anyway, so Test upgrades may switch it off.
+- **Lap records**: the league's own records per track (layout) and class, from the best laps in
+  the result files: the lap record (any session) and the race lap record, with how each came down
+  (Profiles > Layout > Records). A disqualified driver's lap never counts.
 - **Championships**: one per season, series and class. Team championships: one per series and
   class, the sum of both drivers' points after their own drops (line-ups in Settings → Teams).
 
@@ -60,7 +63,10 @@ race (`-q` = qualifying). The series code is mapped to a name in Settings → Se
 
 ## Graphics
 
-Event predictions, championship standings (driver and team), season scenarios (title fight),
+Event predictions, championship standings (driver and team), season scenarios (title fight, for
+drivers and for teams), race recaps (with a highlight when a league lap record falls), season
+recaps (per series and class, three pages: champion and top 10, the season in numbers, awards:
+cleanest driver, hard charger, rookie of the year, most improved, Mr Consistent; also a report),
 track cards, driver cards (single or batch) and ranks, each in three sizes: Instagram post,
 Instagram story and stream (1920 × 1080). Stream standings show the whole field, 10 per page.
 

@@ -2,8 +2,8 @@ class_name RaceRecap
 extends RefCounted
 ## What happened in one race (one event file), class by class, for the Race recap graphic:
 ## podium with gaps, pole and where it finished, highlights picked when worth saying (clean racing
-## first: clean race, clean charger; then hard charger, biggest surprise, firsts, lead battle,
-## strategy, fastest lap, biggest rating gain), the championship after
+## first: clean race, clean charger; then hard charger, biggest surprise, firsts, a league lap
+## record, lead battle, strategy, fastest lap, biggest rating gain), the championship after
 ## the round, and how a saved forecast did.
 ## Use as: var rc = RaceRecap.build("s6-mc4-r.xml")
 
@@ -119,6 +119,24 @@ static func _highlights(rows: Array, st: Dictionary, lead: Dictionary, file: Str
 	var first := _first(rows, file, cls)
 	if not first.is_empty():
 		out.append(first)
+	# a league lap record lowered this weekend (quali or race): the outright one, else the race lap one
+	var rec_holder := ""
+	var course := ""
+	for h in Elo.history:
+		if str(h["file"]) == file:
+			course = str(h.get("course", ""))
+	for rs in LapRecords.set_at(file, course, cls):
+		if (rs["before"] as Dictionary).is_empty():
+			continue   # the league's first visit: nothing beaten
+		var r: Dictionary = rs["record"]
+		var b: Dictionary = rs["before"]
+		var text := "%s, was %s" % [LapRecords.lap_text(float(r["time"])), LapRecords.lap_text(float(b["time"]))]
+		if rs["kind"] == "lap":   # "1:20.512 in quali, was 1:20.734"
+			text = "%s %s, was %s" % [LapRecords.lap_text(float(r["time"])), "in quali" if str(r["session"]) == "quali" else "in the race",
+				LapRecords.lap_text(float(b["time"]))]
+		out.append({"tag": "LAP RECORD" if rs["kind"] == "lap" else "RACE LAP RECORD", "name": r["driver"], "text": text})
+		rec_holder = str(r["driver"]) if str(r["session"]) == "race" else rec_holder
+		break   # one record line
 	# the fight for the lead: lead changes, or a lights-to-flag win
 	if int(lead.get("changes", 0)) >= 2:
 		var top := ""
@@ -137,7 +155,7 @@ static func _highlights(rows: Array, st: Dictionary, lead: Dictionary, file: Str
 		var b := float(st[d].get("best", 0.0))
 		if b > 0.0 and (fl.is_empty() or b < float(fl["t"])):
 			fl = {"t": b, "name": d}
-	if not fl.is_empty():
+	if not fl.is_empty() and str(fl["name"]) != rec_holder:   # a race lap record already says it
 		out.append({"tag": "FASTEST LAP", "name": fl["name"], "text": "%d:%06.3f" % [int(float(fl["t"]) / 60.0), fmod(float(fl["t"]), 60.0)]})
 	# biggest rating gain
 	var mv := {}

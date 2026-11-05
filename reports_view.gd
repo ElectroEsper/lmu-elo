@@ -15,6 +15,7 @@ const REPORTS := [
 	{"name": "Grid vs finish", "kind": "all", "fn": "grid_vs_finish", "season": true},
 	{"name": "Rookies", "kind": "all", "fn": "rookies"},
 	{"name": "Standings", "kind": "all", "fn": "standings", "season": true},
+	{"name": "Season recap", "kind": "all", "fn": "season_recap", "season": true},
 	{"name": "Ranks", "kind": "all", "fn": "ranks"},
 	{"name": "Forecast record", "kind": "all", "fn": "forecast_record"},
 	{"name": "Wet weather", "kind": "all", "fn": "wet_weather"},

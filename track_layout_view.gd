@@ -140,7 +140,42 @@ func _show() -> void:
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Summary")
 	tabs.add_child(TableView.build(_spots_table(p)))
 	tabs.set_tab_title(tabs.get_tab_count() - 1, "Drivers")
+	tabs.add_child(_records_panel(p))
+	tabs.set_tab_title(tabs.get_tab_count() - 1, "Records")
 	tabs.current_tab = clampi(last_tab, 0, tabs.get_tab_count() - 1)
+
+
+# League lap records at this track (lap_records.gd): every class, then how this class's record fell.
+func _records_panel(p: Dictionary) -> Control:
+	var course := str(p.get("course", ""))
+	var cls := str(p.get("class", ""))
+	var box := VBoxContainer.new()
+	box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var by_cls: Dictionary = LapRecords.all().get(course, {})
+	var where := func(r: Dictionary) -> String:
+		return "%s %s, %s" % [str(r.get("season", "")), str(r.get("series", "")), "quali" if str(r.get("session", "")) == "quali" else "race"]
+	var rows := []
+	var classes := by_cls.keys()
+	classes.sort_custom(func(a, b): return float(by_cls[a].get("lap", {}).get("time", 0.0)) < float(by_cls[b].get("lap", {}).get("time", 0.0)))
+	for c in classes:
+		var lap: Dictionary = by_cls[c].get("lap", {})
+		var race: Dictionary = by_cls[c].get("race", {})
+		rows.append([LeagueSettings.label(str(c)),
+			LapRecords.lap_text(float(lap["time"])) if not lap.is_empty() else "-", Elo.pretty(str(lap.get("driver", ""))), where.call(lap) if not lap.is_empty() else "",
+			LapRecords.lap_text(float(race["time"])) if not race.is_empty() else "-", Elo.pretty(str(race.get("driver", ""))), where.call(race) if not race.is_empty() else ""])
+	box.add_child(TableView.build({"title": "League records", "headers": ["Class", "Lap record", "By", "Set in", "Race lap record", "By", "Set in"],
+		"rows": rows, "note": "The fastest laps in the league's own results at %s: in any session (lap record) and in a race (race lap record)." % course
+			if not rows.is_empty() else "No league results at %s yet." % course}))
+	var hist: Array = by_cls.get(cls, {}).get("lap", {}).get("history", [])
+	if hist.size() > 1:
+		var hrows := []
+		for i in range(hist.size() - 1, -1, -1):
+			var h: Dictionary = hist[i]
+			hrows.append([LapRecords.lap_text(float(h["time"])), Elo.pretty(str(h["driver"])), where.call(h), str(h.get("date", ""))])
+		var t := TableView.build({"title": "Lap record history", "headers": ["Time", "Driver", "Set in", "Date"], "rows": hrows,
+			"note": "How the %s lap record here came down, newest first." % LeagueSettings.label(cls)})
+		box.add_child(t)
+	return box
 
 
 # Drivers for whom this track is a strong or weak spot (driver_track_fit.gd), in this class.

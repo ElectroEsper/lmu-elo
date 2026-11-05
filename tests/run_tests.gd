@@ -306,11 +306,51 @@ func _test_ballast() -> void:
 						elif worst == "":
 							worst = "%s R%d %s: rules %d kg, file %d kg" % [series, rnd, nm, r["before"], drv[nm].get("mass", -1)]
 	check(total > 50 and same >= total * 0.95, "Season 6 replays to the recorded ballast (%d of %d cars)" % [same, total], worst)
+	_test_lap_records()
 	var fit := Predict.ballast_effect()
 	check(int(fit["races"]) > 0 and float(fit["k"]) > 0.0 and float(fit["k"]) < 0.03, "Ballast effect learned from the races with ballast", str(fit))
 	var rows: Array = Reports.season_points("Season 6").values()
 	check(rows.any(func(ch): return (ch["drivers"] as Dictionary).values().any(func(e): return int(e["ballast"]) > 0)),
 		"Standings carry each driver's ballast")
+
+
+# League lap records: the quickest best lap at each track and class, records only ever come down.
+func _test_lap_records() -> void:
+	var recs := LapRecords.all()
+	var ok := not recs.is_empty()
+	var falls := 0
+	for course in recs:
+		for cls in recs[course]:
+			var lap: Dictionary = recs[course][cls].get("lap", {})
+			var race: Dictionary = recs[course][cls].get("race", {})
+			ok = ok and not lap.is_empty() and (race.is_empty() or float(race["time"]) >= float(lap["time"]))
+			var hist: Array = lap.get("history", [])
+			for i in range(1, hist.size()):
+				ok = ok and float(hist[i]["time"]) < float(hist[i - 1]["time"])
+			falls += maxi(hist.size() - 1, 0)
+			# nobody in the league files went quicker at this track and class
+			for ev in Elo.history:
+				if str(ev.get("course", "")) != course:
+					continue
+				for sess in ["quali", "race"]:
+					for d in ev.get("stats", {}).get(sess, {}).get(cls, {}):
+						var s: Dictionary = ev["stats"][sess][cls][d]
+						var b := float(s.get("best", 0.0))
+						if b > 0.0 and b < float(lap["time"]) and not str(s.get("status", "")).begins_with("DQ"):
+							# only a lap thrown out as impossible may be quicker
+							ok = ok and b < float(lap["time"]) * (1.0 - LapRecords.SANE)
+	check(ok and falls > 0, "Lap records: quickest lap per track and class, history only comes down (%d records lowered)" % falls)
+	# a weekend that lowered one shows up for the recap
+	var found := false
+	for course in recs:
+		for cls in recs[course]:
+			var hist: Array = recs[course][cls]["lap"]["history"]
+			if hist.size() > 1 and not found:
+				var f := str(hist[-1]["file"])
+				var race_file := f if f.ends_with("-r.xml") else f.replace(".xml", "-r.xml")
+				var set := LapRecords.set_at(race_file, course, cls)
+				found = not set.is_empty() and float(set[0]["record"]["time"]) == float(hist[-1]["time"]) and not (set[0]["before"] as Dictionary).is_empty()
+	check(found, "Lap record lowered at a weekend is found for the race recap")
 
 
 func _test_traffic_formula() -> void:
@@ -811,7 +851,49 @@ func _test_season_scenarios() -> void:
 				var tp: Dictionary = Reports.team_points(season).get(key, {}).get("teams", {}).get("Test Team", {})
 				var want := int(ch["drivers"][ds[0]]["points"]) + int(ch["drivers"][ds[1]]["points"])
 				check(not tp.is_empty() and int(tp["points"]) == want, "Team points: the sum of both drivers' points after their drops (%d)" % want)
+				# team title fight: two full teams and a one-driver team (left out, as in the standings)
+				if ds.size() >= 5:
+					vals["teams"].append({"season": int(season.trim_prefix("Season ")), "series": code, "cls": ch["cls"], "name": "Other Team", "drivers": [ds[2], ds[3]]})
+					vals["teams"].append({"season": int(season.trim_prefix("Season ")), "series": code, "cls": ch["cls"], "name": "Solo", "drivers": [ds[4]]})
+					LeagueSettings.save_all(vals)
+					var ts := SeasonScenarios.build_teams(season, key)
+					var names_t: Array = (ts.get("rows", []) as Array).map(func(r): return r["name"])
+					var sane := names_t.size() == 2 and not names_t.has("Solo")
+					for r in ts.get("rows", []):
+						sane = sane and int(r["max"]) >= int(r["min"]) and int(r["min"]) >= int(r["points"])
+					check(sane, "Team scenarios: full teams only, best case above worst case", str(names_t))
+					await SeasonScenarios.title_chances(ts)
+					var tsum := 0.0
+					for r in ts.get("rows", []):
+						tsum += float(r["title"])
+					check(absf(tsum - 1.0) < 1e-6, "Team title chances add up")
+					var p := LeagueSettings.points()
+					var pr := [[50, 50, 50, 50], [47, 47, 47, 47]]
+					# 50s-driver wins both: 250 + 235; 47s-driver wins both: 247 + 241 (each drops their worst) -> 488
+					check(SeasonScenarios._pair_score(pr, [int(p[0]), int(p[1])], 2, 6) == 488,
+						"Team best case: the two drivers 1-2 in every round left, the better way round")
 				LeagueSettings.save_all(before)
+	# season recap: standings in points order, numbers and awards, at most one award each except the cleanest
+	if not seasons.is_empty():
+		var sr_season: String = seasons.back()
+		var sr_champs := Reports.season_points(sr_season)
+		if not sr_champs.is_empty():
+			var sr := SeasonRecap.build(sr_season, str(sr_champs.keys()[0]))
+			var st_ok := not sr.is_empty() and not (sr["standings"] as Array).is_empty()
+			for i in range(1, (sr.get("standings", []) as Array).size()):
+				st_ok = st_ok and int(sr["standings"][i - 1]["points"]) >= int(sr["standings"][i]["points"])
+			var who := {}
+			var dup := false
+			for a in sr.get("awards", []):
+				if who.has(a["name"]) and str(a["tag"]) != "CLEANEST DRIVER" and str(who[a["name"]]) != "CLEANEST DRIVER":
+					dup = true
+				who[a["name"]] = a["tag"]
+			var races_ok := false
+			for n in sr.get("numbers", []):
+				races_ok = races_ok or (str(n["label"]) == "RACES" and int(n["value"]) == int(sr["done"]))
+			check(st_ok and races_ok and not (sr["awards"] as Array).is_empty() and not dup,
+				"Season recap of %s: standings, numbers and awards" % sr_champs.keys()[0], str(sr.get("awards", [])))
+			check(not Reports.season_recap().is_empty(), "Season recap report builds")
 	# race recap of the latest race: a block per class, podium of 3, a surprise only when deserved
 	var last_race := ""
 	for i in range(Elo.history.size() - 1, -1, -1):

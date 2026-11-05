@@ -8,7 +8,7 @@ extends HBoxContainer
 
 signal notice(text: String)
 
-const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["teams", "Team standings"], ["recap", "Race recap"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
+const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["teams", "Team standings"], ["team_season", "Team scenarios"], ["season_recap", "Season recap"], ["recap", "Race recap"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
 	["track", "Track card"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
@@ -41,6 +41,7 @@ var tint_slider := HSlider.new()
 var _bg_cache := {}                     # path -> Texture2D
 var _font_cache := {}                   # path -> Font (or null when the file cannot be read)
 var page_label := Label.new()
+var _recap_cache := {}   # season recap, by season, championship and revisions
 var page_pick := OptionButton.new()     # standings on the stream size: which page of 10 to preview
 var batch_pages := CheckBox.new()       # on: Save writes every page, each marked "page x of y"
 const STREAM_PER_PAGE := 10
@@ -254,7 +255,7 @@ func _fill_sources() -> void:
 				source_pick.add_item("Saved %s: %s, %s" % [Time.get_datetime_string_from_unix_time(int(g[0]["made_at"])).replace("T", " ").left(16),
 					", ".join(classes), str(g[0].get("course", ""))])
 				source_pick.set_item_metadata(source_pick.item_count - 1, i)
-		"standings", "season", "teams":
+		"standings", "season", "teams", "team_season", "season_recap":
 			source_label.text = "Season"
 			var seasons := Elo.seasons()
 			for i in range(seasons.size() - 1, -1, -1):
@@ -331,14 +332,14 @@ func _fill_champs() -> void:
 	if _kind() == "recap":
 		_fill_recap_classes()
 		return
-	if _kind() != "standings" and _kind() != "season" and _kind() != "teams":
+	if not _kind() in ["standings", "season", "teams", "team_season", "season_recap"]:
 		return
 	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
 	champ_pick.clear()
 	if source_pick.selected < 0:
 		return
 	var src := source_pick.get_item_text(source_pick.selected)
-	var champs := Reports.team_points(src) if _kind() == "teams" else Reports.season_points(src)
+	var champs := Reports.team_points(src) if _kind() in ["teams", "team_season"] else Reports.season_points(src)
 	var keys := champs.keys()
 	keys.sort()
 	for k in keys:
@@ -634,7 +635,7 @@ func _render() -> void:
 	sp["tint"] = tint_slider.value
 	card.set_spec(_pretty_spec(sp))
 	save_btn.disabled = bool(sp.get("empty", false))
-	var pages := int(sp.get("pages", 1)) if _kind() == "standings" or _kind() == "teams" else 1
+	var pages := int(sp.get("pages", 1)) if _kind() in PAGED_KINDS else 1
 	page_label.visible = pages > 1
 	page_pick.visible = pages > 1
 	batch_pages.visible = pages > 1
@@ -692,6 +693,72 @@ func _teams_spec() -> Dictionary:
 	return sp
 
 
+const PAGED_KINDS := ["standings", "teams", "season_recap"]
+const SEASON_RECAP_PAGES := ["Champion", "Season in numbers", "Awards"]
+
+
+# Season recap of one championship: champion, season in numbers, awards; one page each, in every
+# size (Batch save writes all three).
+func _season_recap_spec() -> Dictionary:
+	if source_pick.selected < 0 or champ_pick.selected < 0:
+		return {"kind": "season_recap", "title": "Season recap", "subtitle": "No championship results yet.", "empty": true}
+	var season := source_pick.get_item_text(source_pick.selected)
+	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
+	var ck := "%s|%s|%d|%d" % [season, key, Elo.revision, LeagueSettings.revision]
+	if not _recap_cache.has(ck):
+		_recap_cache.clear()
+		_recap_cache[ck] = SeasonRecap.build(season, key)
+	var sr: Dictionary = _recap_cache[ck]
+	if sr.is_empty():
+		return {"kind": "season_recap", "title": "Season recap", "subtitle": "No results in this championship.", "empty": true}
+	_sync_page_names(SEASON_RECAP_PAGES)
+	var page := clampi(page_pick.selected, 0, SEASON_RECAP_PAGES.size() - 1)
+	var code := LeagueSettings.series_code(str(sr["series"]))
+	var state := "Final" if bool(sr["final"]) else "Season so far · R%d of %d" % [sr["done"], sr["total"]]
+	var sp := sr.duplicate()
+	sp.merge({"kind": "season_recap", "page": page, "pages": SEASON_RECAP_PAGES.size(), "empty": false,
+		"title": "%s season recap" % LeagueSettings.label(str(sr["cls"])),
+		"subtitle": "%s · %s · %s" % [season, _series_name(code), state]}, true)
+	if batch_pages.button_pressed:
+		sp["subtitle"] += "  ·  %d/%d" % [page + 1, SEASON_RECAP_PAGES.size()]
+	# names shown as on every graphic
+	sp["standings"] = (sr["standings"] as Array).map(func(r):
+		var x: Dictionary = r.duplicate()
+		x["name"] = Elo.pretty(str(r["name"]))
+		return x)
+	sp["awards"] = (sr["awards"] as Array).map(func(a):
+		var x: Dictionary = a.duplicate()
+		x["name"] = Elo.pretty(str(a["name"]))
+		return x)
+	if not (sr["team"] as Dictionary).is_empty():
+		sp["team_line"] = "%s: %s (%s), %d points" % ["Team champions" if bool(sr["final"]) else "Leading team", sr["team"]["name"],
+			" & ".join(PackedStringArray((sr["team"]["members"] as Array).map(func(m): return Elo.pretty(str(m))))), sr["team"]["points"]]
+	var dec: Dictionary = sr["decided"]
+	if bool(sr["final"]) and not dec.is_empty():
+		var at := str(sr["rounds"][int(dec["round"]) - 1]) if int(dec["round"]) - 1 < (sr["rounds"] as Array).size() else ""
+		sp["decided_line"] = ("Champion with %d round%s to spare, at R%d %s" % [dec["left"], "" if int(dec["left"]) == 1 else "s", dec["round"], at]) \
+			if int(dec["left"]) > 0 else "Decided at the final round, %s" % at
+	elif not bool(sr["final"]) and not dec.is_empty():
+		sp["decided_line"] = "Title already settled at R%d" % dec["round"]
+	if sr.has("margin"):
+		sp["margin_line"] = "%d point%s ahead of %s" % [sr["margin"], "" if int(sr["margin"]) == 1 else "s", sp["standings"][1]["name"]] \
+			if bool(sr["final"]) else "Leads by %d point%s" % [sr["margin"], "" if int(sr["margin"]) == 1 else "s"]
+	if code != "":
+		sp["accent"] = LeagueSettings.series_color(code)
+	return sp
+
+
+# Page picker with named pages (season recap), keeping the choice.
+func _sync_page_names(names: Array) -> void:
+	if page_pick.item_count == names.size() and page_pick.get_item_text(0) == "1: " + str(names[0]):
+		return
+	var keep := maxi(page_pick.selected, 0)
+	page_pick.clear()
+	for i in names.size():
+		page_pick.add_item("%d: %s" % [i + 1, names[i]])
+	page_pick.select(mini(keep, names.size() - 1))
+
+
 # Page picker for paged standings: one entry per page, keeping the choice.
 func _sync_pages(pages: int, per: int, n: int) -> void:
 	var first_label := "1: P1-%d" % mini(per, n)
@@ -735,6 +802,10 @@ func _spec() -> Dictionary:
 			return _standings_spec()
 		"season":
 			return _season_spec()
+		"team_season":
+			return _season_spec(true)
+		"season_recap":
+			return _season_recap_spec()
 		"teams":
 			return _teams_spec()
 		"recap":
@@ -841,23 +912,28 @@ var _season_cache := {}     # inputs key -> scenarios (title chances take a few 
 var _season_busy := ""
 
 
-func _season_spec() -> Dictionary:
+func _season_spec(teams := false) -> Dictionary:
+	var what := "team title fight" if teams else "title fight"
 	if source_pick.selected < 0 or champ_pick.selected < 0:
-		return {"kind": "season", "title": "Season scenarios", "subtitle": "No championship results yet.", "empty": true}
+		return {"kind": "season", "title": "Team scenarios" if teams else "Season scenarios", "empty": true,
+			"subtitle": "No teams yet: add them in Settings > Teams." if teams else "No championship results yet."}
 	var season := source_pick.get_item_text(source_pick.selected)
 	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
 	# any import, penalty, merge, setting or telemetry change starts it over
-	var ck := "%s|%s|%d|%d|%d|%d" % [season, key, Elo.revision, LeagueSettings.revision, Profiles.revision, TrackStore.revision]
+	var ck := "%s|%s|%s|%d|%d|%d|%d" % ["T" if teams else "D", season, key, Elo.revision, LeagueSettings.revision, Profiles.revision, TrackStore.revision]
 	if not _season_cache.has(ck):
 		if _season_busy != ck:
 			_season_busy = ck
-			_compute_season(season, key, ck)
-		return {"kind": "season", "title": "%s title fight" % LeagueSettings.label(key), "subtitle": "Working out the title chances...", "empty": true}
+			_compute_season(season, key, ck, teams)
+		return {"kind": "season", "title": "%s %s" % [LeagueSettings.label(key), what], "subtitle": "Working out the title chances...", "empty": true}
 	var sc: Dictionary = _season_cache[ck]
+	if teams and (sc["rows"] as Array).is_empty():
+		return {"kind": "season", "title": "%s %s" % [LeagueSettings.label(key), what], "empty": true,
+			"subtitle": "No team with both drivers set in this championship (Settings > Teams)."}
 	var code := str(sc["series"])
 	var series_name := LeagueSettings.series_name(code)
 	var left := int(sc["left"])
-	var sp := {"kind": "season", "title": "%s title fight" % LeagueSettings.label(str(sc["cls"])),
+	var sp := {"kind": "season", "title": "%s %s" % [LeagueSettings.label(str(sc["cls"])), what], "team_mode": teams,
 		"subtitle": "%s · %s · %s" % [season, series_name, "season over" if left == 0 else "%d round%s left" % [left, "" if left == 1 else "s"]],
 		"empty": false}
 	sp["accent"] = LeagueSettings.series_color(code)
@@ -878,18 +954,21 @@ func _season_spec() -> Dictionary:
 		if rows.size() < 6:
 			rows.append({"name": r["name"], "points": r["points"], "max": r["max"], "title": float(r.get("title", 0.0))})
 	sp["rows"] = rows
-	sp["alive_note"] = "%d driver%s can still win it on points" % [alive, "" if alive == 1 else "s"] if left > 0 else ""
+	sp["alive_note"] = "%d %s%s can still win it on points" % [alive, "team" if teams else "driver", "" if alive == 1 else "s"] if left > 0 else ""
 	# what settles it at the next round
 	var cl: Dictionary = sc.get("clinch", {})
 	# "at Lusail", or "at round 5" while its track is not in the calendar
 	var next_course := ""
 	if not rl.is_empty():
 		next_course = str(rl[0]["course"]) if str(sc["rounds_left"][0].get("course", "")) != "" else "round %s" % str(rl[0]["round"]).trim_prefix("R")
-	var who := Elo.pretty(str(cl.get("driver", "")))
+	var who := str(cl.get("driver", "")) if teams else Elo.pretty(str(cl.get("driver", "")))
+	var is_ := "are" if teams else "is"
 	if left == 0:
-		sp["clinch"] = "%s is champion" % Elo.pretty(str(sc["rows"][0]["name"]))
+		sp["clinch"] = "%s %s champion%s" % [str(sc["rows"][0]["name"]) if teams else Elo.pretty(str(sc["rows"][0]["name"])), is_, "s" if teams else ""]
 	elif int(cl.get("place", 0)) == -1:
-		sp["clinch"] = "%s is champion whatever happens" % who
+		sp["clinch"] = "%s %s champion%s whatever happens" % [who, is_, "s" if teams else ""]
+	elif teams and int(cl.get("place", 0)) == 1:
+		sp["clinch"] = "%s are champions at %s with a 1-2 finish" % [who, next_course]
 	elif int(cl.get("place", 0)) == 1:
 		sp["clinch"] = "%s is champion by winning at %s" % [who, next_course]
 	elif int(cl.get("place", 0)) > 0:
@@ -899,7 +978,7 @@ func _season_spec() -> Dictionary:
 	else:
 		sp["clinch"] = "It cannot be settled at %s: the fight goes on to the next round" % next_course
 	var watch: Array = (sc["watch"] as Array).map(func(x): return str(x["text"]))
-	var drop_line := _drop_line(sc)
+	var drop_line := _drop_line(sc) if not teams else ""
 	if drop_line != "":
 		watch.push_front(drop_line)
 	sp["watch"] = watch.slice(0, SeasonScenarios.MAX_WATCH)
@@ -937,14 +1016,14 @@ func _drop_line(sc: Dictionary) -> String:
 		info[0][0], desc.call(info[0]), info[1][0], desc.call(info[1]), info[1][0]]
 
 
-func _compute_season(season: String, key: String, ck: String) -> void:
-	var sc := SeasonScenarios.build(season, key)
+func _compute_season(season: String, key: String, ck: String, teams := false) -> void:
+	var sc := SeasonScenarios.build_teams(season, key) if teams else SeasonScenarios.build(season, key)
 	if not sc.is_empty():
 		await SeasonScenarios.title_chances(sc)
 	_season_cache[ck] = sc if not sc.is_empty() else {"series": "", "cls": key, "left": 0, "rounds_left": [], "rows": [], "watch": []}
 	if _season_busy == ck:
 		_season_busy = ""
-	if _kind() == "season":
+	if _kind() in ["season", "team_season"]:
 		_render()
 
 
@@ -1278,7 +1357,7 @@ func _save_batch() -> void:
 # round 4 recap.
 # Saving again replaces the file of the same name.
 const CATEGORY := {"forecast": "Forecast", "standings": "Standings", "teams": "Standings",
-	"season": "Championship Scenario", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks", "recap": "Recap"}
+	"season": "Championship Scenario", "team_season": "Championship Scenario", "season_recap": "Season Recap", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks", "recap": "Recap"}
 
 
 static func _slug(s: String) -> String:
@@ -1337,7 +1416,7 @@ func _save_target() -> Array:
 	var base := kind
 	var next_dir := ""   # set for graphics about the next race (forecast, track, title fight)
 	match kind:
-		"standings", "teams", "season":
+		"standings", "teams", "season", "team_season", "season_recap":
 			season = source_pick.get_item_text(source_pick.selected) if source_pick.selected >= 0 else ""
 			var key := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
 			var ch: Dictionary = Reports.season_points(season).get(key, {})
@@ -1345,8 +1424,9 @@ func _save_target() -> Array:
 			var cls := _slug(LeagueSettings.label(str(ch.get("cls", key))))
 			var sname := _slug(_series_name(code))
 			base = {"standings": "%s_%s_standings" % [sname, cls], "teams": "%s_%s_team_standings" % [sname, cls],
-				"season": "%s_title_fight" % cls}[kind]
-			if kind == "season":   # about what comes next: the next round's folder
+				"season": "%s_title_fight" % cls, "team_season": "%s_team_title_fight" % cls,
+				"season_recap": "%s_%s_season_recap" % [sname, cls]}[kind]
+			if kind == "season" or kind == "team_season":   # about what comes next: the next round's folder
 				var total := LeagueSettings.season_rounds(code)
 				var done := int(ch.get("rounds", 0))
 				next_dir = AppPaths.round_folder(season, done + 1 if done < total else done)
@@ -1405,7 +1485,7 @@ func _out_dir() -> String:
 
 func _save() -> void:
 	_render()
-	var pages := int(card.spec.get("pages", 1)) if (_kind() == "standings" or _kind() == "teams") and batch_pages.button_pressed else 1
+	var pages := int(card.spec.get("pages", 1)) if _kind() in PAGED_KINDS and batch_pages.button_pressed else 1
 	var keep := page_pick.selected
 	var target := _save_target()
 	var dir: String = target[0]
