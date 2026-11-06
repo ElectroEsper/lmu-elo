@@ -51,6 +51,12 @@ var motec := MotecImport.new()
 # The name people see (window title, sidebar). The project's internal name stays "LMU_Elo" in
 # project.godot: Godot keeps the data folder under that name, so renaming the app never moves it.
 const APP_NAME := "Grid Ledger"
+
+
+## The app's version: Project Settings > Application > Config > Version (project.godot). An exported
+## .exe takes the same number for its file and product version when those export fields are empty.
+static func app_version() -> String:
+	return str(ProjectSettings.get_setting("application/config/version", "")).strip_edges()
 var brand_box := HBoxContainer.new()   # sidebar header: league logo, name, tool name
 
 
@@ -61,7 +67,7 @@ func _ready() -> void:
 	get_window().theme = look
 	theme = look
 	get_window().min_size = Vector2i(960, 600)
-	get_window().title = APP_NAME
+	get_window().title = "%s %s" % [APP_NAME, app_version()] if app_version() != "" else APP_NAME
 	RenderingServer.set_default_clear_color(UiTheme.BG)
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	var bg := Panel.new()
@@ -284,10 +290,22 @@ func _fill_brand() -> void:
 		ll.add_theme_color_override("font_color", UiTheme.ACCENT)
 		ll.add_theme_font_size_override("font_size", 12)
 		words.add_child(ll)
+	var app_row := HBoxContainer.new()
+	app_row.add_theme_constant_override("separation", 6)
 	var app := Label.new()
 	app.text = APP_NAME
 	app.theme_type_variation = "HeaderLarge"
-	words.add_child(app)
+	app_row.add_child(app)
+	if app_version() != "":
+		var ver := Label.new()
+		ver.text = "v" + app_version()
+		ver.theme_type_variation = "Muted"
+		ver.add_theme_font_size_override("font_size", 12)
+		ver.size_flags_vertical = Control.SIZE_SHRINK_END
+		ver.tooltip_text = "Grid Ledger version %s" % app_version()
+		ver.mouse_filter = Control.MOUSE_FILTER_PASS
+		app_row.add_child(ver)
+	words.add_child(app_row)
 	if league == "":
 		var tagline := Label.new()
 		tagline.text = "Le Mans Ultimate league tool"

@@ -322,6 +322,215 @@ static func _pair_score_next(pts: Array, next: Array, after: Array, left: int, t
 	return best
 
 
+# ---------- what each contender needs ----------
+# For each of the top 3 (drivers' championships), plain lines on what it takes to be champion,
+# against every driver who can still win it (not only the leader), naming only the ones that
+# actually constrain him:
+#   - where he stands against the others in the fight (status);
+#   - whether winning every round left is enough on its own (2+ rounds left);
+#   - what makes him champion at the next round, place by place, with where each rival must finish
+#     (at the last round: everything; before: only when it can already be settled there);
+#   - what keeps him in the fight at the next round, rival by rival (2+ rounds left).
+# [{"name", "place", "points", "max", "alive", "status", "lines": [...]}]. Exact maths under the
+# same rules as the standings (dropped rounds; level on points: more wins).
+const NEEDS_MAX_LINES := 5
+const NEEDS_MAX_PLACES := 6
+
+static func requirements(sc: Dictionary) -> Array:
+	var rows: Array = sc["rows"]
+	var left := int(sc["left"])
+	var total := int(sc["total"])
+	var pts_table: Array = LeagueSettings.points()
+	var pt := func(place: int) -> int: return int(pts_table[place - 1]) if place >= 1 and place <= pts_table.size() else 0
+	var p1: int = pt.call(1)
+	var p2: int = pt.call(2)
+	var base := func(r: Dictionary) -> Array: return (r["by_round"] as Array).map(func(x): return int(x["pts"]))
+	# final [score, wins] with `future` points in the rounds left
+	var fin := func(r: Dictionary, future: Array) -> Array:
+		return [final_score(base.call(r) + future, total), int(r["wins"]) + future.count(p1)]
+	var ahead := func(a: Array, b: Array) -> bool: return a[0] > b[0] or (a[0] == b[0] and a[1] > b[1])
+	# short names (surname) unless two drivers share one
+	var surname := {}
+	var count := {}
+	for r in rows:
+		var parts := Elo.pretty(str(r["name"])).split(" ", false)
+		var sn: String = parts[parts.size() - 1] if parts.size() > 0 else str(r["name"])
+		surname[r["name"]] = sn
+		count[sn] = int(count.get(sn, 0)) + 1
+	var nm := func(r: Dictionary) -> String:
+		var sn: String = surname[r["name"]]
+		return sn if int(count[sn]) == 1 else Elo.pretty(str(r["name"]))
+	var nxt := ""
+	if left > 0:
+		nxt = "R%d" % int(sc["rounds_left"][0]["round"])
+	# the field: the most cars of the class in one round this season (places beyond it never happen)
+	var field := 0
+	if not rows.is_empty():
+		for i in (rows[0]["by_round"] as Array).size():
+			var n := 0
+			for r in rows:
+				if i < (r["by_round"] as Array).size() and int(r["by_round"][i]["pos"]) > 0:
+					n += 1
+			field = maxi(field, n)
+	field = maxi(int(sc.get("field", field)), 2)   # (a test can set the field size)
+	var out := []
+	for ci in mini(3, rows.size()):
+		var c: Dictionary = rows[ci]
+		var rivals := rows.filter(func(o): return o != c and bool(o["alive"]))
+		var e := {"name": c["name"], "place": ci + 1, "points": int(c["points"]), "max": int(c["max"]), "alive": bool(c["alive"]), "lines": []}
+		# status: the gaps to the others in the fight (top 3 and anyone close)
+		var gaps := []
+		for o in rows.slice(0, 4):
+			if o == c or (not bool(o["alive"]) and o != rows[0]):
+				continue
+			var g := int(c["points"]) - int(o["points"])
+			gaps.append(("%d ahead of %s" % [g, nm.call(o)]) if g > 0 else (("%d behind %s" % [-g, nm.call(o)]) if g < 0 else "level with %s" % nm.call(o)))
+		e["status"] = ", ".join(PackedStringArray(gaps.slice(0, 2)))
+		var lines: Array = e["lines"]
+		if left == 0:
+			lines.append("Champion" if ci == 0 else "Finished P%d" % (ci + 1))
+			out.append(e)
+			continue
+		if not bool(c["alive"]):
+			lines.append("Out of the title fight: even winning every round left is not enough")
+			out.append(e)
+			continue
+		# 1. winning every round left: enough whatever the others do (they can be second at best)?
+		if left > 1:
+			var all_wins: Array = fin.call(c, _filled(left, p1))
+			var spoiler := {}
+			for o in rivals:
+				if not ahead.call(all_wins, fin.call(o, _filled(left, p2))):
+					spoiler = o
+					break
+			if spoiler.is_empty():
+				lines.append("Champion by winning every round left, whatever the others do")
+			else:
+				lines.append("Needs help: even winning every round left, %s could beat him by finishing second every time" % nm.call(spoiler))
+		# 2. champion at the next round: for each of his places there, where each rival must finish
+		#    (rivals then win every round after; he scores nothing more)
+		var places := []   # [q, needs]
+		for q in range(1, NEEDS_MAX_PLACES + 1):
+			var mine: Array = fin.call(c, [pt.call(q)] + _filled(left - 1, 0))
+			var needs := []
+			var possible := true
+			for o in rivals:
+				var worst_ok := 0   # the best place the rival can take and still finish behind
+				for k in range(1, pts_table.size() + 2):
+					if k == q:
+						continue
+					if ahead.call(mine, fin.call(o, [pt.call(k)] + _filled(left - 1, p1))):
+						worst_ok = k
+						break
+				if worst_ok == 0:
+					possible = false
+					break
+				if worst_ok > 1 and not (worst_ok == 2 and q == 1):
+					needs.append([o, worst_ok])
+			if not possible:
+				break
+			places.append([q, needs])
+		var cond := func(needs: Array) -> String:
+			var parts := PackedStringArray()
+			for nd in needs.slice(0, 3):
+				# a place beyond the field: he must not score at all
+				parts.append("%s scores nothing" % nm.call(nd[0]) if int(nd[1]) > field else "%s P%d or lower" % [nm.call(nd[0]), nd[1]])
+			var txt := " and ".join(parts)
+			if needs.size() > 3:
+				txt += ", with %d other%s behind too" % [needs.size() - 3, "" if needs.size() == 4 else "s"]
+			return txt
+		var free_upto := 0
+		for pl in places:
+			if (pl[1] as Array).is_empty() and free_upto == int(pl[0]) - 1:
+				free_upto = int(pl[0])
+		var at := " at %s" % nxt if left > 1 else ""
+		if free_upto > 0:
+			lines.append("Champion%s %s, whatever the others do" % [at, "by winning" if free_upto == 1 else "with P%d or better" % free_upto])
+		var shown := 0
+		for pl in places:
+			if int(pl[0]) <= free_upto or shown >= (3 if left == 1 else 2):
+				continue
+			if left > 1 and (pl[1] as Array).size() > 2:
+				continue   # before the last round: a long shot needing three rivals to falter is left out
+			var what := "a win" if int(pl[0]) == 1 else "P%d" % int(pl[0])
+			lines.append(("%s: champion if %s" % ["A win" if int(pl[0]) == 1 else what, cond.call(pl[1])]) if left == 1
+				else "Champion%s with %s if %s" % [at, what, cond.call(pl[1])])
+			shown += 1
+		if places.is_empty():
+			lines.append("Cannot be champion: even a win is not enough" if left == 1 else "Cannot be champion yet at %s: the fight goes on" % nxt)
+		# 3. staying in the fight at the next round, rival by rival (each rival winning there and
+		#    scoring nothing after, him winning every round after)
+		if left > 1:
+			var keeps := []   # [rival, worst place that keeps him in, or -1: out if that rival is ahead]
+			for o in rivals:
+				var safe0: bool = ahead.call(fin.call(c, [0] + _filled(left - 1, p1)), fin.call(o, [p1] + _filled(left - 1, 0)))
+				if safe0:
+					continue
+				var keep := 0
+				for q in range(1, pts_table.size() + 1):
+					var mine: Array = fin.call(c, [pt.call(q)] + _filled(left - 1, p1))
+					var theirs: Array = fin.call(o, [p2 if q == 1 else p1] + _filled(left - 1, 0))
+					if ahead.call(mine, theirs):
+						keep = q
+					else:
+						break
+				# even winning is not enough against this rival: the places of his that knock him out
+				var out_at := 0
+				if keep == 0:
+					var win_max: Array = fin.call(c, [p1] + _filled(left - 1, p1))
+					for k in range(2, pts_table.size() + 1):
+						if ahead.call(win_max, fin.call(o, [pt.call(k)] + _filled(left - 1, 0))):
+							break
+						out_at = k
+				keeps.append([o, keep, out_at])
+			if keeps.is_empty():
+				lines.append("Still in the fight after %s, whatever happens" % nxt)
+			else:
+				keeps.sort_custom(func(a, b): return int(a[1]) < int(b[1]))
+				var parts := PackedStringArray()
+				var scores_only := true
+				var threat: Dictionary = keeps[0][0]   # who a DNS (no points) would let through
+				for kp in keeps:
+					var k := int(kp[1])
+					if k >= field or k >= pts_table.size():
+						continue   # scoring is enough against this one
+					if parts.size() >= 3:
+						break
+					scores_only = false
+					parts.append(("out if %s finishes P%d or better" % [nm.call(kp[0]), kp[2]] if int(kp[2]) >= 2 else "out if %s scores" % nm.call(kp[0])) if k == 0
+						else "%s if %s wins there" % ["a win" if k == 1 else "P%d or better" % k, nm.call(kp[0])])
+				if scores_only:
+					lines.append("Stays in the fight at %s as long as he scores (a DNS and a %s win would end it)" % [nxt, nm.call(threat)])
+				else:
+					lines.append("To stay in the fight at %s: %s" % [nxt, "; ".join(parts)])
+		# 4. the swing at the next round (2+ rounds left), from the standings after it: him winning
+		#    with his nearest rival second (or, for the leader, that rival winning with him second)
+		if left > 1 and not rivals.is_empty():
+			var done := total - left
+			var after := func(r: Dictionary, x: int) -> int: return final_score(base.call(r) + [x], done + 1)
+			var near: Dictionary = rows[1] if ci == 0 else rows[0]
+			var later := "the final round" if left == 2 else "R%d" % (int(sc["rounds_left"][0]["round"]) + 1)
+			if ci == 0:
+				var g: int = after.call(c, p2) - after.call(near, p1)
+				lines.append("If %s wins at %s with him second: %s going to %s" % [nm.call(near), nxt,
+					("still %d ahead" % g) if g > 0 else (("%d behind" % -g) if g < 0 else "level"), later])
+			else:
+				var g2: int = after.call(c, p1) - after.call(near, p2)
+				lines.append("A win at %s with %s second: %s going to %s" % [nxt, nm.call(near),
+					("%d ahead" % g2) if g2 > 0 else (("%d behind" % -g2) if g2 < 0 else "level"), later])
+				# to catch the ones ahead, per round (dropped rounds aside)
+				var catch := PackedStringArray()
+				for o in rows.slice(0, ci):
+					var gap := int(o["points"]) - int(c["points"])
+					if gap > 0:
+						catch.append("%s about %d" % [nm.call(o), ceili((gap + 1) / float(left))])
+				if not catch.is_empty():
+					lines.append("Points a round to make up: %s" % ", ".join(catch))
+		e["lines"] = lines.slice(0, NEEDS_MAX_LINES)
+		out.append(e)
+	return out
+
+
 # Close fights for places (not the title: that is the main table), ongoing podium streaks, the
 # leading rookie. Short lines, most interesting first.
 static func watch_items(rows: Array, season: String, cls: String) -> Array:

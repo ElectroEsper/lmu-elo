@@ -618,6 +618,8 @@ func season_recap() -> Array:
 		if not (sr["team"] as Dictionary).is_empty():
 			rows.append(["Team champions" if final else "Leading team", "%d points" % sr["team"]["points"], " & ".join(PackedStringArray(
 				(sr["team"]["members"] as Array).map(func(m): return Elo.pretty(str(m))))), sr["team"]["name"]])
+		if not (sr.get("turning", {}) as Dictionary).is_empty():
+			rows.append(["Turning point", "R%d" % sr["turning"]["round"], sr["turning"]["text"], ""])
 		for n in sr["numbers"]:
 			rows.append([str(n["label"]).capitalize(), n["value"], "", n["who"]])
 		for a in sr["awards"]:

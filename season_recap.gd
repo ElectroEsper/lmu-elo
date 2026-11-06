@@ -5,8 +5,9 @@ extends RefCounted
 ##     title could no longer be lost, the team champions;
 ##   - season in numbers: races, different winners, most wins / poles / podiums / laps led, clean
 ##     races, the closest finish, league lap records set;
-##   - awards picked from the results: cleanest driver, hard charger, rookie of the year, most
-##     improved, Mr Consistent.
+##   - awards picked from the results: cleanest driver, hard charger, comeback of the season,
+##     rookie of the year, most improved, underdog, iron man, Mr Consistent;
+##   - the championship timeline (points round by round, top 5) and the turning point.
 ## Use as: var sr = SeasonRecap.build("Season 6", "Sprint GT3")
 
 const MIN_SHARE := 0.5   # awards over the season: at least half the rounds raced
@@ -70,8 +71,64 @@ static func build(season: String, key: String) -> Dictionary:
 	out["team"] = best_team
 	var per := _per_driver(rounds, quali, cls)
 	out["numbers"] = _numbers(per, rounds, season, series, cls, drivers)
-	out["awards"] = _awards(per, drivers, standings, season, cls, done)
+	out["awards"] = _awards(per, drivers, standings, season, cls, done, rounds)
+	_timeline(out, ch, standings)
 	return out
+
+
+# Points after each round (dropped rounds as the standings had them then) for the top 5, the
+# leader after each round, and the turning point: the round where the lead changed hands with the
+# biggest swing between the two (no change of leader: the round the leader pulled furthest clear).
+static func _timeline(out: Dictionary, ch: Dictionary, standings: Array) -> void:
+	var done := int(ch["rounds"])
+	var drivers: Dictionary = ch["drivers"]
+	var after := {}   # driver -> points after each round
+	for d in drivers:
+		var pts: Array = (drivers[d]["by_round"] as Array).map(func(x): return int(x["pts"]))
+		var line := []
+		for r in range(1, done + 1):
+			line.append(SeasonScenarios.final_score(pts.slice(0, r), r))
+		after[d] = line
+	var leaders := []
+	for r in done:
+		var best := ""
+		for d in after:   # most points, then the final standings order
+			if best == "" or int(after[d][r]) > int(after[best][r]):
+				best = d
+		leaders.append(best)
+	# the top 5, plus anyone who led at some point (in standings order)
+	var top := []
+	for x in standings:
+		if top.size() < 5 or leaders.has(str(x["name"])):
+			top.append(str(x["name"]))
+	out["timeline"] = {"lines": top.map(func(d): return {"name": d, "points": after[d]}), "leaders": leaders,
+		"rounds": out["rounds"]}
+	var turn := {}
+	for r in range(1, done):
+		var now: String = leaders[r]
+		var was: String = leaders[r - 1]
+		if now != was:
+			var swing := (int(after[now][r]) - int(after[was][r])) - (int(after[now][r - 1]) - int(after[was][r - 1]))
+			if turn.is_empty() or not bool(turn["change"]) or swing > int(turn["swing"]):
+				turn = {"round": r + 1, "change": true, "swing": swing, "to": now, "from": was}
+		elif turn.is_empty() or not bool(turn["change"]):
+			# the gap to the nearest rival grew the most
+			var gap_now := 999999
+			var gap_was := 999999
+			for d in after:
+				if d != now:
+					gap_now = mini(gap_now, int(after[now][r]) - int(after[d][r]))
+					gap_was = mini(gap_was, int(after[now][r - 1]) - int(after[d][r - 1]))
+			var grew := gap_now - gap_was
+			if grew > 0 and (turn.is_empty() or grew > int(turn["swing"])):
+				turn = {"round": r + 1, "change": false, "swing": grew, "to": now, "gap": gap_now}
+	if not turn.is_empty():
+		var course := str(out["rounds"][int(turn["round"]) - 1]) if int(turn["round"]) - 1 < (out["rounds"] as Array).size() else ""
+		turn["course"] = course
+		turn["text"] = ("R%d %s: %s took the lead from %s, a %d-point swing" % [turn["round"], course, Elo.pretty(str(turn["to"])), Elo.pretty(str(turn["from"])), turn["swing"]]) \
+			if bool(turn["change"]) else ("%s led every round; the biggest step was R%d %s: %d more points clear, %d ahead" % [
+				Elo.pretty(str(turn["to"])), turn["round"], course, turn["swing"], turn["gap"]])
+	out["turning"] = turn
 
 
 # The round after which the leader could no longer be caught (everyone else winning every round
@@ -103,10 +160,13 @@ static func _per_driver(rounds: Array, quali: Dictionary, cls: String) -> Dictio
 	var per := {}
 	var get_d := func(d: String) -> Dictionary:
 		if not per.has(d):
-			per[d] = {"races": 0, "inc": 0, "gained": 0, "led": 0, "poles": 0, "clean": 0, "places": [], "elo0": NAN, "elo1": NAN}
+			per[d] = {"races": 0, "inc": 0, "gained": 0, "led": 0, "poles": 0, "clean": 0, "places": [], "elo0": NAN, "elo1": NAN,
+				"laps": 0, "dnf": 0, "climb": {}, "beat": 0.0}
 		return per[d]
-	for ev in rounds:
+	for ri in rounds.size():
+		var ev: Dictionary = rounds[ri]
 		var st: Dictionary = ev.get("stats", {}).get("race", {}).get(cls, {})
+		var field := (ev["changes"] as Array).filter(func(c): return c["cls"] == cls and c["sess"] == "race")
 		var lead: Dictionary = RaceRecap._lead_info(str(ev["file"])).get(cls, {})
 		for c in ev["changes"]:
 			if c["cls"] != cls or c["sess"] != "race":
@@ -118,8 +178,20 @@ static func _per_driver(rounds: Array, quali: Dictionary, cls: String) -> Dictio
 			p["inc"] += int(s.get("inc", 0))
 			p["clean"] += 1 if not s.is_empty() and int(s.get("inc", 0)) == 0 else 0
 			var g := int(s.get("grid", 0))
-			if g > 0 and str(s.get("status", "")) != "DNF":
+			var out_of_it := Reports._retired(s.get("status", ""))
+			p["laps"] += int(s.get("laps", 0))
+			p["dnf"] += 1 if out_of_it else 0
+			if g > 0 and not out_of_it:
 				p["gained"] += g - int(c["pos"])
+				if g - int(c["pos"]) > int(p["climb"].get("gain", 0)):
+					p["climb"] = {"gain": g - int(c["pos"]), "from": g, "to": int(c["pos"]), "round": ri + 1, "course": str(ev.get("course", ""))}
+			# places better than the ratings said (as the race recap's biggest surprise), finishers only
+			if not out_of_it:
+				var expect := 1.0
+				for o in field:
+					if o != c:
+						expect += 1.0 / (1.0 + pow(10.0, (float(c["before"]) - float(o["before"])) / 400.0))
+				p["beat"] += expect - float(c["pos"])
 			p["places"].append(int(c["pos"]))
 			p["led"] += int(lead.get("led", {}).get(d, 0))
 			if is_nan(float(p["elo0"])):
@@ -214,7 +286,7 @@ static func _numbers(per: Dictionary, rounds: Array, season: String, series: Str
 	return out
 
 
-static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, season: String, cls: String, done: int) -> Array:
+static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, season: String, cls: String, done: int, rounds: Array) -> Array:
 	var out := []
 	var min_races := maxi(1, ceili(done * MIN_SHARE))
 	var eligible := per.keys().filter(func(d): return int(per[d]["races"]) >= min_races)
@@ -263,6 +335,15 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 	if charger != "":
 		awarded[charger] = true
 		out.append({"tag": "HARD CHARGER", "name": charger, "text": "+%d places from the grid in %d races" % [per[charger]["gained"], per[charger]["races"]]})
+	# comeback of the season: the biggest climb in a single race (any driver, any number of races)
+	var comeback := ""
+	for d in per.keys().filter(open):
+		if int(per[d]["climb"].get("gain", 0)) > 0 and (comeback == "" or int(per[d]["climb"]["gain"]) > int(per[comeback]["climb"]["gain"])):
+			comeback = d
+	if comeback != "":
+		awarded[comeback] = true
+		var cb: Dictionary = per[comeback]["climb"]
+		out.append({"tag": "COMEBACK OF THE SEASON", "name": comeback, "text": "P%d → P%d at R%d %s" % [cb["from"], cb["to"], cb["round"], cb["course"]]})
 	# rookie of the year: best placed driver whose first race in the class is this season
 	if rookie != "":
 		var rr: Dictionary = standings[int(place[rookie]) - 1]
@@ -276,6 +357,26 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 	if improved != "":
 		awarded[improved] = true
 		out.append({"tag": "MOST IMPROVED", "name": improved, "text": "+%d Elo over the season" % roundi(float(per[improved]["elo1"]) - float(per[improved]["elo0"]))})
+	# underdog: the most places better than the ratings said, over the season
+	var underdog := ""
+	for d in eligible.filter(open):
+		if int(place.get(d, 999)) <= 3:
+			continue   # an underdog is not on the podium of the championship
+		if float(per[d]["beat"]) >= 3.0 and (underdog == "" or float(per[d]["beat"]) > float(per[underdog]["beat"])):
+			underdog = d
+	if underdog != "":
+		awarded[underdog] = true
+		out.append({"tag": "UNDERDOG", "name": underdog, "text": "%d places better than the ratings said, over %d races" % [roundi(float(per[underdog]["beat"])), per[underdog]["races"]]})
+	# iron man: the most laps raced (ties: fewer retirements)
+	var iron := ""
+	for d in per.keys().filter(open):
+		if iron == "" or int(per[d]["laps"]) > int(per[iron]["laps"]) or (int(per[d]["laps"]) == int(per[iron]["laps"]) and int(per[d]["dnf"]) < int(per[iron]["dnf"])):
+			iron = d
+	if iron != "" and int(per[iron]["laps"]) > 0:
+		awarded[iron] = true
+		var all_rounds := int(per[iron]["races"]) == done and int(per[iron]["dnf"]) == 0
+		out.append({"tag": "IRON MAN", "name": iron, "text": "%d laps%s" % [per[iron]["laps"],
+			", every round to the flag" if all_rounds else " in %d races" % per[iron]["races"]]})
 	# Mr Consistent: the steadiest finishing places (at least 3 races, two thirds of the rounds)
 	var steady := ""
 	var steady_sd := INF
@@ -296,5 +397,6 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 			steady = d
 	if steady != "":
 		var pl: Array = per[steady]["places"]
-		out.append({"tag": "MR CONSISTENT", "name": steady, "text": "P%d to P%d in all %d races" % [pl.min(), pl.max(), pl.size()] if pl.min() != pl.max() else "P%d in all %d races" % [pl.min(), pl.size()]})
+		var races_txt := "in all %d races" % pl.size() if pl.size() == done else "in %d of %d races" % [pl.size(), done]
+		out.append({"tag": "MR CONSISTENT", "name": steady, "text": "P%d to P%d %s" % [pl.min(), pl.max(), races_txt] if pl.min() != pl.max() else "P%d %s" % [pl.min(), races_txt]})
 	return out

@@ -109,7 +109,10 @@ func _build() -> void:
 		"standings":
 			_build_standings(body)
 		"season":
-			_build_season(body)
+			if int(spec.get("page", 0)) == 1:
+				_build_season_needs(body)
+			else:
+				_build_season(body)
 		"recap":
 			_build_recap(body)
 		"ranks":
@@ -429,17 +432,108 @@ func _build_recap(body: VBoxContainer) -> void:
 					col.add_child(_wrap(_label(str(ln), 22, MUTED, "regular")))
 
 
+# ---------- season scenarios, page 2: what each of the top 3 needs ----------
+func _build_season_needs(body: VBoxContainer) -> void:
+	var rl: Array = spec.get("rounds_left", [])
+	if not rl.is_empty():
+		var parts := PackedStringArray(rl.map(func(r): return "%s %s" % [r["round"], r["course"]]))
+		body.add_child(_wrap(_label("Still to race: " + "  ·  ".join(parts), 24, MUTED, "regular")))
+	var holder: BoxContainer = HBoxContainer.new() if landscape else VBoxContainer.new()
+	holder.add_theme_constant_override("separation", int((24 if landscape else 16) * s))
+	holder.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(holder)
+	for n in spec.get("needs", []):
+		var i: int = int(n["place"]) - 1
+		var tint: Color = PODIUM[clampi(i, 0, 2)]
+		var panel := _panel(Color(tint, 0.12), tint)
+		panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		if landscape:   # three equal columns: nothing in them may ask for more than a third
+			panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+			panel.custom_minimum_size = Vector2(0, 0)
+			panel.size_flags_stretch_ratio = 1.0
+			panel.clip_contents = true
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", int(8 * s))
+		panel.add_child(col)
+		var head := HBoxContainer.new()
+		head.add_theme_constant_override("separation", int(12 * s))
+		head.add_child(_label("P%d" % (i + 1), 36, tint, "title", 0, 64))
+		head.add_child(_fit(_label(str(n["name"]), 36, TEXT, "bold")))
+		col.add_child(head)
+		col.add_child(_wrap(_label("%d points  ·  %s  ·  can reach %d" % [n["points"], n.get("status", ""), n["max"]], 22, MUTED, "regular")))
+		for ln in n["lines"]:
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", int(10 * s))
+			var dot := _label("•", 26, accent if bool(n["alive"]) else MUTED, "bold", 0, 18)
+			dot.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+			row.add_child(dot)
+			var t := _wrap(_label(str(ln), 26 if landscape else 25, TEXT if bool(n["alive"]) else MUTED, "regular"))
+			t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			row.add_child(t)
+			col.add_child(row)
+		holder.add_child(panel)
+
+
 # ---------- season recap ----------
-# One championship's season over three pages: 0 champion (and the top 10), 1 the season in
-# numbers, 2 the awards.
+# One championship's season over four pages: 0 champion (and the top 10), 1 the championship
+# timeline, 2 the season in numbers, 3 the awards.
 func _build_season_recap(body: VBoxContainer) -> void:
 	match int(spec.get("page", 0)):
 		0:
 			_recap_champion(body)
 		1:
-			_recap_tiles(body, "THE SEASON IN NUMBERS", (spec.get("numbers", []) as Array).map(func(n): return [n["label"], n["value"], n["who"]]), 4 if landscape else 2, 56)
+			_recap_timeline(body)
 		2:
-			_recap_tiles(body, "AWARDS", (spec.get("awards", []) as Array).map(func(a): return [a["tag"], a["name"], a["text"]]), 3 if landscape else 1, 52)
+			_recap_tiles(body, "THE SEASON IN NUMBERS", (spec.get("numbers", []) as Array).map(func(n): return [n["label"], n["value"], n["who"]]), 4 if landscape else 2, 56)
+		3:
+			var aw: Array = spec.get("awards", [])
+			_recap_tiles(body, "AWARDS", aw.map(func(a): return [a["tag"], a["name"], a["text"]]),
+				(4 if aw.size() > 6 else 3) if landscape else (2 if aw.size() > 5 else 1), 40 if aw.size() > 5 else 52)
+
+
+# Points round by round for the top 5, the turning point, who led after each round.
+func _recap_timeline(body: VBoxContainer) -> void:
+	var tl: Dictionary = spec.get("timeline", {})
+	body.add_child(_label("CHAMPIONSHIP TIMELINE", 24, MUTED, "bold", 3))
+	var colors := [PODIUM[0], PODIUM[1], PODIUM[2], accent, HEAD.lightened(0.25), Color("5aa9e6"), Color("e0709a"), Color("7fd6a8")]
+	var chart := TimelineChart.new()
+	chart.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	chart.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	chart.custom_minimum_size = Vector2(0, (520 if landscape else 600) * s)
+	var ls := []
+	for i in (tl.get("lines", []) as Array).size():
+		var l: Dictionary = tl["lines"][i]
+		ls.append({"name": str(l["name"]), "points": l["points"], "color": colors[i % colors.size()]})
+	chart.lines = ls
+	chart.rounds = tl.get("rounds", [])
+	chart.mark = int(spec.get("turning", {}).get("round", 0)) - 1
+	chart.font = _font("regular")
+	chart.bold = _font("bold")
+	chart.px = s
+	chart.text_color = TEXT
+	chart.muted = MUTED
+	chart.mark_color = accent
+	body.add_child(chart)
+	var turn: Dictionary = spec.get("turning", {})
+	if not turn.is_empty():
+		var tp := _panel(Color(accent, 0.12), accent)
+		var tb := VBoxContainer.new()
+		tb.add_theme_constant_override("separation", int(2 * s))
+		tp.add_child(tb)
+		tb.add_child(_label("TURNING POINT", 22, accent, "bold", 2))
+		tb.add_child(_wrap(_label(str(turn["text"]), 28, TEXT, "bold")))
+		body.add_child(tp)
+	var leaders: Array = tl.get("leaders", [])
+	if not leaders.is_empty():
+		var parts := []
+		var i := 0
+		while i < leaders.size():   # runs of the same leader: "R1-R3 Kach"
+			var j := i
+			while j + 1 < leaders.size() and leaders[j + 1] == leaders[i]:
+				j += 1
+			parts.append(("R%d" % (i + 1) if i == j else "R%d-%d" % [i + 1, j + 1]) + " " + str(leaders[i]))
+			i = j + 1
+		body.add_child(_wrap(_label("Leader: " + "  ·  ".join(PackedStringArray(parts)), 24, MUTED, "regular")))
 
 
 func _recap_champion(body: VBoxContainer) -> void:

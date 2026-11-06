@@ -834,6 +834,31 @@ func _test_season_scenarios() -> void:
 			for r in sc["rows"]:
 				sum += float(r["title"])
 			check(absf(sum - 1.0) < 1e-6 and int(sc["total"]) >= int(sc["done"]), "Season scenarios on %s: title chances add up (%d of %d rounds run)" % [season, sc["done"], sc["total"]])
+			# what each of the top 3 needs: a card each, with lines; the leader's line is consistent with the clinch maths
+			var req := SeasonScenarios.requirements(sc)
+			var req_ok := req.size() == mini(3, (sc["rows"] as Array).size())
+			for e in req:
+				req_ok = req_ok and not (e["lines"] as Array).is_empty() and str(e.get("status", "")) != ""
+			check(req_ok, "Season scenarios: what each of the top 3 needs", str(req.map(func(e): return e["lines"])))
+			# the last round, place by place: a leader 6 clear (two rounds of 50, 41 vs 47, 44), one round left of 3, no drops in play
+			var mk2 := func(name: String, p: Array, w: int) -> Dictionary:
+				return {"name": name, "points": p[0] + p[1], "wins": w, "alive": true, "max": 0, "by_round": [{"pts": p[0], "pos": 1}, {"pts": p[1], "pos": 2}]}
+			var sc2 := {"rows": [mk2.call("A", [50, 47], 1), mk2.call("B", [47, 44], 0)], "left": 1, "total": 3, "field": 20, "rounds_left": [{"round": 3, "course": "Monza"}]}
+			var vals2 := LeagueSettings.all().duplicate(true)
+			var before2 := LeagueSettings.all()
+			vals2["drop_rounds"] = 0
+			LeagueSettings.save_all(vals2)
+			var r2 := SeasonScenarios.requirements(sc2)
+			LeagueSettings.save_all(before2)
+			# A (97) vs B (91): A champion with P3 (44 -> 141) or better whatever B does (B best 50 -> 141, A has more wins... level: A 1 win vs B 1 -> tie on wins); B: a win needs A P4 or lower
+			check(str(r2[1]["lines"]).contains("A win: champion if A P"), "Last round: what the rival needs, place by place", str(r2.map(func(e): return e["lines"])))
+			# three in it at the last round: P3's card names both P1 and P2 (not only the leader)
+			var sc3 := {"rows": [mk2.call("Aa", [50, 50], 2), mk2.call("Bb", [47, 47], 0), mk2.call("Cc", [44, 47], 0)], "left": 1, "total": 3, "field": 20, "rounds_left": [{"round": 3, "course": "Monza"}]}
+			LeagueSettings.save_all(vals2)
+			var r3 := SeasonScenarios.requirements(sc3)
+			LeagueSettings.save_all(before2)
+			var c_lines := str(r3[2]["lines"])
+			check(c_lines.contains("Aa P") and c_lines.contains("Bb P"), "What it takes: P3's conditions cover P1 and P2", c_lines)
 			# team championship: a team scores its two drivers' points (each after their own drops)
 			var key := str(champs.keys()[0])
 			var ch: Dictionary = champs[key]
@@ -894,6 +919,44 @@ func _test_season_scenarios() -> void:
 			check(st_ok and races_ok and not (sr["awards"] as Array).is_empty() and not dup,
 				"Season recap of %s: standings, numbers and awards" % sr_champs.keys()[0], str(sr.get("awards", [])))
 			check(not Reports.season_recap().is_empty(), "Season recap report builds")
+			# timeline: one point per round, never going down (points only add up... until a round is dropped)
+			var tl: Dictionary = sr.get("timeline", {})
+			var tl_ok := (tl.get("leaders", []) as Array).size() == int(sr["done"]) and not (tl.get("lines", []) as Array).is_empty()
+			for l in tl.get("lines", []):
+				tl_ok = tl_ok and (l["points"] as Array).size() == int(sr["done"])
+			for ld in tl.get("leaders", []):   # everyone who led is on the chart
+				tl_ok = tl_ok and (tl["lines"] as Array).any(func(l): return l["name"] == ld)
+			check(tl_ok, "Season recap timeline: every round, every leader on the chart")
+			var tags := (sr["awards"] as Array).map(func(a): return str(a["tag"]))
+			check(tags.has("IRON MAN") and tags.has("COMEBACK OF THE SEASON"), "Season recap awards include Iron man and Comeback of the season", str(tags))
+			var place := {}
+			for i in (sr["standings"] as Array).size():
+				place[sr["standings"][i]["name"]] = i + 1
+			var ud := (sr["awards"] as Array).filter(func(a): return a["tag"] == "UNDERDOG")
+			check(ud.is_empty() or int(place.get(ud[0]["name"], 0)) > 3, "Underdog comes from outside the top 3")
+	# race recap judged on a picked forecast: one that had the finishing order upside down makes the
+	# winner its outsider and someone a surprise; "none" drops the forecast line
+	for i in range(Elo.history.size() - 1, -1, -1):
+		var h: Dictionary = Elo.history[i]
+		var rows_r := (h["changes"] as Array).filter(func(c): return c["sess"] == "race")
+		if rows_r.size() < 8:
+			continue
+		var cls_r := str(rows_r[0]["cls"])
+		var field := rows_r.filter(func(c): return str(c["cls"]) == cls_r)
+		field.sort_custom(func(a, b): return int(a["pos"]) < int(b["pos"]))
+		var fake_rows := []
+		for j in field.size():
+			fake_rows.append({"name": str(field[j]["driver"]), "exp_pos": float(field.size() - j), "win": 0.01 if j == 0 else 0.1})
+		var fake := {"class": cls_r, "made_at": 1, "rows": fake_rows}
+		var rc_fc := RaceRecap.build(str(h["file"]), [fake])
+		var rc_none := RaceRecap.build(str(h["file"]), [])
+		var blk: Dictionary = (rc_fc["classes"] as Array).filter(func(b): return str(b["cls"]) == cls_r)[0]
+		var blk0: Dictionary = (rc_none["classes"] as Array).filter(func(b): return str(b["cls"]) == cls_r)[0]
+		var sur := (blk["highlights"] as Array).filter(func(x): return x["tag"] == "BIGGEST SURPRISE")
+		check(not bool(blk["forecast"].get("fav_won", true)) and absf(float(blk["forecast"].get("chance", 0)) - 0.01) < 1e-9
+			and not sur.is_empty() and str(sur[0]["text"]).contains("forecast") and (blk0["forecast"] as Dictionary).is_empty(),
+			"Race recap judged on a picked forecast (and on none)", str(blk["forecast"]))
+		break
 	# race recap of the latest race: a block per class, podium of 3, a surprise only when deserved
 	var last_race := ""
 	for i in range(Elo.history.size() - 1, -1, -1):

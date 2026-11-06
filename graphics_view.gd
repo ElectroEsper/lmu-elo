@@ -22,7 +22,9 @@ var format_pick := OptionButton.new()
 var source_label := Label.new()
 var source_pick := OptionButton.new()   # forecast / season / class / driver, depending on the kind
 var champ_label := Label.new()
-var champ_pick := OptionButton.new()    # standings: which championship of the season; driver card: which class
+var champ_pick := OptionButton.new()
+var fc_label := Label.new()
+var fc_pick := OptionButton.new()       # race recap: the forecast its surprise and forecast line use    # standings: which championship of the season; driver card: which class
 var title_edit := LineEdit.new()
 var corners_check := CheckBox.new()     # track card: show the detected corner numbers on the map
 var rain_check := CheckBox.new()        # event predictions, mixed weather: the "if it rains" strip
@@ -43,7 +45,8 @@ var _font_cache := {}                   # path -> Font (or null when the file ca
 var page_label := Label.new()
 var _recap_cache := {}   # season recap, by season, championship and revisions
 var page_pick := OptionButton.new()     # standings on the stream size: which page of 10 to preview
-var batch_pages := CheckBox.new()       # on: Save writes every page, each marked "page x of y"
+var batch_pages := CheckBox.new()
+var page_ticks := HFlowContainer.new()   # season recap: a tick per page, the ones Save writes       # on: Save writes every page, each marked "page x of y"
 const STREAM_PER_PAGE := 10
 var batch_box := VBoxContainer.new()    # driver cards for a whole class
 var batch_series := OptionButton.new()
@@ -70,7 +73,7 @@ func _ready() -> void:
 		kind_pick.add_item(k[1])
 	for f in FORMATS:
 		format_pick.add_item(f[0])
-	for pair in [["Image", kind_pick], ["Size", format_pick], [source_label, source_pick], [champ_label, champ_pick]]:
+	for pair in [["Image", kind_pick], ["Size", format_pick], [source_label, source_pick], [champ_label, champ_pick], [fc_label, fc_pick]]:
 		var l: Label = pair[0] if pair[0] is Label else _muted(str(pair[0]))
 		l.theme_type_variation = "Muted"
 		left.add_child(l)
@@ -171,6 +174,9 @@ func _ready() -> void:
 	batch_pages.tooltip_text = "On: Save PNG saves every page, each marked \"page x of y\".\nOff: it saves only the page shown, without the page mark."
 	batch_pages.toggled.connect(func(_on): _render())
 	left.add_child(batch_pages)
+	# season recap and season scenarios: which pages Save writes (a tick per page, see _sync_page_ticks)
+	page_ticks.add_theme_constant_override("h_separation", 10)
+	left.add_child(page_ticks)
 	save_btn.text = "Save PNG"
 	save_btn.theme_type_variation = "AccentButton"
 	save_btn.pressed.connect(_save)
@@ -212,6 +218,9 @@ func _ready() -> void:
 		if _kind() == "track":
 			_default_minutes()
 		_render())
+	fc_label.text = "Forecast to judge it on"
+	fc_pick.tooltip_text = "The forecast the biggest surprise and the forecast line come from.\nAutomatic: the forecast saved for this race (surprise from the ratings).\nNone: the ratings only, no forecast line.\nA saved forecast: its expected places and favourite."
+	fc_pick.item_selected.connect(func(_i): _render())
 	title_edit.text_changed.connect(func(_t): _render())
 
 	# the image is drawn off screen at full size; the preview shows it scaled to fit
@@ -243,6 +252,10 @@ func _fill_sources() -> void:
 	source_pick.clear()
 	champ_label.visible = false
 	champ_pick.visible = false
+	fc_label.visible = _kind() == "recap"
+	fc_pick.visible = _kind() == "recap"
+	if _kind() == "recap":
+		_fill_recap_forecasts()
 	match _kind():
 		"forecast":
 			source_label.text = "Forecast"
@@ -638,8 +651,15 @@ func _render() -> void:
 	var pages := int(sp.get("pages", 1)) if _kind() in PAGED_KINDS else 1
 	page_label.visible = pages > 1
 	page_pick.visible = pages > 1
-	batch_pages.visible = pages > 1
-	save_btn.text = "Save PNG" if pages <= 1 or not batch_pages.button_pressed else "Save PNG (%d pages)" % pages
+	var ticks := _kind() in TICK_KINDS
+	batch_pages.visible = pages > 1 and not ticks
+	page_ticks.visible = ticks
+	if ticks:
+		var n := _ticked_pages().size()
+		save_btn.text = "Save PNG (%d page%s)" % [n, "" if n == 1 else "s"]
+		save_btn.disabled = save_btn.disabled or n == 0
+	else:
+		save_btn.text = "Save PNG" if pages <= 1 or not batch_pages.button_pressed else "Save PNG (%d pages)" % pages
 
 
 # Stream size: the whole field over pages of 10 (the rest on the last page); sets "per_page",
@@ -693,12 +713,43 @@ func _teams_spec() -> Dictionary:
 	return sp
 
 
-const PAGED_KINDS := ["standings", "teams", "season_recap"]
-const SEASON_RECAP_PAGES := ["Champion", "Season in numbers", "Awards"]
+const PAGED_KINDS := ["standings", "teams", "season_recap", "season"]
+const TICK_KINDS := ["season_recap", "season"]   # named pages, ticked for saving
+const SEASON_PAGES := ["Title fight", "What each needs"]
 
 
-# Season recap of one championship: champion, season in numbers, awards; one page each, in every
-# size (Batch save writes all three).
+# The named pages of a kind ([] = not a named-page kind).
+func _page_names() -> Array:
+	match _kind():
+		"season_recap":
+			return SEASON_RECAP_PAGES
+		"season":
+			return SEASON_PAGES
+	return []
+
+
+# One tick per named page, all ticked when the pages change.
+func _sync_page_ticks(names: Array) -> void:
+	var same := page_ticks.get_child_count() == names.size()
+	for i in mini(page_ticks.get_child_count(), names.size()):
+		same = same and (page_ticks.get_child(i) as CheckBox).text == str(names[i])
+	if same:
+		return
+	for c in page_ticks.get_children():
+		page_ticks.remove_child(c)
+		c.queue_free()
+	for n in names:
+		var cb := CheckBox.new()
+		cb.text = str(n)
+		cb.button_pressed = true
+		cb.tooltip_text = "Save PNG writes the ticked pages."
+		cb.toggled.connect(func(_on): _render())
+		page_ticks.add_child(cb)
+const SEASON_RECAP_PAGES := ["Champion", "Timeline", "Season in numbers", "Awards"]
+
+
+# Season recap of one championship: champion, timeline, season in numbers, awards; one page each,
+# in every size (Batch save writes all four).
 func _season_recap_spec() -> Dictionary:
 	if source_pick.selected < 0 or champ_pick.selected < 0:
 		return {"kind": "season_recap", "title": "Season recap", "subtitle": "No championship results yet.", "empty": true}
@@ -712,6 +763,7 @@ func _season_recap_spec() -> Dictionary:
 	if sr.is_empty():
 		return {"kind": "season_recap", "title": "Season recap", "subtitle": "No results in this championship.", "empty": true}
 	_sync_page_names(SEASON_RECAP_PAGES)
+	_sync_page_ticks(SEASON_RECAP_PAGES)
 	var page := clampi(page_pick.selected, 0, SEASON_RECAP_PAGES.size() - 1)
 	var code := LeagueSettings.series_code(str(sr["series"]))
 	var state := "Final" if bool(sr["final"]) else "Season so far · R%d of %d" % [sr["done"], sr["total"]]
@@ -719,8 +771,9 @@ func _season_recap_spec() -> Dictionary:
 	sp.merge({"kind": "season_recap", "page": page, "pages": SEASON_RECAP_PAGES.size(), "empty": false,
 		"title": "%s season recap" % LeagueSettings.label(str(sr["cls"])),
 		"subtitle": "%s · %s · %s" % [season, _series_name(code), state]}, true)
-	if batch_pages.button_pressed:
-		sp["subtitle"] += "  ·  %d/%d" % [page + 1, SEASON_RECAP_PAGES.size()]
+	var ticked := _ticked_pages()
+	if ticked.size() > 1 and ticked.has(page):   # "2/3": its place among the pages being saved
+		sp["subtitle"] += "  ·  %d/%d" % [ticked.find(page) + 1, ticked.size()]
 	# names shown as on every graphic
 	sp["standings"] = (sr["standings"] as Array).map(func(r):
 		var x: Dictionary = r.duplicate()
@@ -730,6 +783,13 @@ func _season_recap_spec() -> Dictionary:
 		var x: Dictionary = a.duplicate()
 		x["name"] = Elo.pretty(str(a["name"]))
 		return x)
+	var tl: Dictionary = sr.get("timeline", {}).duplicate(true)
+	for l in tl.get("lines", []):
+		l["name"] = Elo.pretty(str(l["name"]))
+	tl["leaders"] = (tl.get("leaders", []) as Array).map(func(d):
+		var parts := Elo.pretty(str(d)).split(" ", false)   # surnames: the strip is one line
+		return parts[parts.size() - 1] if parts.size() > 0 else str(d))
+	sp["timeline"] = tl
 	if not (sr["team"] as Dictionary).is_empty():
 		sp["team_line"] = "%s: %s (%s), %d points" % ["Team champions" if bool(sr["final"]) else "Leading team", sr["team"]["name"],
 			" & ".join(PackedStringArray((sr["team"]["members"] as Array).map(func(m): return Elo.pretty(str(m))))), sr["team"]["points"]]
@@ -746,6 +806,15 @@ func _season_recap_spec() -> Dictionary:
 	if code != "":
 		sp["accent"] = LeagueSettings.series_color(code)
 	return sp
+
+
+# Season recap pages ticked for saving (indices).
+func _ticked_pages() -> Array:
+	var out := []
+	for i in page_ticks.get_child_count():
+		if (page_ticks.get_child(i) as CheckBox).button_pressed:
+			out.append(i)
+	return out
 
 
 # Page picker with named pages (season recap), keeping the choice.
@@ -826,6 +895,40 @@ func _spec() -> Dictionary:
 
 # ---------- race recap ----------
 # Classes of the race picked: "All classes" (one image for the race) or one class.
+# Race recap: which forecast the biggest surprise and the forecast line are judged on.
+func _fill_recap_forecasts() -> void:
+	var keep := str(fc_pick.get_item_metadata(fc_pick.selected)) if fc_pick.selected >= 0 else "auto"
+	fc_pick.clear()
+	fc_pick.add_item("Automatic: the forecast saved for this race")
+	fc_pick.set_item_metadata(0, "auto")
+	fc_pick.add_item("None: ratings only")
+	fc_pick.set_item_metadata(1, "none")
+	var groups := _saved_forecast_groups()
+	for gi in range(groups.size() - 1, -1, -1):   # newest first
+		var g: Array = groups[gi]
+		var classes := PackedStringArray(g.map(func(fc): return LeagueSettings.label(str(fc["class"]))))
+		fc_pick.add_item("Saved %s: %s, %s" % [Time.get_datetime_string_from_unix_time(int(g[0]["made_at"])).replace("T", " ").left(16),
+			str(g[0].get("course", "")), ", ".join(classes)])
+		fc_pick.set_item_metadata(fc_pick.item_count - 1, str(g[0]["made_at"]))
+	fc_pick.select(0)
+	for i in fc_pick.item_count:
+		if str(fc_pick.get_item_metadata(i)) == keep:
+			fc_pick.select(i)
+
+
+# The picked forecasts for the race recap: null (automatic), [] (none) or the saved group.
+func _recap_forecasts() -> Variant:
+	var m := str(fc_pick.get_item_metadata(fc_pick.selected)) if fc_pick.selected >= 0 else "auto"
+	if m == "auto":
+		return null
+	if m == "none":
+		return []
+	for g in _saved_forecast_groups():
+		if str(g[0]["made_at"]) == m:
+			return g
+	return null
+
+
 func _fill_recap_classes() -> void:
 	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
 	champ_pick.clear()
@@ -854,7 +957,7 @@ func _fill_recap_classes() -> void:
 func _recap_spec() -> Dictionary:
 	if source_pick.selected < 0:
 		return {"kind": "recap", "title": "Race recap", "subtitle": "No race imported yet.", "empty": true}
-	var rc := RaceRecap.build(str(source_pick.get_item_metadata(source_pick.selected)))
+	var rc := RaceRecap.build(str(source_pick.get_item_metadata(source_pick.selected)), _recap_forecasts())
 	if rc.is_empty():
 		return {"kind": "recap", "title": "Race recap", "subtitle": "", "empty": true}
 	var only := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
@@ -982,6 +1085,22 @@ func _season_spec(teams := false) -> Dictionary:
 	if drop_line != "":
 		watch.push_front(drop_line)
 	sp["watch"] = watch.slice(0, SeasonScenarios.MAX_WATCH)
+	if not teams:   # two pages: the title fight, what each of the top 3 needs
+		_sync_page_names(SEASON_PAGES)
+		_sync_page_ticks(SEASON_PAGES)
+		var page := clampi(page_pick.selected, 0, SEASON_PAGES.size() - 1)
+		sp["page"] = page
+		sp["pages"] = SEASON_PAGES.size()
+		var ticked := _ticked_pages()
+		if ticked.size() > 1 and ticked.has(page):
+			sp["subtitle"] += "  ·  %d/%d" % [ticked.find(page) + 1, ticked.size()]
+		if page == 1:
+			sp["needs"] = SeasonScenarios.requirements(sc).map(func(x):
+				var y: Dictionary = x.duplicate()
+				y["name"] = Elo.pretty(str(x["name"]))
+				return y)
+			sp["title"] = "What it takes"
+			sp["subtitle"] = LeagueSettings.label(str(sc["cls"])) + " · " + str(sp["subtitle"])
 	return sp
 
 
@@ -1486,6 +1605,12 @@ func _out_dir() -> String:
 func _save() -> void:
 	_render()
 	var pages := int(card.spec.get("pages", 1)) if _kind() in PAGED_KINDS and batch_pages.button_pressed else 1
+	var page_list := range(pages) if pages > 1 else [maxi(page_pick.selected, 0)]
+	if _kind() in TICK_KINDS:
+		page_list = _ticked_pages()
+		pages = page_list.size()
+		if pages == 0:
+			return
 	var keep := page_pick.selected
 	var target := _save_target()
 	var dir: String = target[0]
@@ -1494,8 +1619,8 @@ func _save() -> void:
 	var saved := 0
 	var last := ""
 	var err := OK
-	for p in pages:   # paged standings: every page, same name with _p1, _p2...
-		if pages > 1:
+	for p in page_list:   # paged standings: every page, same name with _p1, _p2...
+		if pages > 1 or _kind() in TICK_KINDS:
 			page_pick.select(p)
 			_render()
 		await RenderingServer.frame_post_draw
@@ -1503,14 +1628,16 @@ func _save() -> void:
 		var img := viewport.get_texture().get_image()
 		var page_part := ""
 		if paged:
-			page_part = "_p%d" % ((p if pages > 1 else maxi(page_pick.selected, 0)) + 1)
+			page_part = "_p%d" % (int(p) + 1)
+			if _kind() in TICK_KINDS:   # "_p2_timeline"
+				page_part += "_" + _slug(str(_page_names()[int(p)]))
 		var path := dir.path_join("%s%s%s.png" % [target[1], page_part, _size_suffix()])
 		last = path
 		err = img.save_png(path)
 		if err != OK:
 			break
 		saved += 1
-	if pages > 1:
+	if pages > 1 or _kind() in TICK_KINDS:
 		page_pick.select(keep)
 		_render()
 	if err == OK:

@@ -6,13 +6,17 @@ extends RefCounted
 ## record, lead battle, strategy, fastest lap, biggest rating gain), the championship after
 ## the round, and how a saved forecast did.
 ## Use as: var rc = RaceRecap.build("s6-mc4-r.xml")
+## `forecasts`: null = the saved forecast made for this race, if any (biggest surprise from the
+## ratings); [] = none (ratings only); an array of saved forecasts (one per class, as saved
+## together) = those: the biggest surprise and the forecast line come from that forecast.
 
 const MIN_CLIMB := 3       # places gained from the grid worth a "hard charger" line
 const CLEAN_TOP := 5       # "clean race": best finisher in this top N with no contact
 const SURPRISE_MIN_Z := 1.0   # beat the expected place by at least one standard deviation
+const FC_SURPRISE_MIN := 3    # with a picked forecast: places better than it said
 
 
-static func build(file: String) -> Dictionary:
+static func build(file: String, forecasts: Variant = null) -> Dictionary:
 	var ev := {}
 	for h in Elo.history:
 		if str(h["file"]) == file:
@@ -35,8 +39,14 @@ static func build(file: String) -> Dictionary:
 		rows.sort_custom(func(a, b): return int(a["pos"]) < int(b["pos"]))
 		var st: Dictionary = ev.get("stats", {}).get("race", {}).get(cls, {})
 		var key := ("%s %s" % [series, cls]).strip_edges()
-		var block := {"cls": cls, "podium": _podium(rows, st), "highlights": _highlights(rows, st, leads.get(cls, {}), file, str(cls)),
-			"champ": _champ_line(champs.get(key, {}), file), "forecast": _forecast_line(file, str(cls))}
+		var fc := {}   # the forecast picked for this class
+		if forecasts is Array:
+			for f in forecasts:
+				if str(f.get("class", "")) == str(cls):
+					fc = f
+		var block := {"cls": cls, "podium": _podium(rows, st), "highlights": _highlights(rows, st, leads.get(cls, {}), file, str(cls), fc),
+			"champ": _champ_line(champs.get(key, {}), file),
+			"forecast": _forecast_line(file, str(cls)) if forecasts == null else _forecast_vs(fc, rows)}
 		var pole := ""
 		for d in st:
 			if int(st[d].get("grid", 0)) == 1:
@@ -81,7 +91,7 @@ static func _podium(rows: Array, st: Dictionary) -> Array:
 	return out
 
 
-static func _highlights(rows: Array, st: Dictionary, lead: Dictionary, file: String, cls: String) -> Array:
+static func _highlights(rows: Array, st: Dictionary, lead: Dictionary, file: String, cls: String, fc := {}) -> Array:
 	var out := []
 	# clean race first (the league puts clean racing first): best finisher in the top CLEAN_TOP with no contact
 	for i in mini(CLEAN_TOP, rows.size()):
@@ -113,7 +123,7 @@ static func _highlights(rows: Array, st: Dictionary, lead: Dictionary, file: Str
 			best = {"gain": gain, "name": r["driver"], "from": g, "to": int(r["pos"])}
 	if not best.is_empty() and best["name"] != clean.get("name", ""):   # the clean charger already says it
 		out.append({"tag": "HARD CHARGER", "name": best["name"], "text": "P%d → P%d" % [best["from"], best["to"]]})
-	var sur := _surprise(rows, st)
+	var sur := _surprise_vs(rows, st, fc) if not fc.is_empty() else _surprise(rows, st)
 	if not sur.is_empty():
 		out.append(sur)
 	var first := _first(rows, file, cls)
@@ -275,6 +285,46 @@ static func _surprise(rows: Array, st: Dictionary) -> Dictionary:
 	if best.is_empty() or int(best["exp"]) <= int(best["pos"]):
 		return {}
 	return {"tag": "BIGGEST SURPRISE", "name": best["name"], "text": "P%d, expected P%d" % [best["pos"], best["exp"]]}
+
+
+# Biggest surprise against a picked forecast: the finisher who beat their forecast place (among
+# the drivers in both the forecast and the race) by the most, at least FC_SURPRISE_MIN places.
+static func _surprise_vs(rows: Array, st: Dictionary, fc: Dictionary) -> Dictionary:
+	var exp := {}
+	for r in fc.get("rows", []):
+		exp[Elo.resolve(str(r["name"]))] = float(r["exp_pos"])
+	var both := rows.filter(func(r): return exp.has(r["driver"]))
+	both.sort_custom(func(a, b): return exp[a["driver"]] < exp[b["driver"]])
+	var best := {}
+	for i in both.size():
+		var r: Dictionary = both[i]
+		if Reports._retired(st.get(r["driver"], {}).get("status", "")):
+			continue
+		var beat := (i + 1) - int(r["pos"])
+		if beat >= FC_SURPRISE_MIN and beat > int(best.get("beat", 0)):
+			best = {"beat": beat, "name": r["driver"], "pos": int(r["pos"]), "exp": i + 1}
+	if best.is_empty():
+		return {}
+	return {"tag": "BIGGEST SURPRISE", "name": best["name"], "text": "P%d, forecast P%d" % [best["pos"], best["exp"]]}
+
+
+# The forecast line for a picked forecast, judged on this race: favourite (lowest expected
+# place among the drivers in both) and the winner's chance. {} without a forecast for the class.
+static func _forecast_vs(fc: Dictionary, rows: Array) -> Dictionary:
+	if fc.is_empty() or rows.is_empty():
+		return {}
+	var by := {}
+	for r in fc.get("rows", []):
+		by[Elo.resolve(str(r["name"]))] = r
+	var fav := ""
+	for r in rows:
+		if by.has(r["driver"]) and (fav == "" or float(by[r["driver"]]["exp_pos"]) < float(by[fav]["exp_pos"])):
+			fav = r["driver"]
+	if fav == "":
+		return {}
+	var winner: String = rows[0]["driver"]
+	return {"made_at": int(fc.get("made_at", 0)), "fav": by[fav]["name"], "fav_won": fav == winner,
+		"winner": str(by.get(winner, {}).get("name", Elo.pretty(winner))), "chance": float(by.get(winner, {}).get("win", 0.0))}
 
 
 # The championship after this round: leader, gap, and a change of leader. {} without one.

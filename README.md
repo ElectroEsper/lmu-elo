@@ -4,6 +4,9 @@ A league tool for **Le Mans Ultimate**, built in Godot 4.7 (working name; the pr
 name is still `LMU_Elo`). It reads the game's result XML files and turns them into driver ratings,
 standings, reports, race forecasts and broadcast graphics for the OOFS Racing league.
 
+Version: see `CHANGELOG.md`; the number lives in Project Settings > Application > Config > Version
+and shows next to the app's name in the sidebar.
+
 ## Getting started
 
 1. Open the project in **Godot 4.7** (or run an exported build).
@@ -64,9 +67,12 @@ race (`-q` = qualifying). The series code is mapped to a name in Settings → Se
 ## Graphics
 
 Event predictions, championship standings (driver and team), season scenarios (title fight, for
-drivers and for teams), race recaps (with a highlight when a league lap record falls), season
-recaps (per series and class, three pages: champion and top 10, the season in numbers, awards:
-cleanest driver, hard charger, rookie of the year, most improved, Mr Consistent; also a report),
+drivers and for teams), race recaps (with a highlight when a league lap record falls; the biggest surprise and the
+forecast line can be judged on any saved forecast, or the ratings only), season
+recaps (per series and class, four pages: champion and top 10; championship timeline with the
+turning point; the season in numbers; awards: cleanest driver, hard charger, comeback of the
+season, rookie of the year, most improved, underdog (from outside the top 3), iron man, Mr
+Consistent; tick the pages to save; also a report),
 track cards, driver cards (single or batch) and ranks, each in three sizes: Instagram post,
 Instagram story and stream (1920 × 1080). Stream standings show the whole field, 10 per page.
 
