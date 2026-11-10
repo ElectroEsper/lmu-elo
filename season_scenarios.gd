@@ -103,26 +103,34 @@ static func clinch_next(rows: Array, left: int, total: int, pts_table: Array) ->
 			if place == 1:
 				theirs_next = int(pts_table[1]) if pts_table.size() > 1 else 0
 			var o_pts := (o["by_round"] as Array).map(func(x): return int(x["pts"]))
-			if final_score(o_pts + [theirs_next] + _filled(left - 1, p1), total) >= mine:
+			# level on points: more wins takes it (as the standings and the "What it takes" page)
+			var mine_w := int(lead["wins"]) + (1 if place == 1 else 0)
+			var theirs_w := int(o["wins"]) + (1 if theirs_next == p1 else 0) + (left - 1)
+			if not _beats(mine, mine_w, final_score(o_pts + [theirs_next] + _filled(left - 1, p1), total), theirs_w):
 				beaten = true
 				break
 		if beaten:
 			break
 		best_place = place
 	# place 0 = cannot be settled next round; -1 = settled whatever happens (even scoring nothing)
-	if best_place == pts_table.size() and _safe_with(rows, lead_pts + _filled(left, 0), total, p1, left):
+	if best_place == pts_table.size() and _safe_with(rows, lead_pts + _filled(left, 0), total, p1, left, int(lead["wins"])):
 		best_place = -1
 	return {"driver": lead["name"], "place": best_place}
 
 
 # True when no rival can reach the leader's final score (leader scoring `lead_final_pts`).
-static func _safe_with(rows: Array, lead_final_pts: Array, total: int, p1: int, left: int) -> bool:
+static func _safe_with(rows: Array, lead_final_pts: Array, total: int, p1: int, left: int, lead_wins := 0) -> bool:
 	var mine := final_score(lead_final_pts, total)
 	for o in rows.slice(1):
 		var o_pts := (o["by_round"] as Array).map(func(x): return int(x["pts"]))
-		if final_score(o_pts + _filled(left, p1), total) >= mine:
+		if not _beats(mine, lead_wins, final_score(o_pts + _filled(left, p1), total), int(o["wins"]) + left):
 			return false
 	return true
+
+
+# Ahead at the end: more points, or level on points with more wins.
+static func _beats(score: int, wins: int, o_score: int, o_wins: int) -> bool:
+	return score > o_score or (score == o_score and wins > o_wins)
 
 
 # Simulates the rounds left with the predictor; adds "title" (chance) to each row. Async.
@@ -334,7 +342,7 @@ static func _pair_score_next(pts: Array, next: Array, after: Array, left: int, t
 # [{"name", "place", "points", "max", "alive", "status", "lines": [...]}]. Exact maths under the
 # same rules as the standings (dropped rounds; level on points: more wins).
 const NEEDS_MAX_LINES := 5
-const NEEDS_MAX_PLACES := 6
+const NEEDS_MAX_SHOWN := 3   # conditional place lines shown (the places checked go down the whole field)
 
 static func requirements(sc: Dictionary) -> Array:
 	var rows: Array = sc["rows"]
@@ -410,7 +418,7 @@ static func requirements(sc: Dictionary) -> Array:
 		# 2. champion at the next round: for each of his places there, where each rival must finish
 		#    (rivals then win every round after; he scores nothing more)
 		var places := []   # [q, needs]
-		for q in range(1, NEEDS_MAX_PLACES + 1):
+		for q in range(1, mini(field, pts_table.size()) + 1):   # every place, as the title fight page does
 			var mine: Array = fin.call(c, [pt.call(q)] + _filled(left - 1, 0))
 			var needs := []
 			var possible := true
@@ -439,6 +447,16 @@ static func requirements(sc: Dictionary) -> Array:
 			if needs.size() > 3:
 				txt += ", with %d other%s behind too" % [needs.size() - 3, "" if needs.size() == 4 else "s"]
 			return txt
+		# safe even scoring nothing there (every rival winning everything)
+		var safe_blank := true
+		for o in rivals:
+			if not ahead.call(fin.call(c, _filled(left, 0)), fin.call(o, _filled(left, p1))):
+				safe_blank = false
+		if safe_blank:
+			lines.append("Already champion, whatever happens")
+			e["lines"] = lines.slice(0, NEEDS_MAX_LINES)
+			out.append(e)
+			continue
 		var free_upto := 0
 		for pl in places:
 			if (pl[1] as Array).is_empty() and free_upto == int(pl[0]) - 1:
@@ -448,7 +466,7 @@ static func requirements(sc: Dictionary) -> Array:
 			lines.append("Champion%s %s, whatever the others do" % [at, "by winning" if free_upto == 1 else "with P%d or better" % free_upto])
 		var shown := 0
 		for pl in places:
-			if int(pl[0]) <= free_upto or shown >= (3 if left == 1 else 2):
+			if int(pl[0]) <= free_upto or shown >= (NEEDS_MAX_SHOWN if left == 1 else 2):
 				continue
 			if left > 1 and (pl[1] as Array).size() > 2:
 				continue   # before the last round: a long shot needing three rivals to falter is left out

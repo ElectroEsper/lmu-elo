@@ -17,6 +17,10 @@ const TIE_VALUE := 0.01
 # key: the raw value that is graded. cuts: fixed-scale limits for grades 2, 3, 4 and 5, set
 # from LMP3 and GT3 laps of Bahrain, Sebring, Spa, Paul Ricard and COTA. alt / alt_cuts: what
 # to grade when a profile lacks the key (e.g. an export without tyre wear channels).
+# grade limits, per driver per 10 laps (league seasons 1-6, about the quintiles over the tracks
+# of GT3, Hyper and LMP3)
+const CUTS_INCIDENTS := [0.5, 0.65, 0.8, 0.95]   # contacts
+const CUTS_WARNINGS := [0.3, 0.6, 0.9, 1.2]      # track-limit warnings
 const TRAITS := [
 	{"id": "top", "unit": "% of lap time", "name": "Full throttle", "src": "tel", "key": "full_throttle_pct", "cuts": [64.0, 67.0, 69.5, 71.0],
 		"tip": "Share of the lap time at full throttle. High = power and low drag pay off (and the engine works hardest). Low = more braking, part-throttle and coasting."},
@@ -40,8 +44,10 @@ const TRAITS := [
 	{"id": "overtake", "unit": "passes per car per 10 laps", "name": "Overtaking difficulty", "src": "res", "key": "passes_10", "cuts": [0.6, 1.0, 1.5, 2.2],
 		"invert": true, "fit_name": "Overtaking (many passes)",
 		"tip": "How hard it is to pass, from league races: on-track passes, i.e. two cars of the class swapping places between the end of one lap and the next. Passes on the opening lap and swaps caused by pit stops are not counted. Per car, per 10 laps. High grade = few passes, hard to overtake; low grade = lots of overtaking."},
-	{"id": "incidents", "unit": "per driver per 10 laps", "name": "Incident risk", "src": "res", "key": "incidents_10", "cuts": [0.5, 1.0, 2.0, 3.5],
-		"tip": "From league races: contacts plus track-limit warnings per driver per 10 laps."},
+	{"id": "incidents", "unit": "per driver per 10 laps", "name": "Incident risk", "src": "res", "key": "incidents_10", "cuts": CUTS_INCIDENTS,
+		"tip": "From league races: contacts with other cars per driver per 10 laps. (Track limits are graded on their own.)"},
+	{"id": "limits", "unit": "warnings per driver per 10 laps", "name": "Track limits", "src": "res", "key": "warnings_10", "cuts": CUTS_WARNINGS,
+		"tip": "From league races: track-limit warnings per driver per 10 laps (the events the game warned for or invalidated the lap for; those it took no action on are not counted). High = easy to get warned here."},
 ]
 
 
@@ -465,12 +471,14 @@ static func _results(cls: String, training := false) -> Dictionary:
 			continue
 		var course: String = day["course"]
 		if not acc.has(course):
-			acc[course] = {"passes_10": [], "passes": [], "lap1": [], "incidents": [], "contacts": [], "limits": [], "tank_lap": []}
+			acc[course] = {"passes_10": [], "passes": [], "lap1": [], "incidents": [], "contacts": [], "limits": [], "warnings": [], "tank_lap": []}
 		var a: Dictionary = acc[course]
 		var c: Dictionary = race["classes"][cls]
-		a["incidents"].append((float(c.get("con", 0.0)) + float(c.get("tl", 0.0))) * 10.0)
+		a["incidents"].append(float(c.get("con", 0.0)) * 10.0)   # contacts only (track limits apart)
 		a["contacts"].append(float(c.get("con", 0.0)) * 10.0)
 		a["limits"].append(float(c.get("tl", 0.0)) * 10.0)
+		if c.has("tlw"):   # lap data read before version 8 has no decision
+			a["warnings"].append(float(c["tlw"]) * 10.0)
 		var length := float(day["track"].get("length", 0.0))
 		if float(c.get("fuel_km", 0.0)) > 0.0 and length > 0.0:
 			a["tank_lap"].append(float(c["fuel_km"]) * length / 1000.0)   # % of the tank per lap
@@ -492,6 +500,8 @@ static func _results(cls: String, training := false) -> Dictionary:
 			r["contacts_10"] = _mean(a["contacts"])
 			r["limits_10"] = _mean(a["limits"])
 			r["incident_races"] = a["incidents"].size()
+		if not a["warnings"].is_empty():
+			r["warnings_10"] = _mean(a["warnings"])
 		if not a["tank_lap"].is_empty():
 			r["tank_pct_lap"] = _mean(a["tank_lap"])
 		out[course] = r
@@ -615,9 +625,13 @@ static func _detail(id: String, t: Dictionary) -> String:
 				parts.append("average of %d race%s" % [int(t["races"]), "" if int(t["races"]) == 1 else "s"])
 		"incidents":
 			if t.has("contacts_10"):
-				parts.append("contacts %.2f, track-limit warnings %.2f (per driver per 10 laps)" % [float(t["contacts_10"]), float(t["limits_10"])])
+				parts.append("contacts %.2f per driver per 10 laps" % float(t["contacts_10"]))
 			if t.has("incident_races"):
 				parts.append("average of %d race%s" % [int(t["incident_races"]), "" if int(t["incident_races"]) == 1 else "s"])
+		"limits":
+			if t.has("limits_10") and float(t["limits_10"]) > 0.0:
+				parts.append("%.1f track-limit events per driver per 10 laps, %.0f%% of them warned" % [
+					float(t["limits_10"]), 100.0 * float(t.get("warnings_10", 0.0)) / float(t["limits_10"])])
 	return ", ".join(parts)
 
 

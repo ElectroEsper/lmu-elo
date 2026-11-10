@@ -28,6 +28,7 @@ func _ready() -> void:
 	_test_traffic_formula()
 	_test_unreadable()
 	_test_data_folder()
+	_test_menu_order()
 	var files := _league_files()
 	if files.is_empty():
 		_skip("league data", "put your result XMLs in tests/data/xml to run the import, duplicate, naming, training and prediction checks")
@@ -307,11 +308,128 @@ func _test_ballast() -> void:
 							worst = "%s R%d %s: rules %d kg, file %d kg" % [series, rnd, nm, r["before"], drv[nm].get("mass", -1)]
 	check(total > 50 and same >= total * 0.95, "Season 6 replays to the recorded ballast (%d of %d cars)" % [same, total], worst)
 	_test_lap_records()
+	_test_track_limits()
+	_test_drive_throughs()
 	var fit := Predict.ballast_effect()
 	check(int(fit["races"]) > 0 and float(fit["k"]) > 0.0 and float(fit["k"]) < 0.03, "Ballast effect learned from the races with ballast", str(fit))
+	_test_retune()
+	check(Predict.DEFAULTS["fit"] == 0.0, "Driver-trait x track-trait fit off by default (the backtest is better without it)")
+	check(Predict.DEFAULTS["p_tend"] == 0.0 and Predict.DEFAULTS["tend_sure"] == 1.0 and Predict.DEFAULTS["tend_cap"] == 1.5 and Predict.DEFAULTS["tend_new"] == 1.0,
+		"Track tendencies off by default, applied the safer way when on")
+	check(Predict.DEFAULTS["ballast"] == 0.0, "Ballast slowdown is off by default (an upgrade: the backtest is worse with it)")
+	check(Predict.DEFAULTS["p_form"] == 1.0 and Predict.UPGRADES.any(func(u): return u[0] == "p_form"),
+		"Current form is an upgrade, on by default (the backtest is better with it)")
+	_test_form()
+	_test_starts_fade_balance()
 	var rows: Array = Reports.season_points("Season 6").values()
 	check(rows.any(func(ch): return (ch["drivers"] as Dictionary).values().any(func(e): return int(e["ballast"]) > 0)),
 		"Standings carry each driver's ballast")
+
+
+# Penalties given mid-race are drive-throughs: what each cost is read from the files, and the
+# forecast charges that (pulled towards the league's figure) instead of a flat setting.
+func _test_drive_throughs() -> void:
+	var all := []
+	for day in Profiles.days:
+		if not (day["race"] as Dictionary).is_empty():
+			all.append_array(day["race"].get("dt", []))
+	var dt := Profiles.drive_through("")
+	check(all.size() >= 10 and float(dt["league"]) > 10.0 and float(dt["league"]) < 40.0,
+		"Drive-throughs served mid-race measured from the files (%d, typical %.1f s)" % [all.size(), float(dt["league"])])
+	var course := ""
+	for day in Profiles.days:
+		if not (day["race"] as Dictionary).is_empty() and not (day["race"].get("dt", []) as Array).is_empty():
+			course = str(day["course"])
+	var here := Profiles.drive_through(course)
+	var info := Profiles.track_info(course, "GT3")
+	var want := (float(here["track"]) * int(here["n"]) + float(here["league"]) * Profiles.K_DT) / (int(here["n"]) + Profiles.K_DT)
+	check(int(here["n"]) > 0 and absf(float(info.get("pen_s", -1.0)) - want) < 1e-6,
+		"A track's drive-through cost is its own pulled towards the league's (%s: %.1f s)" % [course, float(info.get("pen_s", -1.0))])
+
+
+# A forecast settings file saved before the retune takes the retuned values once, keeps the rest.
+func _test_retune() -> void:
+	var keep: Dictionary = Predict.params.duplicate()
+	var old := FileAccess.get_file_as_string(Predict.SETTINGS_PATH) if FileAccess.file_exists(Predict.SETTINGS_PATH) else ""
+	var f := FileAccess.open(Predict.SETTINGS_PATH, FileAccess.WRITE)
+	f.store_string(JSON.stringify({"params": {"g_grid": 1.2, "sig_form": 0.6, "pen_s": 60.0, "traffic": 1.0, "c0": 2.0}}))
+	f.close()
+	Predict._load_settings()
+	var data = JSON.parse_string(FileAccess.get_file_as_string(Predict.SETTINGS_PATH))
+	check(Predict.params["g_grid"] == 3.5 and Predict.params["sig_form"] == 0.5 and Predict.params["traffic"] == 0.0
+		and Predict.params["c0"] == 2.0 and int(data.get("tuning", 0)) == Predict.TUNING,
+		"Old forecast settings take the retuned values once and keep the others", str(Predict.params))
+	if old != "":
+		var g := FileAccess.open(Predict.SETTINGS_PATH, FileAccess.WRITE)
+		g.store_string(old)
+		g.close()
+	else:
+		DirAccess.remove_absolute(Predict.SETTINGS_PATH)
+	Predict.params = keep
+
+
+# Lap-1 places gained, pace fade over a stint, and the car balance report.
+func _test_starts_fade_balance() -> void:
+	var starts := 0
+	var fades := 0
+	var sum_start := 0
+	var bad := ""
+	for day in Profiles.days:
+		for nm in day["race"].get("drivers", {}):
+			var r: Dictionary = day["race"]["drivers"][nm]
+			if r.has("start"):
+				starts += 1
+				sum_start += int(r["start"])
+				if absf(int(r["start"])) > 40 and bad == "":
+					bad = "%s %s: %d places on lap 1" % [day["date"], nm, int(r["start"])]
+			if r.has("fade"):
+				fades += 1
+				if absf(float(r["fade"])) > Fingerprint.FADE_CAP and bad == "":
+					bad = "%s %s: fade %.2f%%" % [day["date"], nm, float(r["fade"])]
+	var fv := []
+	for day in Profiles.days:
+		for nm in day["race"].get("drivers", {}):
+			if day["race"]["drivers"][nm].has("fade"):
+				fv.append(float(day["race"]["drivers"][nm]["fade"]))
+	fv.sort()
+	print("    fade per 10 laps: 1%% %.2f, 10%% %.2f, median %.2f, 90%% %.2f, 99%% %.2f" % [fv[fv.size() / 100], fv[fv.size() / 10], fv[fv.size() / 2], fv[fv.size() * 9 / 10], fv[fv.size() * 99 / 100]])
+	check(starts > 100 and fades > 50 and bad == "", "Lap-1 places gained (%d) and stint fade (%d) read from the files" % [starts, fades], bad)
+	var ids := DriverGrades.TRAITS.map(func(t): return t[0])
+	check("starts" in ids and not ("stint" in ids), "Driver grades include Starts (stint pace is not graded: no signal yet)")
+	check(DriverGrades._age_weight("2026_01_01", DriverGrades._unix("2026_06_30"), DriverGrades.HALF_LIFE) > 0.49
+		and DriverGrades._age_weight("2026_01_01", DriverGrades._unix("2026_06_30"), DriverGrades.HALF_LIFE) < 0.51,
+		"Grades: a race 180 days older counts half")
+	var gcls := DriverGrades.for_class("GT3")
+	var pace_ok := false
+	for dn in gcls["grades"]:
+		if str(gcls["grades"][dn]["race"]["value"]).contains("car taken out"):
+			pace_ok = true
+	check(pace_ok, "Race pace grade takes the car out")
+	var cb: Array = Reports.car_balance()
+	check(cb.size() > 0 and (cb[0]["rows"] as Array).size() >= 2 and (cb[0]["headers"] as Array).has("Car itself"),
+		"Car balance report: each car with its drivers' level taken out", str(cb.size()))
+
+
+# Current form: last 5 races against the driver's own average, only from 6 races on.
+func _test_form() -> void:
+	var shown := 0
+	var hidden := 0
+	var bad := ""
+	for key in Profiles.hist:
+		var parts: PackedStringArray = str(key).split("|")
+		var n := (Profiles.hist[key] as Array).filter(func(rec): return not (rec["r"] as Dictionary).is_empty()).size()
+		var f := Profiles.form(parts[1], parts[0])
+		if n < Profiles.FORM_MIN:
+			hidden += 1
+			if not f.is_empty() and bad == "":
+				bad = "%s: form with %d races" % [key, n]
+		else:
+			shown += 1
+			if (f.is_empty() or absf(float(f["value"]) - (float(f["recent"]) - float(f["career"]))) > 1e-6) and bad == "":
+				bad = "%s: %s" % [key, str(f)]
+	check(shown > 10 and hidden > 0 and bad == "", "Current form shown from %d races (%d drivers shown, %d too few)" % [Profiles.FORM_MIN, shown, hidden], bad)
+	var tables: Array = Reports.driver_profile(str(Profiles.hist.keys()[0]).split("|")[1])
+	check(tables.size() > 0, "Driver profile builds with the Current form table")
 
 
 # League lap records: the quickest best lap at each track and class, records only ever come down.
@@ -351,6 +469,36 @@ func _test_lap_records() -> void:
 				var set := LapRecords.set_at(race_file, course, cls)
 				found = not set.is_empty() and float(set[0]["record"]["time"]) == float(hist[-1]["time"]) and not (set[0]["before"] as Dictionary).is_empty()
 	check(found, "Lap record lowered at a weekend is found for the race recap")
+
+
+# Track limits by the game's decision: warnings and penalties are part of the events, warnings a
+# minority, penalties rare; read from the text (the Resolution number changed between versions).
+func _test_track_limits() -> void:
+	var ev := 0.0
+	var w := 0.0
+	var pn := 0.0
+	var ok := true
+	for day in Profiles.days:
+		if day["race"].is_empty():
+			continue
+		for nm in day["race"]["drivers"]:
+			var r: Dictionary = day["race"]["drivers"][nm]
+			var laps := float(r.get("laps", 0))
+			ok = ok and r.has("tlw") and float(r.get("tlw", 0)) <= float(r.get("tl", 0)) + 1e-6
+			ev += float(r.get("tl", 0)) * laps
+			w += float(r.get("tlw", 0)) * laps
+			pn += float(r.get("tlp", 0)) * laps
+	check(ok and ev > 0.0 and w / ev > 0.03 and w / ev < 0.35 and pn / ev < 0.02,
+		"Track limits split by the game's decision (%.1f%% warned, %.2f%% penalised)" % [100.0 * w / maxf(ev, 1.0), 100.0 * pn / maxf(ev, 1.0)])
+
+
+func _test_menu_order() -> void:
+	var names := GraphicsView.KINDS.map(func(k): return str(k[1]).to_lower()) if ClassDB.class_exists("GraphicsView") else []
+	if names.is_empty():
+		names = (load("res://graphics_view.gd") as GDScript).get_script_constant_map()["KINDS"].map(func(k): return str(k[1]).to_lower())
+	var sorted := names.duplicate()
+	sorted.sort()
+	check(names == sorted, "Graphics menu in A-Z order", str(names))
 
 
 func _test_traffic_formula() -> void:
@@ -800,7 +948,8 @@ func _test_season_scenarios() -> void:
 	check(LeagueSettings.drops_for(6) == 1, "Default settings: one dropped round at the end of a 6-round season")
 	check(SeasonScenarios.final_score([50, 0, 47, 44], 6) == 141, "Final score drops the worst round (missed rounds count 0)")
 	# leader 4 x 50, rival 4 x 47, two rounds left of 6, worst round dropped:
-	# leader P3 next = 244, rival best = 241 -> settled; P4 (241) would only tie -> not
+	# leader P3 next = 244, rival best = 241 -> settled; P4 (241) ties on points, and the leader has
+	# more wins (4 against the rival's 2 at best) -> settled too; P5 (238) -> not
 	var mk := func(name: String, p: int) -> Dictionary:
 		var br := []
 		for i in 4:
@@ -808,7 +957,7 @@ func _test_season_scenarios() -> void:
 		return {"name": name, "points": 4 * p, "wins": 4 if p == 50 else 0, "by_round": br, "alive": true}
 	var rows := [mk.call("A", 50), mk.call("B", 47)]
 	var cl := SeasonScenarios.clinch_next(rows, 2, 6, pts)
-	check(int(cl["place"]) == 3, "Clinch maths: leader needs P3 or better next round", "got P%d" % int(cl["place"]))
+	check(int(cl["place"]) == 4, "Clinch maths: leader needs P4 or better next round (level on points, more wins)", "got P%d" % int(cl["place"]))
 	var safe := [mk.call("A", 50), {"name": "B", "points": 40, "wins": 0, "by_round": [{"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}], "alive": true}]
 	check(int(SeasonScenarios.clinch_next(safe, 2, 6, pts)["place"]) == -1, "Clinch maths: a title already out of reach is settled whatever happens")
 	# on the league data: a championship of the latest season builds, chances add up to 1
@@ -859,6 +1008,18 @@ func _test_season_scenarios() -> void:
 			LeagueSettings.save_all(before2)
 			var c_lines := str(r3[2]["lines"])
 			check(c_lines.contains("Aa P") and c_lines.contains("Bb P"), "What it takes: P3's conditions cover P1 and P2", c_lines)
+			# both pages agree: the title fight's "champion with Px or better" = the leader's first line on page 2
+			# (leader 12 clear with fewer wins than the rival: ties go the rival's way)
+			var sc4 := {"rows": [mk2.call("Lead", [50, 41], 1), mk2.call("Chase", [47, 32], 0), mk2.call("Far", [20, 20], 0)], "left": 1, "total": 3, "field": 20,
+				"rounds_left": [{"round": 3, "course": "Monza"}]}
+			LeagueSettings.save_all(vals2)
+			var cl4 := SeasonScenarios.clinch_next(sc4["rows"], 1, 3, LeagueSettings.points())
+			var r4 := SeasonScenarios.requirements(sc4)
+			LeagueSettings.save_all(before2)
+			var q4 := int(cl4.get("place", 0))
+			var first4 := str(r4[0]["lines"][0]) if not (r4[0]["lines"] as Array).is_empty() else ""
+			check((q4 == 1 and first4.begins_with("Champion by winning")) or (q4 > 1 and first4.begins_with("Champion with P%d or better" % q4))
+				or (q4 == -1 and first4.begins_with("Already champion")), "Title fight and What it takes agree on what the leader needs", "page 1: P%d, page 2: %s" % [q4, first4])
 			# team championship: a team scores its two drivers' points (each after their own drops)
 			var key := str(champs.keys()[0])
 			var ch: Dictionary = champs[key]

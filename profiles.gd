@@ -8,9 +8,15 @@ extends Node
 ## so the backtest can replay history without peeking.
 
 const K_PACE := 2.0        # shrinkage, in events, for pace-like traits (pulls few-race drivers to the field)
+# shrinkage for race and quali pace themselves (a var so the backtest can try others): drivers differ
+# a lot more than one driver varies race to race (0.65 vs 0.33 %^2 in the league's laps), which
+# makes the right pull about half a race; tested against 2 in the backtest (1.0.21)
+var k_speed := 2.0
 const K_RATE := 4.0        # for track limits / contacts per lap
 const K_CONS := 6.0        # for lap-time consistency (a weak trait)
-const PRIOR_TL := 0.79
+const PRIOR_TL := 0.79     # track-limit events per lap (whatever the game decided)
+const PRIOR_TLW := 0.12    # of which warnings (season 6: 16% of events)
+const PRIOR_TLP := 0.003   # of which penalties (season 6: 0.4% of events)
 const PRIOR_CON := 0.113
 const PRIOR_CONS := 0.77
 const MIN_TRACKS_FOR_Z := 4
@@ -109,6 +115,7 @@ func rebuild() -> void:
 							day["race"]["drivers"][rn]["pos"] = i + 1
 			day["series"] = Elo.series_code(str(draft["file"]))   # "sc", "mc"... ("" if the name has none)
 			day["season"] = Elo.season_number(str(draft["file"]))
+			day["season_name"] = Elo.season_of(draft)   # "Season 6" (as the reports' season filter)
 			# fuel, energy and tyre figures back to x1, so races run under different multipliers
 			# (Sprint x1, Multiclass x2...) compare; the rules are set in Settings > Race rules
 			var rules := LeagueSettings.rules_for(day["series"], day["season"])
@@ -133,13 +140,13 @@ func rebuild() -> void:
 		for nm in day["race"].get("drivers", {}):
 			var e: Dictionary = day["race"]["drivers"][nm]
 			var key: String = "%s|%s" % [e["cls"], nm]
-			recs[key] = {"date": day["date"], "course": day["course"], "r": e, "q": {},
+			recs[key] = {"date": day["date"], "course": day["course"], "season": str(day.get("season_name", "")), "r": e, "q": {},
 				"wet_r": float(day["race"].get("wet", 0.0)), "wet_q": float(day["quali"].get("wet", 0.0))}
 		for nm in day["quali"].get("drivers", {}):
 			var e: Dictionary = day["quali"]["drivers"][nm]
 			var key: String = "%s|%s" % [e["cls"], nm]
 			if not recs.has(key):
-				recs[key] = {"date": day["date"], "course": day["course"], "r": {}, "q": {},
+				recs[key] = {"date": day["date"], "course": day["course"], "season": str(day.get("season_name", "")), "r": {}, "q": {},
 					"wet_r": float(day["race"].get("wet", 0.0)), "wet_q": float(day["quali"].get("wet", 0.0))}
 			recs[key]["q"] = e
 		for key in recs:
@@ -168,10 +175,12 @@ func has_data() -> bool:
 
 # Plain averages over the events before `before` ("" = all). Counts are per metric
 # because wear / fuel / top speed are sometimes missing.
-# {"n_r", "n_q", "pace", "qpace", "wear", "n_wear", "top", "n_top", "fuel", "n_fuel", "tl", "con", "cons", "car"}
+# {"n_r", "n_q", "pace", "qpace", "wear", "n_wear", "top", "n_top", "fuel", "n_fuel", "tl", "tlw", "tlp", "con", "cons", "car"}
+# tl: track-limit events per lap, tlw: of which warnings, tlp: of which penalties.
 func raw_stats(who: String, cls: String, before := "") -> Dictionary:
 	var s := {"n_r": 0, "n_q": 0, "pace": 0.0, "qpace": 0.0, "wear": 0.0, "n_wear": 0,
-		"top": 0.0, "n_top": 0, "fuel": 0.0, "n_fuel": 0, "tl": 0.0, "con": 0.0, "cons": 0.0, "car": ""}
+		"top": 0.0, "n_top": 0, "fuel": 0.0, "n_fuel": 0, "tl": 0.0, "tlw": 0.0, "tlp": 0.0, "con": 0.0, "cons": 0.0, "car": "",
+		"start": 0.0, "n_start": 0, "fade": 0.0, "n_fade": 0}
 	for rec in hist.get("%s|%s" % [cls, who], []):
 		if before != "" and rec["date"] >= before:
 			continue
@@ -181,6 +190,14 @@ func raw_stats(who: String, cls: String, before := "") -> Dictionary:
 			# the pace the driver would have had without success ballast (see Predict.ballast_effect)
 			s["pace"] += r.get("pace_rel", 0.0) - Predict.ballast_k_history() * float(r.get("mass", 0.0))
 			s["tl"] += r.get("tl", 0.0)
+			if r.has("start"):
+				s["start"] += float(r["start"])
+				s["n_start"] += 1
+			if r.has("fade"):
+				s["fade"] += float(r["fade"])
+				s["n_fade"] += 1
+			s["tlw"] += r.get("tlw", 0.0)
+			s["tlp"] += r.get("tlp", 0.0)
 			s["con"] += r.get("con", 0.0)
 			s["cons"] += r.get("cons", 0.0)
 			s["car"] = r.get("car", s["car"])
@@ -200,15 +217,50 @@ func raw_stats(who: String, cls: String, before := "") -> Dictionary:
 			if s["car"] == "":
 				s["car"] = q.get("car", "")
 	# sums -> means
-	for k in ["pace", "tl", "con", "cons"]:
+	for k in ["pace", "tl", "tlw", "tlp", "con", "cons"]:
 		if s["n_r"] > 0:
 			s[k] /= s["n_r"]
 	if s["n_q"] > 0:
 		s["qpace"] /= s["n_q"]
+	for k in ["start", "fade"]:
+		if s["n_" + k] > 0:
+			s[k] /= s["n_" + k]
 	for k in ["wear", "top", "fuel"]:
 		if s["n_" + k] > 0:
 			s[k] /= s["n_" + k]
 	return s
+
+
+const FORM_RACES := 5   # recent races that make up "current form"
+const FORM_MIN := 6     # races in the class before form is shown (the recent ones and some before)
+
+## Current form: race pace over the driver's last FORM_RACES races in the class against their own
+## average over all of them (both without success ballast), in % of lap time, negative = quicker
+## than usual. {"value", "recent", "career", "n" (races), "last" (date of the latest)}, or {} with
+## fewer than FORM_MIN races. The forecast carries half of it into the next race (Predict
+## FORM_SHARE, "p_form": the share that replayed past races best).
+func form(who: String, cls: String, before := "") -> Dictionary:
+	var paces := []
+	var last := ""
+	for rec in hist.get("%s|%s" % [cls, who], []):
+		if before != "" and rec["date"] >= before:
+			continue
+		var r: Dictionary = rec["r"]
+		if r.is_empty():
+			continue
+		paces.append(float(r.get("pace_rel", 0.0)) - Predict.ballast_k_history() * float(r.get("mass", 0.0)))
+		last = str(rec["date"])
+	if paces.size() < FORM_MIN:
+		return {}
+	var career := 0.0
+	for p in paces:
+		career += p
+	career /= paces.size()
+	var recent := 0.0
+	for i in range(paces.size() - FORM_RACES, paces.size()):
+		recent += paces[i]
+	recent /= FORM_RACES
+	return {"value": recent - career, "recent": recent, "career": career, "n": paces.size(), "last": last}
 
 
 # (n * mean + k * prior) / (n + k)
@@ -219,6 +271,8 @@ static func shrunk(mean: float, n: int, k: float, prior: float) -> float:
 # Average per-lap track-limit / contact / consistency numbers of the class (the shrinkage priors).
 func class_means(cls: String, before := "") -> Dictionary:
 	var tl := 0.0
+	var tlw := 0.0
+	var tlp := 0.0
 	var con := 0.0
 	var cons := 0.0
 	var n := 0
@@ -229,12 +283,14 @@ func class_means(cls: String, before := "") -> Dictionary:
 			var r: Dictionary = day["race"]["drivers"][nm]
 			if r["cls"] == cls:
 				tl += r.get("tl", 0.0)
+				tlw += r.get("tlw", 0.0)
+				tlp += r.get("tlp", 0.0)
 				con += r.get("con", 0.0)
 				cons += r.get("cons", 0.0)
 				n += 1
 	if n < 10:
-		return {"tl": PRIOR_TL, "con": PRIOR_CON, "cons": PRIOR_CONS}
-	return {"tl": tl / n, "con": con / n, "cons": cons / n}
+		return {"tl": PRIOR_TL, "tlw": PRIOR_TLW, "tlp": PRIOR_TLP, "con": PRIOR_CON, "cons": PRIOR_CONS}
+	return {"tl": tl / n, "tlw": tlw / n, "tlp": tlp / n, "con": con / n, "cons": cons / n}
 
 
 # Spread of driver averages (wear / top speed / fuel), used to turn a driver's trait into a z-score.
@@ -268,21 +324,26 @@ func trait_sd(cls: String, before := "") -> Dictionary:
 
 
 # Display-ready profile (everything shrunk toward the field; no Elo involved).
-# {"n_r", "n_q", "pace", "qpace", "wear", "top", "fuel", "tl", "con", "cons", "car"}
+# {"n_r", "n_q", "pace", "qpace", "wear", "top", "fuel", "tl", "tlw", "tlp", "con", "cons", "car"}
 func profile(who: String, cls: String, before := "", cm: Dictionary = {}) -> Dictionary:
 	var s := raw_stats(who, cls, before)
 	if cm.is_empty():
 		cm = class_means(cls, before)
 	return {
 		"n_r": s["n_r"], "n_q": s["n_q"], "car": s["car"],
-		"pace": shrunk(s["pace"], s["n_r"], K_PACE, 0.0),
-		"qpace": shrunk(s["qpace"], s["n_q"], K_PACE, 0.0),
+		"pace": shrunk(s["pace"], s["n_r"], k_speed, 0.0),
+		"qpace": shrunk(s["qpace"], s["n_q"], k_speed, 0.0),
 		"wear": shrunk(s["wear"], s["n_wear"], K_PACE, 0.0),
 		"top": shrunk(s["top"], s["n_top"], K_PACE, 0.0),
 		"fuel": shrunk(s["fuel"], s["n_fuel"], K_PACE, 0.0),
 		"tl": shrunk(s["tl"], s["n_r"], K_RATE, cm["tl"]),
+		"tlw": shrunk(s["tlw"], s["n_r"], K_RATE, cm["tlw"]),
+		"tlp": shrunk(s["tlp"], s["n_r"], K_RATE, cm["tlp"]),
 		"con": shrunk(s["con"], s["n_r"], K_RATE, cm["con"]),
 		"cons": shrunk(s["cons"], s["n_r"], K_CONS, cm["cons"]),
+		# places gained on lap 1 and pace fade per 10 laps of a stint, pulled towards 0 (the class)
+		"start": shrunk(s["start"], s["n_start"], K_RATE, 0.0), "n_start": s["n_start"],
+		"fade": shrunk(s["fade"], s["n_fade"], K_RATE, 0.0), "n_fade": s["n_fade"],
 	}
 
 
@@ -435,6 +496,9 @@ func _course_stats(course: String, cls: String, before: String, quali_day: Strin
 			_add(acc, cnt, "fuel_km", c.get("fuel_km", 0.0))
 			_add(acc, cnt, "ve_km", c.get("ve_km", 0.0))
 			_add(acc, cnt, "tl", c.get("tl", 0.0))
+			if c.has("tlw"):   # (lap data read before version 8 has no decision)
+				_add(acc, cnt, "tlw", c.get("tlw", 0.0))
+				_add(acc, cnt, "tlp", c.get("tlp", 0.0))
 			_add(acc, cnt, "kmh_r", c.get("kmh", 0.0))
 			_add(acc, cnt, "minutes", day["race"].get("minutes", 0.0))
 			_add(acc, cnt, "pit_loss", c.get("pit_loss", 0.0))
@@ -474,6 +538,10 @@ func track_info(course: String, cls: String, before := "", quali_day := "") -> D
 	var t := _course_stats(course, cls, before, quali_day)
 	var out := {"course": course, "ref_s": 0.0, "minutes": DEFAULT_MINUTES,
 		"top_z": 0.0, "wear_z": 0.0, "fuel_z": 0.0, "known_race": false}
+	# a penalty given mid-race is a drive-through: what one costs here (Predict uses it)
+	var dt := drive_through(course, before)
+	if int(dt["league_n"]) > 0:
+		out["pen_s"] = dt["s"]
 	if t.is_empty():
 		out["ref_s"] = DEFAULT_LAP_S
 		return out
@@ -507,6 +575,33 @@ func track_info(course: String, cls: String, before := "", quali_day := "") -> D
 		if t.has(key) and norms.has(key):
 			out[pair[1]] = (t[key] - norms[key][0]) / norms[key][1]
 	return out
+
+
+const K_DT := 3.0   # drive-throughs at a track before its own figure counts half (against the league's)
+
+## What a drive-through costs at a track, from the ones served in the league's races (Fingerprint
+## "dt"): {"s" (seconds used: the track's median pulled towards the league's), "n" (served here),
+## "track" (median here, 0 = none), "league" (median everywhere), "league_n"}.
+func drive_through(course: String, before := "") -> Dictionary:
+	var here := []
+	var all := []
+	for day in days:
+		if day["race"].is_empty() or (before != "" and day["date"] >= before):
+			continue
+		for v in day["race"].get("dt", []):
+			all.append(float(v))
+			if str(day["course"]) == course:
+				here.append(float(v))
+	var league := _median_of(all) if not all.is_empty() else 0.0
+	var track := _median_of(here) if not here.is_empty() else 0.0
+	var s := (track * here.size() + league * K_DT) / (here.size() + K_DT) if not all.is_empty() else 0.0
+	return {"s": s, "n": here.size(), "track": track, "league": league, "league_n": all.size()}
+
+
+static func _median_of(xs: Array) -> float:
+	var v := xs.duplicate()
+	v.sort()
+	return float(v[v.size() / 2]) if v.size() % 2 == 1 else (float(v[v.size() / 2 - 1]) + float(v[v.size() / 2])) / 2.0
 
 
 func _last_minutes() -> int:

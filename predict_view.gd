@@ -15,7 +15,7 @@ const PARAM_ROWS := [
 	["dmg", "Contact: damage, % per lap (adds up)", 0.0, 2.0, 0.05],
 	["tl_cost", "Track limits: seconds per event", 0.0, 1.0, 0.01],
 	["tl_pen", "Track limits: chance of a penalty", 0.0, 0.05, 0.0005],
-	["pen_s", "Penalty size (seconds)", 0.0, 60.0, 1.0],
+	["pen_s", "Penalty size if none measured yet (seconds)", 0.0, 60.0, 1.0],
 	["fit", "Track-fit strength (0 = off)", 0.0, 3.0, 0.1],
 	["lap_noise", "Lap-to-lap scatter (x)", 0.0, 3.0, 0.1],
 	["p_track", "Upgrade: own history at the track (0 = off, 1 = on)", 0.0, 2.0, 0.1],
@@ -897,8 +897,15 @@ func _add_rows(root: TreeItem, rows: Array, mode: int, overall_offset: int) -> v
 			it.set_text(11, str(overall_offset + place))
 		var tip := "Race pace vs class median, in %%. Track history here: %+.2f%%, track tendencies: %+.2f%% (negative = quicker; applied only when that upgrade is on)." % [
 			float(r.get("track_gap", 0.0)), float(r.get("tend", 0.0))]
+		if absf(float(r.get("form", 0.0))) > 0.0:
+			tip += " Current form (last %d races vs own average): %+.2f%%%s." % [Profiles.FORM_RACES, float(r["form"]),
+				", %d%% of it applied" % roundi(100.0 * Predict.FORM_SHARE * float(Predict.params.get("p_form", 0.0))) if float(Predict.params.get("p_form", 0.0)) > 0.0 else ", not applied (the Current form upgrade is off)"]
 		if kg > 0:
-			tip += " Success ballast %d kg: about %+.2f%% slower (shown pace is without it)." % [kg, Predict.ballast_k() * kg]
+			if Predict.ballast_k() > 0.0:
+				tip += " Success ballast %d kg: about %+.2f%% slower (shown pace is without it)." % [kg, Predict.ballast_k() * kg]
+			else:
+				tip += " Success ballast %d kg: worth about %+.2f%%, not applied (the Success ballast upgrade is off)." % [
+					kg, float(Predict.ballast_effect()["k"]) * kg]
 		it.set_tooltip_text(9, tip)
 		for c in range(2, tree.columns):
 			it.set_text_alignment(c, HORIZONTAL_ALIGNMENT_RIGHT)

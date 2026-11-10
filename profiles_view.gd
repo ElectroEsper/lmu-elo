@@ -11,7 +11,7 @@ signal notice(text: String)
 const TAG_INFO := {
 	"Tyre whisperer": "Wears the tyres far less than the rest of the class.",
 	"Tyre shredder": "Wears the tyres far more than the rest of the class.",
-	"Track-limit bandit": "Goes over the track limits far more often per lap than the class.",
+	"Track-limit bandit": "Gets far more track-limit warnings per lap than the class (events the game took no action on do not count).",
 	"Contact magnet": "Has far more contacts with other cars per lap than the class.",
 	"Metronome": "Very consistent: lap times vary far less than in the rest of the class.",
 	"Fuel sipper": "Uses clearly less fuel per lap than the class.",
@@ -26,10 +26,12 @@ const DRIVER_TIPS := [
 	"Races with lap data in this class.",
 	"Qualifying pace against the class median, in percent. Negative = quicker. Drivers with few sessions are pulled toward 0.",
 	"Race pace on clean laps against the class median, in percent. Negative = quicker.",
+	"Current form: race pace over the last 5 races against the driver's own average, in percent (without success ballast). Negative = quicker than usual. Shown from 6 races on. The forecast carries half of it into the next race (Current form upgrade).",
 	"Tyre wear per km against the class median, in percent. Negative = gentler on the tyres.",
 	"Top speed against the class median, in percent. Positive = faster in a straight line.",
 	"Fuel use per km against the class median, in percent. Negative = more economical.",
-	"Track-limit warnings per lap.",
+	"Track-limit events per lap, whatever the game decided (most are \"No Further Action\"). Feeds the forecast.",
+	"Track-limit warnings per lap: the events the game warned for or invalidated the lap for. This is the cleanliness measure (penalties are not counted: they follow from the warnings).",
 	"Contacts with other cars per lap.",
 	"Lap-time spread as a percent of the median lap. Lower = more consistent.",
 	"",
@@ -54,7 +56,9 @@ const TRACK_TIPS := [
 	"Share of the lap time spent in sector 3, in percent.",
 	"Tyre wear per km at this track, in percent.",
 	"Fuel use per km at this track.",
-	"Track-limit warnings per lap.",
+	"Track-limit events per lap, whatever the game decided.",
+	"Share of the track-limit events that the game turned into a warning.",
+	"Share of the track-limit events that ended in a penalty (drive-through).",
 ]
 const TAG_RULES := "Tags need 3+ races. \"Far\" means at least one standard deviation from the class average, and needs 6+ drivers with 3+ races to compare against. At most 3 tags are shown."
 
@@ -84,14 +88,14 @@ func _ready() -> void:
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(tabs)
 	# first_asc: true where the lowest value is the "best" (quicker pace, less wear...) or text
-	_setup(drivers, "Drivers", ["Driver", "Races", "Quali %", "Race %", "Tyre wear %", "Top speed %", "Fuel %", "Limits / lap", "Contacts / lap", "Lap spread %", "Tags"],
-		0, 10, [true, false, true, true, true, false, true, true, true, true, true], range(1, 10))
+	_setup(drivers, "Drivers", ["Driver", "Races", "Quali %", "Race %", "Form %", "Tyre wear %", "Top speed %", "Fuel %", "Limits / lap", "Warnings / lap", "Contacts / lap", "Lap spread %", "Tags"],
+		0, 12, [true, false, true, true, true, true, false, true, true, true, true, true, true], range(1, 12))
 	_setup(cars, "Cars", ["Car", "Entries", "Quali %", "Race %", "Top speed %", "Fuel %", "Tyre wear %"],
 		0, -1, [true, false, true, true, false, true, true], range(1, 7))
-	_setup(tracks, "Tracks", ["Track", "Visits", "Length km", "Avg km/h", "Top km/h", "S1 %", "S2 %", "S3 %", "Wear %/km", "Fuel %/km", "Limits / lap"],
-		0, -1, [true, false, false, false, false, false, false, false, false, false, false], range(1, 11))
+	_setup(tracks, "Tracks", ["Track", "Visits", "Length km", "Avg km/h", "Top km/h", "S1 %", "S2 %", "S3 %", "Wear %/km", "Fuel %/km", "Limits / lap", "Warned %", "Penalised %"],
+		0, -1, [true, false, false, false, false, false, false, false, false, false, false, false, false], range(1, 13))
 	var driver_tips := DRIVER_TIPS.duplicate()
-	driver_tips[10] = _glossary()   # the Tags header lists every tag and its meaning
+	driver_tips[12] = _glossary()   # the Tags header lists every tag and its meaning
 	for pair in [[drivers, driver_tips], [cars, CAR_TIPS], [tracks, TRACK_TIPS]]:
 		for i in pair[1].size():
 			pair[0].set_column_title_tooltip_text(i, pair[1][i])
@@ -236,7 +240,7 @@ func _num(v: Variant, fmt := "%+.2f") -> String:
 func _fill_drivers(cls: String) -> void:
 	var rows := Profiles.driver_rows(cls)
 	var z := {}
-	for k in ["wear", "top", "fuel", "tl", "con", "cons"]:
+	for k in ["wear", "top", "fuel", "tl", "tlw", "con", "cons"]:
 		z[k] = _zscores(rows, k)
 	var out := []
 	for r in rows:
@@ -244,15 +248,18 @@ func _fill_drivers(cls: String) -> void:
 		var has_q: bool = r["n_q"] > 0
 		var tags := _tags(r, z)
 		var tag_text := ", ".join(PackedStringArray(tags))
+		var fm := Profiles.form(r["name"], cls)
 		out.append({
 			"text": [
 				Elo.pretty(r["name"]), "%d" % r["n_r"],
 				_num(r["qpace"]) if has_q else "-",
 				_num(r["pace"]) if has_r else "-",
+				_num(fm["value"]) if not fm.is_empty() else "-",
 				_num(r["wear"]) if has_r else "-",
 				_num(r["top"]) if has_r else "-",
 				_num(r["fuel"]) if has_r else "-",
 				_num(r["tl"], "%.2f") if has_r else "-",
+				_num(r["tlw"], "%.3f") if has_r else "-",
 				_num(r["con"], "%.3f") if has_r else "-",
 				_num(r["cons"], "%.2f") if has_r else "-",
 				tag_text],
@@ -260,14 +267,16 @@ func _fill_drivers(cls: String) -> void:
 				Elo.pretty(r["name"]), r["n_r"],
 				r["qpace"] if has_q else null,
 				r["pace"] if has_r else null,
+				fm["value"] if not fm.is_empty() else null,
 				r["wear"] if has_r else null,
 				r["top"] if has_r else null,
 				r["fuel"] if has_r else null,
 				r["tl"] if has_r else null,
+				r["tlw"] if has_r else null,
 				r["con"] if has_r else null,
 				r["cons"] if has_r else null,
 				tag_text if tag_text != "" else null],
-			"tip": {10: _tag_tip(tags)} if not tags.is_empty() else {},
+			"tip": {12: _tag_tip(tags)} if not tags.is_empty() else {},
 		})
 	_rows[drivers] = out
 	_render(drivers)
@@ -316,7 +325,7 @@ func _tags(r: Dictionary, z: Dictionary) -> Array:
 		tags.append("Tyre whisperer")
 	elif g.call("wear") >= 1.0:
 		tags.append("Tyre shredder")
-	if g.call("tl") >= 1.0:
+	if g.call("tlw") >= 1.0:   # warnings: what the game held against him
 		tags.append("Track-limit bandit")
 	if g.call("con") >= 1.0:
 		tags.append("Contact magnet")
@@ -365,6 +374,15 @@ func _fill_tracks(cls: String) -> void:
 		key.append(r.get("fuel_km"))
 		text.append(_num(r.get("tl"), "%.2f"))
 		key.append(r.get("tl"))
+		# how often the game acted on them
+		var share := func(k: String) -> Variant:
+			return 100.0 * float(r[k]) / float(r["tl"]) if r.has(k) and float(r.get("tl", 0.0)) > 0.0 else null
+		var w: Variant = share.call("tlw")
+		var pn: Variant = share.call("tlp")
+		text.append(_num(w, "%.1f"))
+		key.append(w)
+		text.append(_num(pn, "%.2f"))
+		key.append(pn)
 		out.append({"text": text, "key": key, "tip": {}})
 	_rows[tracks] = out
 	_render(tracks)

@@ -8,10 +8,10 @@ extends RefCounted
 ##   "v": 1,
 ##   "track": {"TrackVenue", "TrackCourse", "TrackLength"},
 ##   "race":  {"minutes": int,
-##             "classes": {cls: {"ref_s", "kmh", "top", "wear_km", "fuel_km", "tl", "con", "n",
+##             "classes": {cls: {"ref_s", "kmh", "top", "wear_km", "fuel_km", "tl", "tlw", "tlp", "con", "n",
 ##                               "passes", "passes_10", "lap1_moves", "pit_swaps"}},
 ##             "drivers": {name: {"cls", "car", "laps", "grid", "pos", "pace", "pace_rel", "cons",
-##                                "top_rel", "wear_rel", "fuel_rel", "tl", "con", "pen", "mass"}}},
+##                                "top_rel", "wear_rel", "fuel_rel", "tl", "tlw", "tlp", "con", "pen", "mass"}}},
 ##   "quali": {"classes": {cls: {"best_s", "kmh", "top", "s1", "s2", "s3"}},
 ##             "drivers": {name: {"cls", "car", "best", "rel"}}}
 ## }
@@ -19,7 +19,13 @@ extends RefCounted
 ## tl = track-limit events per lap, con = contacts with other cars per lap,
 ## cons = lap-time spread in % of the median clean lap, wear_km / fuel_km are % per km.
 
-const VERSION := 7   # 7: success ballast carried ("mass", kg). 6: virtual energy per km ("ve_km") for the pit-stop forecast. 5: 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
+# what the game decided on a track-limit event (from the text: "No Further Action", "Warning",
+# "Invalid Lap Cut Track", "Drive Through Penalty", "Time Penalty")
+const TL_NONE := 0
+const TL_WARN := 1
+const TL_INVALID := 2   # lap time deleted
+const TL_PEN := 3
+const VERSION := 12   # 12: places gained on lap 1 ("start"), pace fade over a stint ("fade"), invalidated laps count with the warnings. 11: drive-throughs served mid-race and what each cost ("dt"). 10: no track limits on lap 0 (formation lap and start). 9: track limits by the game's decision ("tlw" warnings, "tlp" penalties per lap). 7: success ballast carried ("mass", kg). 6: virtual energy per km ("ve_km") for the pit-stop forecast. 5: 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
 const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5 median are not "clean"
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
@@ -37,6 +43,9 @@ static func extract(path: String, training := false) -> Dictionary:
 		return {}
 	var inc_rx := RegEx.new()
 	inc_rx.compile("^(.*)\\((\\d+)\\) reported contact \\([\\d.]+\\) with another vehicle (.*)$")
+	var dt_rx := RegEx.new()
+	dt_rx.compile("^(.+?) served \\S+ Drive Thru penalty")
+	var served_et := -1.0   # et of a Penalty element without a driver (its text says who served what)
 	var track := {}
 	var sessions := {}
 	var cur := {}
@@ -50,6 +59,7 @@ static func extract(path: String, training := false) -> Dictionary:
 	var session_field := ""
 	var in_lap := false
 	var in_incident := false
+	var tl_at := []   # [driver, et] of the TrackLimits element whose text (the decision) comes next
 	var incident_et := 0.0
 	var last_inc := {}
 	while p.read() == OK:
@@ -62,7 +72,7 @@ static func extract(path: String, training := false) -> Dictionary:
 				if session == "" and tag in SESSION_TAGS:
 					session = tag
 					session_depth = depth
-					cur = {"drivers": [], "minutes": 0, "tl": {}, "con": {}, "con_ev": [], "pens": {}}
+					cur = {"drivers": [], "minutes": 0, "tl": {}, "con": {}, "con_ev": [], "pens": {}, "dt": []}
 					sessions[tag] = cur
 				elif session == "" and (tag == "TrackVenue" or tag == "TrackCourse" or tag == "TrackLength"):
 					header_field = tag
@@ -78,6 +88,8 @@ static func extract(path: String, training := false) -> Dictionary:
 						driver["laps"].append({
 							"n": int(p.get_named_attribute_value_safe("num")),
 							"t": -1.0,
+							"et": _attr(p, "et"),
+							"fl": _attr(p, "fuel"),
 							"top": _attr(p, "topspeed"),
 							"fu": _attr(p, "fuelUsed"),
 							"ve": _attr(p, "veUsed"),   # virtual energy (GT3, Hyper): often runs out before the fuel
@@ -97,16 +109,23 @@ static func extract(path: String, training := false) -> Dictionary:
 					elif tag == "Incident":
 						in_incident = true
 						incident_et = float(p.get_named_attribute_value_safe("et"))
+					elif tag == "TrackLimits" and p.get_named_attribute_value_safe("Lap") == "0":
+						pass   # formation lap and start: the game's logic is unreliable there (drive-throughs the stewards overturn)
 					elif tag == "TrackLimits":
 						var who := p.get_named_attribute_value_safe("Driver")
 						var tl: Dictionary = cur["tl"]
 						if not tl.has(who):
 							tl[who] = {}
-						tl[who][p.get_named_attribute_value_safe("et")] = true
+						# the game's decision comes as the element's text (its Resolution number changed
+						# between game versions); each event is written twice, with the same time: keyed by it
+						tl_at = [who, p.get_named_attribute_value_safe("et")]
+						tl[who][tl_at[1]] = TL_NONE
 					elif tag == "Penalty" and p.has_attribute("Driver"):
 						var pens: Dictionary = cur["pens"]
 						var pw := p.get_named_attribute_value_safe("Driver")
 						pens[pw] = pens.get(pw, 0) + 1
+					elif tag == "Penalty":
+						served_et = float(p.get_named_attribute_value_safe("et"))
 			XMLParser.NODE_TEXT:
 				var txt := p.get_node_data().strip_edges()
 				if txt == "":
@@ -120,6 +139,16 @@ static func extract(path: String, training := false) -> Dictionary:
 					track[header_field] = txt
 				elif session_field == "Minutes":
 					cur["minutes"] = int(txt)
+				elif not tl_at.is_empty():
+					var lower := txt.to_lower()
+					cur["tl"][tl_at[0]][tl_at[1]] = TL_WARN if lower.contains("warning") else (TL_PEN if lower.contains("penalty")
+						else (TL_INVALID if lower.contains("invalid") else TL_NONE))
+					tl_at = []
+				elif served_et >= 0.0:
+					var dm := dt_rx.search(txt)
+					if dm != null:
+						cur["dt"].append([dm.get_string(1), served_et])
+					served_et = -1.0
 				elif in_incident:
 					var m := inc_rx.search(txt)
 					if m != null:
@@ -143,6 +172,7 @@ static func extract(path: String, training := false) -> Dictionary:
 				header_field = ""
 				session_field = ""
 				in_incident = false
+				served_et = -1.0
 				depth -= 1
 
 	var length := float(track.get("TrackLength", "0"))
@@ -197,6 +227,17 @@ static func _drop_after_finish(cur: Dictionary) -> void:
 		for et in cur["tl"][who].keys():
 			if float(et) > fin[who]:
 				cur["tl"][who].erase(et)
+
+
+# Track-limit events of one driver by the game's decision: "warn" or "pen".
+static func _tl_count(events: Dictionary, kind: String) -> int:
+	var n := 0
+	for et in events:
+		var code := int(events[et])
+		# an invalidated lap ("Invalid Lap Cut Track") counts with the warnings: a mistake or pushing too hard
+		if (kind == "warn" and (code == TL_WARN or code == TL_INVALID)) or (kind == "pen" and code == TL_PEN):
+			n += 1
+	return n
 
 
 static func _anonymous(rows: Dictionary) -> Dictionary:
@@ -272,7 +313,9 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			"cls": cls, "car": d.get("CarType", ""), "laps": n,
 			"grid": int(d.get("ClassGridPos", "0")), "pos": int(d.get("ClassPosition", "0")),
 			"pace": pace, "cons": cons,
-			"tl": cur["tl"].get(nm, {}).size() / float(n),
+			"tl": cur["tl"].get(nm, {}).size() / float(n),   # every event, whatever the game decided
+			"tlw": _tl_count(cur["tl"].get(nm, {}), "warn") / float(n),   # warnings (cleanliness)
+			"tlp": _tl_count(cur["tl"].get(nm, {}), "pen") / float(n),    # turned into a penalty
 			"con": cur["con"].get(nm, 0) / float(n),
 			"pen": cur["pens"].get(nm, 0),
 			"mass": float(d.get("PenaltyMass", "0")),   # success ballast carried (kg)
@@ -289,8 +332,13 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			x["fuel"] = _fuel_per_lap(fuels) / km
 		if ves.size() > MIN_LAPS:
 			x["ve"] = _fuel_per_lap(ves) / km
+		var fd := _stint_fade(d["laps"], lap_med.get(cls, {}))
+		if not fd.is_empty():
+			m["fade"] = _r(fd["fade"], 0.0001)
+			m["fade_laps"] = fd["laps"]
 		rows[nm] = m
 		raw[nm] = x
+	_add_starts(cur["drivers"], rows)
 
 	var by_class := {}
 	for nm in rows:
@@ -308,10 +356,14 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		var fuels := []
 		var ves := []
 		var tls := 0.0
+		var tlws := 0.0
+		var tlps := 0.0
 		var cons := 0.0
 		for nm in names:
 			paces.append(rows[nm]["pace"])
 			tls += rows[nm]["tl"]
+			tlws += rows[nm]["tlw"]
+			tlps += rows[nm]["tlp"]
 			cons += rows[nm]["con"]
 			if raw[nm].has("top"):
 				tops.append(raw[nm]["top"])
@@ -345,6 +397,8 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			m["pace"] = _r(m["pace"])
 			m["cons"] = _r(m["cons"])
 			m["tl"] = _r(m["tl"])
+			m["tlw"] = _r(m["tlw"])
+			m["tlp"] = _r(m["tlp"], 0.0001)
 			m["con"] = _r(m["con"])
 		# track numbers come from the five best finishers
 		var top5 := names.filter(func(nm): return rows[nm]["pos"] > 0)
@@ -369,6 +423,8 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			"fuel_km": _r(med_fuel * 100.0, 0.0001),
 			"ve_km": _r(_median(ves) * 100.0, 0.0001) if not ves.is_empty() else 0.0,   # % of the energy allowance per km
 			"tl": _r(tls / names.size()),
+			"tlw": _r(tlws / names.size()),
+			"tlp": _r(tlps / names.size(), 0.0001),
 			"con": _r(cons / names.size()),
 			"n": names.size(),
 		}
@@ -376,7 +432,116 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 		var pl := _pit_loss(cur["drivers"], c, lap_med.get(c, {}))
 		if pl > 0.0:
 			classes[c]["pit_loss"] = _r(pl, 0.1)
-	return {"minutes": cur["minutes"], "classes": classes, "drivers": rows, "wet": _wet_share(cur["drivers"])}
+	return {"minutes": cur["minutes"], "classes": classes, "drivers": rows, "wet": _wet_share(cur["drivers"]),
+		"dt": _drive_through_losses(cur)}
+
+
+# Seconds each drive-through served mid-race cost: the lap that ran through the pit lane and the
+# one after, against the driver's own median lap. The game logs the serve as the car leaves the
+# lane, so the lane is in the lap that ended before that. Left out: the first two laps (start
+# traffic, and the stewards usually overturn start drive-throughs) and serves combined with a
+# service stop (fuel or tyres). Penalties given mid-race are drive-throughs, so this is what one
+# costs at the track (median of the league's: about 20 s).
+static func _drive_through_losses(cur: Dictionary) -> Array:
+	var by_name := {}
+	for d in cur["drivers"]:
+		by_name[d.get("Name", "")] = d["laps"]
+	var out := []
+	for ev in cur.get("dt", []):
+		var laps: Array = by_name.get(ev[0], [])
+		var i := -1
+		for k in laps.size():
+			if float(laps[k]["et"]) >= float(ev[1]):
+				i = k
+				break
+		if i < 1:
+			continue
+		var a: Dictionary = laps[i - 1]
+		var b: Dictionary = laps[i]
+		if int(a["n"]) <= 2 or a["t"] <= 0.0 or b["t"] <= 0.0:
+			continue
+		if b["fl"] > a["fl"] + 0.02 or b["tw"] > a["tw"] + 0.02:
+			continue   # served together with a stop for fuel or tyres
+		var clean := []
+		for l in laps:
+			if l["t"] > 0.0 and not l["pit"] and l["n"] > 1:
+				clean.append(l["t"])
+		if clean.size() < 5:
+			continue
+		var loss: float = a["t"] + b["t"] - 2.0 * _median(clean)
+		if loss > 0.0 and loss < 120.0:
+			out.append(_r(loss, 0.1))
+	return out
+
+
+# Places gained on the first lap, in class: grid place minus the place at the end of lap 1
+# (positive = gained). The place after lap 1 is the rank among the cars of the class that
+# completed it, so cars that never made it round count as places gained. Left out when the
+# driver has no grid place or no first lap.
+static func _add_starts(drivers: Array, rows: Dictionary) -> void:
+	var by_cls := {}   # class -> [[overall place after lap 1, name]]
+	for d in drivers:
+		for l in d["laps"]:
+			if l["n"] == 1:
+				if int(l["p"]) > 0:
+					var c: String = d.get("CarClass", "")
+					if not by_cls.has(c):
+						by_cls[c] = []
+					by_cls[c].append([int(l["p"]), d.get("Name", "")])
+				break
+	for c in by_cls:
+		var order: Array = by_cls[c]
+		order.sort_custom(func(a, b): return a[0] < b[0])
+		for i in order.size():
+			var nm: String = order[i][1]
+			if rows.has(nm) and int(rows[nm]["grid"]) > 0:
+				rows[nm]["start"] = int(rows[nm]["grid"]) - (i + 1)
+
+
+# Pace fade over a stint: how much the driver's lap times drift per 10 laps against the class
+# median of the same laps (so fuel burn, rubber and weather, which everyone shares, drop out), in
+# % of lap time; positive = fades more than the class (harder on the tyres as the stint goes on),
+# negative = holds the pace better. A stint runs between pit stops; it needs FADE_MIN comparable
+# laps, laps far off the stint's own median (traffic, a mistake) are left out, and stints are
+# averaged by their length. {"fade", "laps"} or {} without a long enough stint.
+const FADE_MIN := 10
+const FADE_CAP := 3.0   # % per 10 laps (99% of races are within about 2.2)
+static func _stint_fade(laps: Array, med: Dictionary) -> Dictionary:
+	var stints := [[]]
+	for i in laps.size():
+		if laps[i]["pit"]:
+			stints.append([])
+		elif laps[i].get("wet", false):
+			stints.append([])   # wet tyres: not the same stint as the dry laps around it
+		elif _comparable(laps, i) and med.has(laps[i]["n"]):
+			stints.back().append([float(laps[i]["n"]), laps[i]["t"] / float(med[laps[i]["n"]])])
+	var sum := 0.0
+	var total := 0
+	for st in stints:
+		if st.size() < FADE_MIN:
+			continue
+		var m := _median(st.map(func(p): return p[1]))
+		var pts: Array = st.filter(func(p): return p[1] <= CLEAN_LIMIT * m)
+		if pts.size() < FADE_MIN:
+			continue
+		var mx := 0.0
+		var my := 0.0
+		for p in pts:
+			mx += p[0]
+			my += p[1]
+		mx /= pts.size()
+		my /= pts.size()
+		var sxx := 0.0
+		var sxy := 0.0
+		for p in pts:
+			sxx += (p[0] - mx) * (p[0] - mx)
+			sxy += (p[0] - mx) * (p[1] - my)
+		if sxx <= 0.0:
+			continue
+		sum += sxy / sxx * 1000.0 * pts.size()   # ratio per lap -> % per 10 laps
+		total += pts.size()
+	# capped: a bigger drift is damage or a problem mid-stint, not how the driver manages a stint
+	return {"fade": clampf(sum / total, -FADE_CAP, FADE_CAP), "laps": total} if total > 0 else {}
 
 
 # A lap that can be compared with other cars on the same lap: not the start, not a pit lap

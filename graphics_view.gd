@@ -8,8 +8,10 @@ extends HBoxContainer
 
 signal notice(text: String)
 
-const KINDS := [["forecast", "Event predictions"], ["standings", "Championship standings"], ["season", "Season scenarios"], ["teams", "Team standings"], ["team_season", "Team scenarios"], ["season_recap", "Season recap"], ["recap", "Race recap"], ["ranks", "Driver ranks"], ["driver", "Driver card"],
-	["track", "Track card"]]
+# the graphics, in A-Z order of their names (as listed in the Image menu)
+const KINDS := [["standings", "Championship standings"], ["driver", "Driver card"], ["ranks", "Driver ranks"],
+	["forecast", "Event predictions"], ["recap", "Race recap"], ["season_recap", "Season recap"], ["season", "Season scenarios"],
+	["team_season", "Team scenarios"], ["teams", "Team standings"], ["track", "Track card"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
 var UI_CFG: String:

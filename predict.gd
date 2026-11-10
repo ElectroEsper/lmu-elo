@@ -22,19 +22,49 @@ enum Mode { ACTUAL_GRID, PREDICTED_QUALI, RACE_ONLY }
 
 const DEFAULTS := {
 	"sig_form": 0.5,   # day-to-day form noise, % of lap time, constant over the race
-	"g_grid": 1.2,     # seconds lost per grid place (track position)
+	# seconds lost per grid place (track position, and on the real grid what the order says about
+	# pace on the day). Retuned on 91 races (1.0.21): 1.2 -> 3.5, Brier 0.2194 -> 0.2147 with the
+	# real grid (log-loss 1.453 -> 1.291); 2.5 about level, 5 and 7 worse.
+	"g_grid": 3.5,
 	"c0": 1.0,         # seconds lost per contact straight away
 	"dmg": 0.15,       # % of lap time lost on every following lap, per contact (damage adds up)
 	"tl_cost": 0.04,   # seconds per track-limit event (expected value of the penalties they cause)
-	"tl_pen": 0.0016,  # chance that a track-limit event turns into a penalty
-	"pen_s": 25.0,     # seconds lost per penalty
-	"fit": 1.0,        # strength of driver-trait x track-trait effects (0 = switched off)
+	"tl_pen": 0.0016,  # chance that a track-limit event turns into a penalty (only when tl_learned is 0)
+	# 1 = each driver's own track-limit penalties per lap, learned from the game's decisions in
+	# the result files (pulled towards the class), instead of every event x tl_pen. Backtest
+	# (autumn 2026, 89 races): level with the fixed rate (Brier 0.2314 -> 0.2321 predicted quali,
+	# 0.2178 -> 0.2174 actual grid); kept as it follows each driver.
+	# Off since 1.0.25: penalties are so rare that a driver's own rate rests on one or two events.
+	# Replaying 91 races, the same chance per track-limit event for everyone scored slightly better
+	# (Brier 0.2271 -> 0.2267 predicted quali, 0.2105 -> 0.2096 real grid).
+	"tl_learned": 0.0,
+	"pen_s": 20.0,     # seconds lost per penalty when no drive-through has been measured yet (the league's: about 20 s)
+	# strength of driver-trait x track-trait effects (tyre wear, top speed, fuel use; 0 = off). Off
+	# since 1.0.24: the effect sizes (B_WEAR, B_TOP, B_FUEL) were set by hand, never learned, and
+	# replaying 91 races every strength was worse than none (Brier predicted quali / real grid:
+	# off 0.2271 / 0.2105, half 0.2279 / 0.2120, full 0.2294 / 0.2136, double 0.2326 / 0.2180),
+	# in every class.
+	"fit": 0.0,
 	"lap_noise": 1.0,  # multiplier on the drivers' lap-time scatter
 	"sq": 0.8,         # quali noise, % of lap time
-	"p_track": 0.0,    # strength of the driver's own history at this track (0 = off, 1 = full)
+	# strength of the driver's own history at this track (0 = off, 1 = full). On since 1.0.21: Test
+	# upgrades with current form kept it (0.2236 -> 0.2231) and dropped track tendencies (0.2257) and
+	# traffic (0.2232); both together with form 0.2211.
+	"p_track": 1.0,
 	"p_tend": 0.0,     # strength of the driver's track tendencies (0 = off, 1 = full)
+	# How tendencies are applied when that upgrade is on. Reviewed 1.0.22 on 91 races (Brier, predicted
+	# quali / real grid; off: 0.2294 / 0.2136): as built 0.2324 / 0.2148, confident only 0.2308,
+	# capped 0.2316, new tracks only 0.2314, all three 0.2296 / 0.2137, all three at half strength
+	# 0.2294 / 0.2136. No version beats leaving them off; these three make it harmless.
+	"tend_sure": 1.0,  # 1 = only tendencies the profile calls confident ("quicker" / "slower"), not early signs
+	"tend_cap": 1.5,   # > 0: a track counts at most this many standard deviations from average (no stretching past it)
+	"tend_new": 1.0,   # 1 = tendencies only at tracks the driver has no history at (own history covers the others)
 	"pits": 0.0,       # no longer used: pit stops follow the race rules (kept so old settings files load)
 	"traffic": 0.0,    # strength of multiclass traffic (0 = off, 1 = as measured)
+	# Current form (Profiles.form): 1 = FORM_SHARE of the driver's last-5-races gap to their own
+	# average carried into the forecast. An upgrade, on: backtest on 91 races (1.0.19), Brier
+	# 0.2357 -> 0.2329 predicted quali, 0.2216 -> 0.2198 actual grid, log-loss better in both.
+	"p_form": 1.0,
 	# 1 = track-limit warnings and contacts vary from race to race (how many, how costly), with the
 	# same averages as before. Backtest on 89 races (autumn 2026): no measurable change in accuracy
 	# (Brier 0.2258 -> 0.2255, log-loss within seed noise), kept because it is closer to reality.
@@ -51,7 +81,10 @@ const DEFAULTS := {
 	# (Test upgrades keeps it only if it helps). Backtest on the 30 races run with ballast (autumn
 	# 2026): worse, Brier 0.2179 -> 0.2219 (predicted quali), 0.2071 -> 0.2092 (actual grid): the
 	# drivers carrying the most kept beating what the slower pace says (ballast follows form).
-	"ballast": 1.0,
+	# Measured within each season and series (1.0.19) the effect is real (0.015%/kg) but the
+	# backtest is still worse (34 races with ballast: 0.2269 -> 0.2343 predicted quali,
+	# 0.2147 -> 0.2198 actual grid): off by default; Test upgrades switches it on if it helps.
+	"ballast": 0.0,
 	"ballast_hist": 1.0,   # past pace taken without the ballast carried that day (neutral in the backtest)
 }
 const K_TRACK := 2.0   # sessions at a track before the driver's own history there gets half weight
@@ -59,7 +92,11 @@ const PIT_SD := 3.0    # seconds of scatter per pit stop
 # Pit stops are not an upgrade any more: they follow the race rules (Settings > Race rules, or the
 # Predict screen), and the backtest replays every past race under its own rules.
 const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track tendencies"],
-	["traffic", "Traffic (multiclass)"], ["ballast", "Success ballast"]]
+	["traffic", "Traffic (multiclass)"], ["ballast", "Success ballast"], ["p_form", "Current form"]]
+# Share of a driver's current form (Profiles.form: last 5 races vs their average) carried into the
+# next race. Backtest, 91 races: 20% / 50% / 100% of it scored 0.2343 / 0.2329 / 0.2331 Brier
+# (predicted quali; 0.2357 without), the same order with the real grid: half of it is kept.
+const FORM_SHARE := 0.5
 # The telemetry laps are very competitive. Over 66 dry league races the top five's typical clean
 # race lap was this much slower (the winner's best lap was about 2% slower); other classes: x1.03.
 const TEL_RACE_RATIO := {"Hyper": 1.045, "GT3": 1.03, "LMP3": 1.03}
@@ -108,6 +145,12 @@ var _ballast_fit := {}
 var _ballast_fit_rev := -1
 
 const N_SIMS := 4000
+# Settings retuned on the backtest; a settings file saved before takes these defaults once.
+# 1: 1.0.21 (91 races): grid cost, race-day noise, upgrades, penalty size (now measured).
+# 2: 1.0.24: driver-trait x track-trait fit off.
+# 3: 1.0.25: one penalty chance per track-limit event for everyone.
+const TUNING := 3
+const RETUNED := ["g_grid", "sig_form", "sq", "p_track", "p_tend", "traffic", "p_form", "ballast", "pen_s", "fit", "tl_learned", "tl_pen"]
 const BACKTEST_SIMS := 300
 const STRENGTHS := [0.5, 1.5]    # extra strengths tried for a kept upgrade (1.0 is the first test)
 const UPGRADE_MARGIN := 0.0005   # an upgrade must lower the backtest error by more than this to be kept
@@ -164,12 +207,13 @@ func driver_inputs(names: Array, cls: String, before := "", course := "") -> Arr
 			"wet": float(WetWeather.of(nm, cls).get("effect", 0.0)),   # % lap time in the wet, < 0 = quicker
 			"n_r": s["n_r"],
 			"known": s["n_r"] > 0 or s["n_q"] > 0 or has_elo,
-			"pace": Profiles.shrunk(s["pace"], s["n_r"], Profiles.K_PACE, prior_r),
-			"qpace": Profiles.shrunk(s["qpace"], s["n_q"], Profiles.K_PACE, prior_q),
+			"pace": Profiles.shrunk(s["pace"], s["n_r"], Profiles.k_speed, prior_r),
+			"qpace": Profiles.shrunk(s["qpace"], s["n_q"], Profiles.k_speed, prior_q),
 			"wear_z": Profiles.shrunk(s["wear"], s["n_wear"], Profiles.K_PACE, 0.0) / sd["wear"],
 			"top_z": Profiles.shrunk(s["top"], s["n_top"], Profiles.K_PACE, 0.0) / sd["top"],
 			"fuel_z": Profiles.shrunk(s["fuel"], s["n_fuel"], Profiles.K_PACE, 0.0) / sd["fuel"],
 			"tl": Profiles.shrunk(s["tl"], s["n_r"], Profiles.K_RATE, cm["tl"]),
+			"tlp": Profiles.shrunk(s["tlp"], s["n_r"], Profiles.K_RATE, cm["tlp"]),   # track-limit penalties per lap
 			"con": Profiles.shrunk(s["con"], s["n_r"], Profiles.K_RATE, cm["con"]),
 			"cons": Profiles.shrunk(s["cons"], s["n_r"], Profiles.K_CONS, cm["cons"]),
 			"fuel_rel": Profiles.shrunk(s["fuel"], s["n_fuel"], Profiles.K_PACE, 0.0),
@@ -177,6 +221,7 @@ func driver_inputs(names: Array, cls: String, before := "", course := "") -> Arr
 			"track_gap_q": fit["gap_q"],
 			"tend": fit["tend"],
 			"dnf": dnf_rate(nm, cls, before),
+			"form": float(Profiles.form(nm, cls, before).get("value", 0.0)),   # % pace, < 0 = on form
 			"ballast": 0.0,   # kg; set by forecast() (and the backtest: what the car carried)
 		})
 	return out
@@ -221,7 +266,9 @@ func ballast_effect() -> Dictionary:
 			var r: Dictionary = drivers[nm]
 			if absf(float(r.get("pace_rel", 0.0))) > BALLAST_MAX_GAP:
 				continue
-			var key := "%s|%s" % [r["cls"], nm]
+			# compared within the same season and series: ballast goes to drivers on form, so
+			# against their whole career the extra weight looks free (0.000%/kg vs 0.011%/kg)
+			var key := "%s|%s|%s|%s" % [r["cls"], nm, _period(day), str(day.get("series", ""))]
 			if not by_driver.has(key):
 				by_driver[key] = []
 			by_driver[key].append([float(r.get("mass", 0.0)), float(r.get("pace_rel", 0.0))])
@@ -268,6 +315,12 @@ func ballast_effect() -> Dictionary:
 			per10.call(fit["k"]), races, per10.call(fit["k_data"]), per10.call(fit["se"]), per10.call(BALLAST_PRIOR)]
 	_ballast_fit = fit
 	return fit
+
+
+## A day's season ("s6"), or its month for files whose name carries no season ("2025_11").
+static func _period(day: Dictionary) -> String:
+	var s := int(day.get("season", 0))
+	return "s%d" % s if s > 0 else str(day.get("date", "")).left(7)
 
 
 # Chance that a driver retires (DNF or disqualification), from their finishing record in the
@@ -334,16 +387,21 @@ func _track_terms(nm: String, cls: String, before: String, course: String, value
 			out["gap_r"] = float(t["race_y"]) * t["races"] / (t["races"] + K_TRACK)
 		if t["quali_y"] != null:
 			out["gap_q"] = float(t["quali_y"]) * t["quali"] / (t["quali"] + K_TRACK)
-	if values.has(course):
+	var has_history: bool = out["gap_r"] != 0.0 or out["gap_q"] != 0.0
+	if values.has(course) and not (float(params.get("tend_new", 0.0)) > 0.0 and has_history):
 		for t in f["tendencies"]:
 			var verdict := str(t.get("verdict", ""))
 			if t.get("src", "") != "tel" or not t.has("effect") or not t.has("sd"):
 				continue
 			if not (verdict == "quicker" or verdict == "slower" or verdict.begins_with("early sign")):
 				continue
+			if float(params.get("tend_sure", 0.0)) > 0.0 and not (verdict == "quicker" or verdict == "slower"):
+				continue
 			if not values[course].has(t["key"]) or float(t["sd"]) <= 0.0:
 				continue
 			var z := (float(values[course][t["key"]]) - float(t["mean"])) / float(t["sd"])
+			if float(params.get("tend_cap", 0.0)) > 0.0:
+				z = clampf(z, -float(params["tend_cap"]), float(params["tend_cap"]))
 			out["tend"] += float(t["effect"]) * z
 	return out
 
@@ -654,6 +712,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var pit_loss := float(track.get("pit_loss", 0.0))
 	var tank_laps := float(track.get("tank_laps", 0.0)) / maxf(float(plan.get("fuel", 1.0)), 0.01)
 	var tyre_laps := float(track.get("tyre_laps", 0.0)) / maxf(float(plan.get("tyre", 1.0)), 0.01)
+	# a penalty is a drive-through: what one costs at this track (Profiles.drive_through), else the setting
+	var pen_s := float(track.get("pen_s", P["pen_s"]))
 	var tr: Dictionary = track.get("traffic", {})
 	var tr_on := float(P.get("traffic", 0.0))
 	var n_pass := float(tr.get("pass", 0.0)) * laps     # expected encounters over the race
@@ -666,8 +726,9 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 		var p_track := float(P.get("p_track", 0.0))
 		var p_tend := float(P.get("p_tend", 0.0))
 		var kg_slow := float(ballast_effect()["k"]) * float(P.get("ballast", 1.0)) * float(d.get("ballast", 0.0))
-		base.append(d["pace"] + adj + p_track * float(d.get("track_gap_r", 0.0)) + p_tend * float(d.get("tend", 0.0)) + kg_slow)
-		qbase.append(d["qpace"] + p_track * float(d.get("track_gap_q", 0.0)) + p_tend * float(d.get("tend", 0.0)) + kg_slow)
+		var form := float(P.get("p_form", 0.0)) * FORM_SHARE * float(d.get("form", 0.0))
+		base.append(d["pace"] + adj + p_track * float(d.get("track_gap_r", 0.0)) + p_tend * float(d.get("tend", 0.0)) + kg_slow + form)
+		qbase.append(d["qpace"] + p_track * float(d.get("track_gap_q", 0.0)) + p_tend * float(d.get("tend", 0.0)) + kg_slow + form)
 		var n_stops := 0
 		if bool(plan.get("pits", false)) and pit_loss > 0.0:
 			# Everyone gets the class's number of stops: drivers save fuel to make the strategy rather
@@ -683,7 +744,7 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 		lap_sd.append(d["cons"] * P["lap_noise"] / 100.0 * t_ref * sqrt(laps))
 		tl_cost.append(d["tl"] * laps * P["tl_cost"])
 		tl_n.append(d["tl"] * laps)
-		tl_pen.append(d["tl"] * laps * P["tl_pen"])
+		tl_pen.append((float(d.get("tlp", 0.0)) if float(P.get("tl_learned", 0.0)) > 0.0 else d["tl"] * P["tl_pen"]) * laps)
 		con_rate.append(d["con"] * laps)
 		dnf.append(float(d.get("dnf", 0.0)) if float(P.get("dnf", 0.0)) > 0.0 else 0.0)
 	var pole := []
@@ -778,7 +839,7 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 					t += -float(P["tl_cost"]) * log(maxf(rng.randf(), 1e-9))
 			else:
 				t += tl_cost[i]
-			t += _poisson(tl_pen[i]) * P["pen_s"]
+			t += _poisson(tl_pen[i]) * pen_s
 			for c in _poisson(con_rate[i]):
 				var hit: float = P["c0"]
 				var severity := 1.0
@@ -898,6 +959,10 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 	elif not track["known_race"]:
 		notes.append("No earlier race at this track: %s, and tyre / fuel track effects are off." % [
 			"lap time from telemetry" if tel_lap > 0.0 and lap_s <= 0.0 else "lap time comes from quali (or a default)"])
+	var dt := Profiles.drive_through(course)
+	if int(dt["league_n"]) > 0:
+		notes.append("Penalties are drive-throughs: about %d s each here (%s)." % [roundi(float(dt["s"])),
+			"%d served at this track, %d s typical" % [dt["n"], roundi(float(dt["track"]))] if int(dt["n"]) > 0 else "the league's typical, none served here yet"])
 	var inputs := driver_inputs(names, cls, "", course)
 	# success ballast for the next race of the series
 	var kg := SuccessBallast.current(series_name) if series_name != "" else {}
@@ -962,6 +1027,7 @@ func forecast(names: Array, cls: String, mode: int, course := "", minutes := 0, 
 			"track_gap": d["track_gap_r"], "tend": d["tend"],
 			"wet": d["wet"],
 			"ballast": d["ballast"],
+			"form": d["form"],
 			"win_rain": res["wx"]["win_rain"][i] if res.has("wx") else -1.0,
 			"win_dry": res["wx"]["win_dry"][i] if res.has("wx") else -1.0,
 		})
@@ -1207,7 +1273,7 @@ func reset_params() -> void:
 
 func save_settings() -> void:
 	var f := FileAccess.open(SETTINGS_PATH, FileAccess.WRITE)
-	f.store_string(JSON.stringify({"params": params}))
+	f.store_string(JSON.stringify({"params": params, "tuning": TUNING}))
 	f.close()
 
 
@@ -1219,6 +1285,11 @@ func _load_settings() -> void:
 		for k in DEFAULTS:
 			if data["params"].has(k):
 				params[k] = float(data["params"][k])
+		# settings saved before a retune: the retuned values replace them once
+		if int(data.get("tuning", 0)) < TUNING:
+			for k in RETUNED:
+				params[k] = DEFAULTS[k]
+			save_settings()
 
 
 # ---------- Forecast record ----------

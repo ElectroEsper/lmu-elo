@@ -871,6 +871,7 @@ func driver_profile(driver_name: String) -> Array:
 	if rows.is_empty():
 		return [_table("Profile", ["Stat", "Value"], [], "No results found for this driver.")]
 	var tables := _profile_grades(driver_name, rows)
+	tables.append_array(_profile_form(driver_name, rows))
 	tables.append_array([
 		_profile_overview(driver_name, rows),
 		_profile_seasons(rows),
@@ -886,6 +887,136 @@ func driver_profile(driver_name: String) -> Array:
 		if not t["rows"].is_empty():
 			out.append(t)
 	return out
+
+
+# ---------- Car balance: each car's race pace with its drivers' own level taken out ----------
+
+const BALANCE_MIN_TRACK := 3   # entries of a car at a track before it is listed there
+
+## Per class: every car's race pace against the class median, as raced (its drivers included) and
+## with the drivers' own level taken out (each race = car + driver + luck, solved together, as for
+## the fuel and tyre grades), so the admins can tell a strong car from a car with strong drivers.
+## Season filter applies. A second table per class: where a car ran clearly above or below its own
+## level, track by track (a small effect, about 0.2% in GT3, and only partly repeating).
+func car_balance() -> Array:
+	var tables := []
+	var classes: Array = Profiles.classes()
+	for cls in classes:
+		var keep := func(e): return season == "" or str(e.get("season", "")) == season
+		var fx := DriverGrades.car_adjusted(str(cls), "pace_rel", keep)
+		if fx["cars"].size() < 2:
+			continue
+		# raw pace and driver level per car
+		var raw := {}
+		for key in Profiles.hist:
+			if not str(key).begins_with(str(cls) + "|"):
+				continue
+			for e in Profiles.hist[key]:
+				var r: Dictionary = e.get("r", {})
+				if r.is_empty() or not r.has("pace_rel") or not keep.call(e):
+					continue
+				var ck := DriverGrades.car_key(str(r.get("car", "")))
+				var a: Array = raw.get(ck, [0.0, 0])
+				a[0] += float(r["pace_rel"]) - Predict.ballast_k_history() * float(r.get("mass", 0.0))
+				a[1] += 1
+				raw[ck] = a
+		var se_car := float(fx["sigma"])
+		# centred on the average entry, so "level" means level with the rest of the field: the car
+		# and driver effects are only defined up to a shared offset
+		var c_mid := 0.0
+		var r_mid := 0.0
+		var n_all := 0
+		for ck in fx["cars"]:
+			c_mid += float(fx["cars"][ck]["effect"]) * int(fx["cars"][ck]["n"])
+			if raw.has(ck):
+				r_mid += float(raw[ck][0])
+			n_all += int(fx["cars"][ck]["n"])
+		c_mid /= maxi(n_all, 1)
+		r_mid /= maxi(n_all, 1)
+		var rows := []
+		var keys: Array = fx["cars"].keys()
+		keys.sort_custom(func(a, b): return float(fx["cars"][a]["effect"]) < float(fx["cars"][b]["effect"]))
+		for ck in keys:
+			var c: Dictionary = fx["cars"][ck]
+			var n := int(c["n"])
+			var as_raced := (float(raw[ck][0]) / int(raw[ck][1]) if raw.has(ck) else 0.0) - r_mid
+			var eff := float(c["effect"]) - c_mid
+			var unc := se_car / sqrt(n + DriverGrades.CAR_PRIOR)
+			var word := "about level"
+			if eff <= -2.0 * unc:
+				word = "quicker car"
+			elif eff >= 2.0 * unc:
+				word = "slower car"
+			rows.append([c["name"], n, (c["drivers"] as Dictionary).size(), "%+.2f%%" % as_raced, "%+.2f%%" % eff,
+				"%+.2f%%" % (as_raced - eff), word])
+		tables.append(_table("Car balance (%s)" % LeagueSettings.label(str(cls)),
+			["Car", "Entries", "Drivers", "As raced", "Car itself", "Its drivers", "Reading"], rows,
+			_season_note() + "Race pace against the average entry of the class, in percent, negative = quicker, without success ballast. As raced = the car's average with whoever drove it. Car itself = the same with each driver's own level taken out (worked out from every driver who raced more than one car, and every car with more than one driver); Its drivers = the difference, how much of the car's showing came from its drivers. Cars with few entries are pulled towards level. Reading: quicker / slower car = at least twice its uncertainty away from level."))
+		# by track
+		var trows := []
+		var courses := {}
+		for key in Profiles.hist:
+			if str(key).begins_with(str(cls) + "|"):
+				for e in Profiles.hist[key]:
+					if not (e.get("r", {}) as Dictionary).is_empty() and keep.call(e):
+						courses[str(e["course"])] = true
+		var clist: Array = courses.keys()
+		clist.sort()
+		for course in clist:
+			var keep_t := func(e): return keep.call(e) and str(e["course"]) == course
+			var ft := DriverGrades.car_adjusted(str(cls), "pace_rel", keep_t)
+			# both centred on the cars that raced here, weighted by their entries here
+			var m_here := 0.0
+			var m_usual := 0.0
+			var n_here := 0
+			for ck in ft["cars"]:
+				if fx["cars"].has(ck):
+					m_here += float(ft["cars"][ck]["effect"]) * int(ft["cars"][ck]["n"])
+					m_usual += float(fx["cars"][ck]["effect"]) * int(ft["cars"][ck]["n"])
+					n_here += int(ft["cars"][ck]["n"])
+			if n_here == 0:
+				continue
+			m_here /= n_here
+			m_usual /= n_here
+			for ck in ft["cars"]:
+				var c: Dictionary = ft["cars"][ck]
+				if int(c["n"]) < BALANCE_MIN_TRACK or not fx["cars"].has(ck):
+					continue
+				var d := (float(c["effect"]) - m_here) - (float(fx["cars"][ck]["effect"]) - m_usual)
+				var unc := float(ft["sigma"]) / sqrt(int(c["n"]) + DriverGrades.CAR_PRIOR)
+				if absf(d) >= 2.0 * unc and absf(d) >= 0.1:
+					trows.append([course, c["name"], int(c["n"]), "%+.2f%%" % d, "stronger here" if d < 0.0 else "weaker here"])
+		if not trows.is_empty():
+			tables.append(_table("Car by track (%s)" % LeagueSettings.label(str(cls)),
+				["Track", "Car", "Entries here", "Vs its usual level", "Reading"], trows,
+				_season_note() + "Tracks where a car ran clearly above or below its own usual level, drivers taken out (at least %d entries there, and at least twice the uncertainty). Track-specific car effects in the league are small (about 0.2%% in GT3) and only partly repeat from one visit to the next: read these as what happened, not as a rule." % BALANCE_MIN_TRACK))
+	return tables
+
+
+# ---------- Current form: the last races against the driver's own average (Profiles.form) ----------
+
+func _profile_form(driver_name: String, rows: Array) -> Array:
+	var classes := {}
+	for r in rows:
+		classes[r["cls"]] = true
+	var cls_list := classes.keys()
+	cls_list.sort()
+	var frows := []
+	for cls in cls_list:
+		var f := Profiles.form(Elo.resolve(driver_name), str(cls))
+		if f.is_empty():
+			continue
+		var v := float(f["value"])
+		var word := "about usual"
+		if v <= -0.15:
+			word = "quicker than usual"
+		elif v >= 0.15:
+			word = "slower than usual"
+		frows.append([cls, "%+.2f%%" % v, word, "%+.2f%%" % float(f["recent"]), "%+.2f%%" % float(f["career"]), int(f["n"])])
+	if frows.is_empty():
+		return []
+	return [_table("Current form", ["Class", "Form", "Reading", "Last %d races" % Profiles.FORM_RACES, "All races", "Races"], frows,
+		"Race pace over the last %d races against the driver's own average, both against the class median and without success ballast (negative = quicker). Shown from %d races in a class. The forecast carries half of it into the next race: the rest is usually luck." % [Profiles.FORM_RACES, Profiles.FORM_MIN])]
 
 
 # ---------- Grades: 1 to 5 against the class, at a glance (driver_grades.gd) ----------
@@ -958,11 +1089,22 @@ func _profile_track_fit(driver_name: String, rows: Array) -> Array:
 			["Track", "Races", "Race pace", "Qualis", "Quali pace", "Stands out", "Track's stand-out grades"], trows,
 			"Pace at each track compared with this driver's OWN average (league races only, best first). A fast driver is not quicker everywhere by this measure: it shows where they are stronger or weaker than usual. Stands out = race and quali together are at least %.0f times their uncertainty away from the driver's average, and still clearly so without the single most extreme session (so one wrecked race cannot decide it); other gaps are within normal variation. Stand-out grades are the track's 4s, 5s and 1s for the class (see Profiles > Layout > Grades)." %
 				DriverTrackFit.STANDOUT)])
+		# only confident tendencies are shown: early signs are wrong too often (about 1 driver in 5
+		# with no real tendency gets one per characteristic, and replaying past races they made the
+		# forecast worse); they stay in the data (DriverTrackFit) for later seasons to confirm
 		var drows := []
+		var hidden := 0
 		for t in f["tendencies"]:
-			drows.append([t["name"], _tendency(t), _session_fx(t["race"]), _session_fx(t["quali"])])
+			var v := str(t.get("verdict", ""))
+			if v == "quicker" or v == "slower":
+				drows.append([t["name"], _tendency(t), _session_fx(t["race"]), _session_fx(t["quali"])])
+			elif v.begins_with("early sign"):
+				hidden += 1
+		if drows.is_empty() and not f["tendencies"].is_empty():
+			drows.append(["-", "No clear tendency yet", "-", "-"])
 		tendencies.append([cls, _table("Track tendencies", ["Characteristic", "Tendency", "Race", "Quali"], drows,
-			"Is the driver quicker or slower than their own average at tracks that score high on each characteristic? Effect = pace change at a track one step above the class average (about a grade 4), negative = quicker. Tendency combines race and quali. 'Early sign' = preliminary (about one season of data), 'quicker' / 'slower' = more confident (about two seasons). Estimates are pulled towards zero; race-to-race noise is this driver's own scatter blended with the class figure (see Track fit, Session-to-session scatter). 'Goes with X' = this characteristic moves together with X over the tracks this driver raced, so it is not a separate finding. Needs %d sessions at %d different tracks." % [
+			"Is the driver quicker or slower than their own average at tracks that score high on each characteristic? Effect = pace change at a track one step above the class average (about a grade 4), negative = quicker. Tendency combines race and quali. Only confident tendencies are listed (usually about two seasons of data)%s. Estimates are pulled towards zero; race-to-race noise is this driver's own scatter blended with the class figure (see Track fit, Session-to-session scatter). Needs %d sessions at %d different tracks." % [
+				"; %d early sign%s not shown until more races confirm %s" % [hidden, "" if hidden == 1 else "s", "it" if hidden == 1 else "them"] if hidden > 0 else "",
 				DriverTrackFit.MIN_RACES, DriverTrackFit.MIN_TRACKS])])
 	var out := []
 	for group in [summaries, tracks, tendencies]:

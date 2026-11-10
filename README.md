@@ -45,10 +45,14 @@ race (`-q` = qualifying). The series code is mapped to a name in Settings → Se
   45 kg for GT3 and 30 kg for Hypercars and LMP3 (the result files show both caps), per season and series, and it follows a driver
   who changes class. Positions are taken after the Penalties page. The result files record what
   each car carried, and season 6 replays to it. Shown in the standings report and graphic and on the
-  Predict screen; in the forecast it slows each car by an amount learned from the league's races
-  (about 0.07-0.09 s per 10 kg on a 100 s lap). That slowdown is an upgrade on the Predict screen:
-  on the 30 races run with ballast so far it made the forecast slightly worse, because the drivers
-  carrying the most kept winning anyway, so Test upgrades may switch it off.
+  Predict screen. Its cost is learned from the league's races, comparing each driver with their own
+  races of the same season and series (about 0.15 s per 10 kg on a 100 s lap). Slowing the cars by
+  it in the forecast is an upgrade, off by default: replaying past races it made the forecast
+  worse, because ballast goes to the drivers on form.
+- **Current form**: a driver's race pace over their last 5 races against their own average
+  (Profiles > Drivers "Form %", and the driver profile), shown from 6 races in a class. The
+  forecast carries half of it into the next race (Current form upgrade, on: replaying past races
+  it made the forecasts better).
 - **Lap records**: the league's own records per track (layout) and class, from the best laps in
   the result files: the lap record (any session) and the race lap record, with how each came down
   (Profiles > Layout > Records). A disqualified driver's lap never counts.
