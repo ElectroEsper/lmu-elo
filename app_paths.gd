@@ -6,12 +6,14 @@ extends RefCounted
 ##   Backups/   backup zips, and the data set aside by a restore
 ##   Exports/   Excel files
 ## On the first start of this version, data from Godot's user data folder (AppData on Windows) is
-## copied into Data/ (the old copy is left where it was). The tests (data folder LMU_Elo_tests),
+## copied into Data/ (the old copy is left where it was) and a note (MOVED_NOTE) is left there, so
+## it is never copied again: deleting Data/ to start fresh must not bring the old data back. The tests (data folder LMU_Elo_tests),
 ## and systems where Documents is missing or cannot be written, use Godot's user data folder.
 
 const FOLDER := "Grid Ledger"
 const OLD_GRAPHICS := "LMU_Elo graphics"   # where earlier versions saved images (in Documents)
 const TEST_DIR_NAME := "LMU_Elo_tests"
+const MOVED_NOTE := "MOVED TO DOCUMENTS.txt"   # in the old folder: its data was copied to Documents once
 ## Godot's own folders in the user data folder: never copied, backed up or restored
 const GODOT_DIRS := ["logs", "shader_cache", "objectdb_snapshots", "vulkan"]
 ## Folders that sit next to the data when data and root are the same folder (tests, fallback)
@@ -91,8 +93,9 @@ static func _setup() -> void:
 		_use_user_dir("Documents/%s could not be written (is a folder protection blocking it?)." % FOLDER)
 		return
 	# first start of this version: copy the data over (elo.json last, so a copy that stopped
-	# half way is simply done again on the next start)
-	if not FileAccess.file_exists(data_dir.path_join("elo.json")) and _has_data(user_dir):
+	# half way is simply done again on the next start), once only
+	var first_move := should_move(user_dir, data_dir)
+	if first_move:
 		if copy_tree(user_dir, data_dir, GODOT_DIRS + SIDE_DIRS, ["elo.json"]) != OK \
 				or DirAccess.copy_absolute(user_dir.path_join("elo.json"), data_dir.path_join("elo.json")) != OK:
 			_use_user_dir("Your data could not be copied to Documents/%s; it stays where it was." % FOLDER)
@@ -100,8 +103,11 @@ static func _setup() -> void:
 		migrated_from = user_dir.simplify_path()
 	var old_gfx := docs.path_join(OLD_GRAPHICS)
 	var gfx := root_dir.path_join("Graphics")
-	if DirAccess.dir_exists_absolute(old_gfx) and not DirAccess.dir_exists_absolute(gfx):
+	if not is_moved(user_dir) and DirAccess.dir_exists_absolute(old_gfx) and not DirAccess.dir_exists_absolute(gfx):
 		copy_tree(old_gfx, gfx, [], [])
+	# from now on the old folder is done with (also for installs moved before this note existed)
+	if FileAccess.file_exists(data_dir.path_join("elo.json")):
+		mark_moved(user_dir)
 	rename_round_folders(gfx)
 	_root = root_dir
 	_data = data_dir
@@ -122,6 +128,26 @@ static func _writable(dir: String) -> bool:
 	f.close()
 	DirAccess.remove_absolute(probe)
 	return true
+
+
+## True when the old folder's data should be copied into `data_dir`: it has data, Documents has
+## none yet, and it was never copied before.
+static func should_move(user_dir: String, data_dir: String) -> bool:
+	return not FileAccess.file_exists(data_dir.path_join("elo.json")) and _has_data(user_dir) and not is_moved(user_dir)
+
+
+static func is_moved(user_dir: String) -> bool:
+	return FileAccess.file_exists(user_dir.path_join(MOVED_NOTE))
+
+
+## Leaves the note in the old folder (only one that holds data). It says where the data went.
+static func mark_moved(user_dir: String) -> void:
+	if is_moved(user_dir) or not _has_data(user_dir):
+		return
+	var f := FileAccess.open(user_dir.path_join(MOVED_NOTE), FileAccess.WRITE)
+	if f != null:
+		f.store_string("Grid Ledger now keeps its data in Documents/%s/Data.\nThe files in this folder are the old copy, from before the move. Grid Ledger does not use them any more\nand will not copy them again. You can delete this folder once you are happy with your data.\n" % FOLDER)
+		f.close()
 
 
 static func _has_data(dir: String) -> bool:

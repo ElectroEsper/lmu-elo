@@ -186,6 +186,12 @@ func _test_data_folder() -> void:
 		"Godot's logs and half-written files are not copied")
 	check(not FileAccess.file_exists(new.path_join("elo.json")), "Ratings file copied last (a stopped copy is redone next start)")
 	check(FileAccess.file_exists(old.path_join("events/a.json")), "The old copy is left in place")
+	# the move happens once: after it, deleting Data/ to start fresh must not bring the old data back
+	var fresh := tmp.path_join("Fresh/Data")
+	check(AppPaths.should_move(old, fresh), "Old data is moved on the first start")
+	AppPaths.mark_moved(old)
+	check(AppPaths.is_moved(old) and not AppPaths.should_move(old, fresh),
+		"Once moved, the old data is never copied again (a wiped Data folder stays empty)")
 	# a backup zip made by hand, with everything one folder down (Windows "Extract all", zipped again)
 	var hand := tmp.path_join("hand.zip")
 	var zp := ZIPPacker.new()

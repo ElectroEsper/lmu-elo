@@ -4,6 +4,12 @@ The version lives in `project.godot` (Project Settings > Application > Config > 
 shows it next to its name in the sidebar and in the window title; an exported .exe takes it as its
 file and product version when those export fields are left empty.
 
+## 1.0.29
+- Fixed: deleting the data folder in Documents to start fresh brought back the old data from
+  before the move to Documents (Godot's AppData folder), on the next start. Importing results
+  then skipped every file as "already complete". The move to Documents now happens once: the old
+  folder gets a note ("MOVED TO DOCUMENTS.txt") and is never copied from again.
+
 ## 1.0.28
 - Driver grades:
   - Quali pace and Race pace take the car out: each driver's pace once the car's own pace
