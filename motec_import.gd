@@ -50,11 +50,9 @@ func _guess_track(file_name: String, courses: Array) -> String:
 	for c in courses:
 		if _norm(str(c)) == _norm(str(info.get("track", ""))):
 			return str(c)
-	var base := _norm(file_name.get_basename())
-	for c in courses:   # e.g. "Brno" inside "GO_..._LMP3_Brno_Q"
-		if _norm(str(c)).length() >= 3 and base.contains(_norm(str(c))):
-			return str(c)
-	return ""
+	# track codes (Settings > Telemetry file names, and learned from earlier imports), then a
+	# track's name inside the file name (e.g. "Brno" inside "GO_..._LMP3_Brno_Q")
+	return TelemetryNames.guess_track(file_name, courses)
 
 
 func _guess_class(file_name: String, classes: Array) -> String:
@@ -62,11 +60,7 @@ func _guess_class(file_name: String, classes: Array) -> String:
 	for c in classes:
 		if _norm(str(c)) == _norm(str(info.get("class", ""))):
 			return str(c)
-	for token in file_name.get_basename().split("_"):   # any part of the name that is a class
-		for c in classes:
-			if _norm(str(c)) == _norm(token):
-				return str(c)
-	return ""
+	return TelemetryNames.guess_class(file_name, classes)   # class tags (Settings), class names
 
 
 func start(paths: Array) -> void:
@@ -86,6 +80,7 @@ func start(paths: Array) -> void:
 		motec_rows_box.remove_child(c)
 		c.queue_free()
 	motec_rows = []
+	var known := 0
 	for p in paths:
 		var file_name := str(p).get_file()
 		var row := VBoxContainer.new()
@@ -115,9 +110,12 @@ func start(paths: Array) -> void:
 		picks.add_child(class_pick)
 		row.add_child(picks)
 		row.add_child(HSeparator.new())
+		if guess != "" and cls_guess != "":
+			known += 1
 		motec_rows_box.add_child(row)
 		motec_rows.append({"path": p, "track": track_pick, "class": class_pick})
 	_validate_motec()
+	motec_dialog.title = "Which track and class? (%d of %d recognised from the file names)" % [known, paths.size()] if paths.size() > 1 else "Which track and class?"
 	motec_dialog.popup_centered()
 
 
@@ -158,6 +156,8 @@ func _finish_motec() -> void:
 			"course": str(motec_courses[track_pick.selected - 1]),
 			"class": str(motec_classes[class_pick.selected - 1]),
 		})
+		# the file name's bits are remembered with this track, for the next files
+		TelemetryNames.learn(str(r["path"]).get_file(), str(motec_courses[track_pick.selected - 1]))
 	motec_rows.clear()
 	motec_notes = ""
 	if not refused.is_empty():

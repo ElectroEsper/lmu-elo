@@ -10,16 +10,18 @@ extends Control
 ## and Predict.
 
 # screens: [key, sidebar label, one line shown under the title]
+# grouped in the sidebar: the race weekend's jobs, the league's data, then settings and data care
 const VIEWS := [
-	["review", "Review", "Check a result file before it is rated. Drop result XMLs, whole folders or MoTeC CSVs anywhere on the window."],
-	["ratings", "Ratings", "Elo per class and session. Click a column header to sort."],
-	["drivers", "Drivers", "Everything known about one driver: ratings, history, fingerprint and track fit."],
-	["reports", "Reports", "League reports. Each one can be exported to Excel."],
-	["profiles", "Profiles", "Lap-data fingerprints of drivers, cars and tracks, and the telemetry track layouts."],
-	["predict", "Predict", "Monte Carlo forecast of qualifying and the race."],
-	["penalties", "Penalties", "Steward decisions after a race was rated: time penalties, dropped positions, disqualifications. Ratings, ranks and standings are recomputed."],
-	["graphics", "Graphics", "Images for social media and the stream: race forecasts, standings, ranks and driver cards. Saved as PNG in Documents/Grid Ledger/Graphics."],
-	["settings", "Settings", "League settings: rank names and limits, standings points, grading. Saved in league_settings.json in the app's data folder."],
+	["review", "Import", "Check a result file before it is rated. Drop result XMLs, whole folders or MoTeC CSVs anywhere on the window.", "RACE WEEKEND"],
+	["predict", "Predict", "Monte Carlo forecast of qualifying and the race.", "RACE WEEKEND"],
+	["penalties", "Penalties", "Steward decisions after a race was rated: time penalties, dropped positions, disqualifications. Ratings, ranks and standings are recomputed.", "RACE WEEKEND"],
+	["graphics", "Graphics", "Images for social media and the stream: forecasts, recaps, standings, ranks, driver cards and stories.", "RACE WEEKEND"],
+	["ratings", "Ratings", "Elo per class and session. Click a column header to sort.", "LEAGUE"],
+	["drivers", "Drivers", "Everything known about one driver: grades, form, results, ratings and tracks.", "LEAGUE"],
+	["profiles", "Profiles", "Lap-data fingerprints of drivers, cars and tracks, and the telemetry track layouts.", "LEAGUE"],
+	["reports", "Reports", "League reports. Each one can be exported to Excel.", "LEAGUE"],
+	["settings", "Settings", "League settings. Saved in league_settings.json in the data folder.", ""],
+	["data", "Data & backups", "Everything that copies, rebuilds or replaces your data, in one place.", ""],
 ]
 
 # frame
@@ -47,6 +49,7 @@ var predict_view := PredictView.new()
 var settings_view := SettingsView.new()
 var graphics_view := GraphicsView.new()
 var penalties_view := PenaltiesView.new()
+var data_view := DataView.new()
 var motec := MotecImport.new()
 # The name people see (window title, sidebar). The project's internal name stays "LMU_Elo" in
 # project.godot: Godot keeps the data folder under that name, so renaming the app never moves it.
@@ -91,9 +94,18 @@ func _ready() -> void:
 	nav.add_child(brand_box)
 	_fill_brand()
 	nav.add_child(_gap(18))
-	nav.add_child(_section("SCREENS"))
 	var group := ButtonGroup.new()
+	var last_group := "-"
 	for v in VIEWS:
+		if v[3] == "" and last_group != "":   # settings and data care sit at the bottom
+			var push := Control.new()
+			push.size_flags_vertical = Control.SIZE_EXPAND_FILL
+			nav.add_child(push)
+		elif v[3] != last_group:
+			if last_group != "-":
+				nav.add_child(_gap(10))
+			nav.add_child(_section(v[3]))
+		last_group = v[3]
 		var b := Button.new()
 		b.text = v[1]
 		b.theme_type_variation = "NavButton"
@@ -104,20 +116,6 @@ func _ready() -> void:
 		b.pressed.connect(show_view.bind(v[0]))
 		nav.add_child(b)
 		nav_buttons[v[0]] = b
-	var push := Control.new()
-	push.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	nav.add_child(push)
-	nav.add_child(_section("DATA"))
-	nav.add_child(_side_btn("Recompute all...", confirm_dialog.popup_centered,
-		"Rebuild every rating from the saved events, oldest to newest."))
-	nav.add_child(_side_btn("Export all to Excel", _export,
-		"Ratings, history and events in one workbook, saved to Documents/Grid Ledger/Exports."))
-	nav.add_child(_side_btn("Re-read archived XML", _reread,
-		"Read the archived result files again, so newer lap-data measures are filled in."))
-	nav.add_child(_side_btn("Back up data", _backup,
-		"Save everything (ratings, events, archived results, track profiles, settings) in one .zip in Documents/Grid Ledger/Backups."))
-	nav.add_child(_side_btn("Restore backup...", _pick_backup,
-		"Replace your data with a backup zip. Your current data is set aside in Backups first, then Grid Ledger restarts."))
 
 	# main column: title, the screen, status bar
 	var main := VBoxContainer.new()
@@ -173,10 +171,12 @@ func _ready() -> void:
 	motec.shell = self
 	graphics_view.shell = self
 	penalties_view.shell = self
-	for v in [import_view, ratings_view, driver_view, reports_view, profiles_view, predict_view, penalties_view, graphics_view, settings_view]:
+	data_view.shell = self
+	predict_view.shell = self
+	for v in [import_view, ratings_view, driver_view, reports_view, profiles_view, predict_view, penalties_view, graphics_view, settings_view, data_view]:
 		v.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		root.add_child(v)
-	for v in [driver_view, reports_view, profiles_view, predict_view, penalties_view, graphics_view, settings_view]:
+	for v in [driver_view, reports_view, profiles_view, predict_view, penalties_view, graphics_view, settings_view, data_view]:
 		v.notice.connect(set_status)
 	settings_view.saved.connect(data_changed)
 	settings_view.saved.connect(_restyle)
@@ -222,7 +222,8 @@ func show_view(view: String) -> void:
 			view_sub.text = v[2]
 			nav_buttons[v[0]].button_pressed = true   # the button group releases the others
 	var screens := {"review": import_view, "ratings": ratings_view, "drivers": driver_view, "reports": reports_view,
-		"profiles": profiles_view, "predict": predict_view, "penalties": penalties_view, "graphics": graphics_view, "settings": settings_view}
+		"profiles": profiles_view, "predict": predict_view, "penalties": penalties_view, "graphics": graphics_view, "settings": settings_view,
+		"data": data_view}
 	for key in screens:
 		screens[key].visible = key == view
 	if view != "review":

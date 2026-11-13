@@ -316,6 +316,8 @@ func _test_ballast() -> void:
 	_test_lap_records()
 	_test_track_limits()
 	_test_drive_throughs()
+	_test_costly_laps()
+	_test_telemetry_names()
 	var fit := Predict.ballast_effect()
 	check(int(fit["races"]) > 0 and float(fit["k"]) > 0.0 and float(fit["k"]) < 0.03, "Ballast effect learned from the races with ballast", str(fit))
 	_test_retune()
@@ -351,6 +353,65 @@ func _test_drive_throughs() -> void:
 	var want := (float(here["track"]) * int(here["n"]) + float(here["league"]) * Profiles.K_DT) / (int(here["n"]) + Profiles.K_DT)
 	check(int(here["n"]) > 0 and absf(float(info.get("pen_s", -1.0)) - want) < 1e-6,
 		"A track's drive-through cost is its own pulled towards the league's (%s: %.1f s)" % [course, float(info.get("pen_s", -1.0))])
+
+
+# Costly laps: a lap well off the driver's own pace counts, one where the whole class slowed (safety
+# car, rain) does not; invalidated laps are timed from the elapsed times; the league's files have them.
+func _test_telemetry_names() -> void:
+	var classes := ["GT3", "Hyper", "LMP2", "LMP2_ELMS", "LMP3"]
+	check(TelemetryNames.guess_class("GO_Neron_P3_BRN_Q.csv", classes) == "LMP3" and TelemetryNames.guess_class("x_LMP2_ELMS_spa.csv", classes) == "LMP2_ELMS"
+		and TelemetryNames.guess_class("abc_HY_spa.csv", classes) == "Hyper" and TelemetryNames.guess_class("abc_spa.csv", classes) == "",
+		"Telemetry file names: the class from its tags")
+	TelemetryNames.forget_learned()
+	var courses := ["Brno Circuit", "Circuit de Spa-Francorchamps", "Michelin Raceway Road Atlanta"]
+	TelemetryNames.learn("GO_Neron_P3_BRN_Q.csv", "Brno Circuit")
+	check(TelemetryNames.guess_track("XX_Smith_GT3_BRN_R.csv", courses) == "Brno Circuit", "Telemetry file names: a track code learned from one import")
+	TelemetryNames.learn("GO_Neron_P3_SPA_Q.csv", "Circuit de Spa-Francorchamps")
+	var lc := TelemetryNames.learned()
+	check(TelemetryNames.guess_track("GO_Neron_X_R.csv", courses) == "" and lc.get("BRN", "") == "Brno Circuit" and not lc.has("GO") and not lc.has("P3"),
+		"Telemetry file names: bits seen with two tracks (driver, setup) mean nothing; class tags are no track code")
+	check(TelemetryNames.guess_track("lmp3_road_atlanta.csv", courses) == "Michelin Raceway Road Atlanta", "Telemetry file names: a track's short name in the file name")
+	var before := LeagueSettings.all()
+	var v := before.duplicate(true)
+	v["telemetry_track_codes"] = {"rda": "Michelin Raceway Road Atlanta", "SPA": "Brno Circuit"}
+	LeagueSettings.save_all(v)
+	check(TelemetryNames.guess_track("GO_P3_RDA.csv", courses) == "Michelin Raceway Road Atlanta" and TelemetryNames.guess_track("GO_P3_SPA.csv", courses) == "Brno Circuit",
+		"Telemetry file names: codes set in Settings come first")
+	LeagueSettings.save_all(before)
+	TelemetryNames.forget_learned()
+
+
+func _test_costly_laps() -> void:
+	var laps := []
+	var med := {}
+	var et := 0.0
+	for n in range(1, 13):
+		var t := 100.0
+		if n == 6:
+			t = 112.0   # a spin
+		if n == 9:
+			t = 110.0   # everyone slow (median too)
+		laps.append({"n": n, "t": -1.0 if n == 6 else t, "et": et, "pit": false})
+		et += t
+		med[n] = 110.0 if n == 9 else 100.0
+	Fingerprint._full_times(laps)
+	var c := Fingerprint._costly(laps, med)
+	check(int(c["k"]) == 1 and absf(float(c["lost"]) - 12.0) < 0.01 and int(c["n"]) == 11,
+		"Costly laps: one spin found (an invalidated lap, timed), a slow lap for everyone ignored (%s)" % str(c))
+	var n := 0
+	var k := 0
+	for day in Profiles.days:
+		for nm in day["race"].get("drivers", {}):
+			var r: Dictionary = day["race"]["drivers"][nm]
+			n += int(r.get("costly_n", 0))
+			k += int(r.get("costly", 0))
+	check(n > 0 and float(k) / n > 0.005 and float(k) / n < 0.15,
+		"The league's races have costly laps measured (%d in %d laps)" % [k, n])
+	var p := Profiles.profile(str(Profiles.hist.keys()[0]).get_slice("|", 1), str(Profiles.hist.keys()[0]).get_slice("|", 0))
+	check(p.has("costly") and float(p["costly"]) > 0.0, "Profiles carry each driver's costly-lap rate (pulled towards the class)")
+	var prm := Predict.DEFAULTS.duplicate()
+	check(float(prm.get("costly", -1.0)) >= 0.0 and Predict.UPGRADES.any(func(u): return u[0] == "costly"),
+		"Costly laps are a forecast upgrade (Test upgrades can switch them on)")
 
 
 # A forecast settings file saved before the retune takes the retuned values once, keeps the rest.
@@ -411,6 +472,28 @@ func _test_starts_fade_balance() -> void:
 		if str(gcls["grades"][dn]["race"]["value"]).contains("car taken out"):
 			pace_ok = true
 	check(pace_ok, "Race pace grade takes the car out")
+	check(absf(ReferenceLaps.lap("Circuit de Spa-Francorchamps", "GT3") - 136.92) < 0.01 and absf(ReferenceLaps.lap("Fuji Speedway", "Hyper") - 87.80) < 0.01
+		and ReferenceLaps.lap("Paul Ricard - ELMS", "LMP3") > 0.0 and ReferenceLaps.lap("Nowhere", "GT3") == 0.0,
+		"Reference laps (Ohne Speed's sheet) found for the game's track and class names")
+	check(ReferenceLaps.race_reference("Circuit de Barcelona", "Hyper", false, 90.0)[1] == "sheet"
+		and ReferenceLaps.race_reference("Circuit de Barcelona", "Hyper", true, 90.0) == [90.0, "race best"],
+		"Clean race pace: the sheet in the dry, the class's best lap of the race when wet")
+	# Most improved model: a driver who gains 1% over the season on a field that does not, is found
+	var obs := []
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 3
+	for dn in 8:
+		for r in 5:
+			for se in ["race", "quali"]:
+				var gain := -1.0 * r / 4.0 if dn == 0 else 0.0
+				obs.append(["D%d" % dn, r, se, 460.0 + dn * 0.3 + r * 2.0 + (0.4 if se == "race" else 0.0) + gain + rng.randfn(0.0, 0.2)])
+	var imp := SeasonRecap.improvement(obs)
+	var top := ""
+	for dn in imp:
+		if top == "" or float(imp[dn]["gain"]) > float(imp[top]["gain"]):
+			top = dn
+	check(top == "D0" and float(imp["D0"]["raw"]) > 0.6 and float(imp["D0"]["sure"]) > 0.9 and float(imp["D3"]["sure"]) < 0.9,
+		"Most improved model finds the driver who gained on the grid", str(imp.get("D0", {})))
 	var cb: Array = Reports.car_balance()
 	check(cb.size() > 0 and (cb[0]["rows"] as Array).size() >= 2 and (cb[0]["headers"] as Array).has("Car itself"),
 		"Car balance report: each car with its drivers' level taken out", str(cb.size()))
@@ -502,9 +585,31 @@ func _test_menu_order() -> void:
 	var names := GraphicsView.KINDS.map(func(k): return str(k[1]).to_lower()) if ClassDB.class_exists("GraphicsView") else []
 	if names.is_empty():
 		names = (load("res://graphics_view.gd") as GDScript).get_script_constant_map()["KINDS"].map(func(k): return str(k[1]).to_lower())
-	var sorted := names.duplicate()
-	sorted.sort()
-	check(names == sorted, "Graphics menu in A-Z order", str(names))
+	var kinds: Array = GraphicsView.KINDS if ClassDB.class_exists("GraphicsView") else (load("res://graphics_view.gd") as GDScript).get_script_constant_map()["KINDS"]
+	var ok := true
+	var groups := []
+	for g in kinds.map(func(k): return str(k[2])):
+		if groups.is_empty() or groups[-1] != g:
+			if g in groups:
+				ok = false   # a group split in two
+			groups.append(g)
+	for g in groups:
+		var in_g := kinds.filter(func(k): return str(k[2]) == g).map(func(k): return str(k[1]).to_lower())
+		var sorted := in_g.duplicate()
+		sorted.sort()
+		ok = ok and in_g == sorted
+	check(ok, "Graphics menu grouped, A-Z within each group", str(names))
+	var rmap: Dictionary = (load("res://reports_view.gd") as GDScript).get_script_constant_map()
+	var listed := []
+	for g in rmap["GROUPS"]:
+		listed.append_array(g[1])
+	var all_r: Array = rmap["REPORTS"].map(func(r): return str(r["name"]))
+	listed.sort()
+	all_r.sort()
+	check(listed == all_r, "Reports list: every report in exactly one group")
+	var views: Array = (load("res://review_screen.gd") as GDScript).get_script_constant_map()["VIEWS"]
+	check(views.any(func(v): return v[0] == "data") and views.all(func(v): return v.size() == 4),
+		"Sidebar: grouped screens, with Data & backups")
 
 
 func _test_traffic_formula() -> void:
@@ -935,12 +1040,35 @@ func _test_penalties() -> void:
 		if drv.has(Elo.resolve(order[0])) and str(drv[Elo.resolve(order[0])].get("cls", "")) == cls and int(drv[Elo.resolve(order[0])].get("pos", 0)) == order.size():
 			lap_pos = order.size()
 	check(lap_pos == order.size(), "Lap data (predictor backtest) uses the corrected places")
+	# the penalty ledger: its own file (data folder and Backups), put back on a race imported again
+	var ledger := Elo.penalty_ledger()
+	check(ledger.has(file) and (ledger[file]["penalties"] as Array).size() == 1 and FileAccess.file_exists(AppPaths.file(Elo.PENALTY_FILE))
+		and FileAccess.file_exists(AppPaths.backups().path_join(Elo.PENALTY_FILE)), "Penalties are kept in their own file (and a copy in Backups)")
+	var ev_now = JSON.parse_string(FileAccess.get_file_as_string(AppPaths.file("events/%s.json" % file)))
+	var fresh: Dictionary = ev_now.duplicate(true)
+	fresh["orders"] = fresh["orders_original"]
+	fresh["stats"] = fresh["stats_original"]
+	for k in ["orders_original", "stats_original", "penalties"]:
+		fresh.erase(k)
+	Elo._ledger_penalties_onto(fresh)
+	check((fresh.get("penalties", []) as Array).size() == 1 and fresh["orders"]["race"][cls][-1] == order[0],
+		"A race imported again (after starting over) gets its penalties back from the file")
+	var pen_path := AppPaths.exports().path_join("test_penalties.json")
+	DirAccess.make_dir_recursive_absolute(AppPaths.exports())
+	check(Elo.export_penalties(pen_path) == OK, "Penalties file saved")
 	Elo.set_race_penalties(file, [])
+	check(not Elo.penalty_ledger().has(file), "Undoing a race's penalties takes it out of the penalties file")
 	var same := true
 	for k in before:
 		if not Elo.ratings.has(k) or absf(float(before[k]["r"]) - float(Elo.ratings[k]["r"])) > 1e-9:
 			same = false
 	check(same and Elo.event_penalties(file).is_empty(), "Undoing every penalty restores every rating exactly")
+	var imp := Elo.import_penalties(pen_path)
+	check(int(imp.get("applied", 0)) == 1 and Elo.event_penalties(file).size() == 1 and Elo.penalty_ledger().has(file),
+		"Importing a penalties file applies it again", str(imp))
+	Elo.set_race_penalties(file, [])
+	DirAccess.remove_absolute(pen_path)
+	check(Elo.import_penalties("user://nope.json").has("error"), "A file that is not a penalties file is refused")
 
 
 func _test_season_scenarios() -> void:
@@ -1077,7 +1205,7 @@ func _test_season_scenarios() -> void:
 			var who := {}
 			var dup := false
 			for a in sr.get("awards", []):
-				if who.has(a["name"]) and str(a["tag"]) != "CLEANEST DRIVER" and str(who[a["name"]]) != "CLEANEST DRIVER":
+				if who.has(a["name"]) and not (str(a["tag"]) in ["CLEANEST DRIVER", "MOST IMPROVED"]) and not (str(who[a["name"]]) in ["CLEANEST DRIVER", "MOST IMPROVED"]):
 					dup = true
 				who[a["name"]] = a["tag"]
 			var races_ok := false
@@ -1086,6 +1214,21 @@ func _test_season_scenarios() -> void:
 			check(st_ok and races_ok and not (sr["awards"] as Array).is_empty() and not dup,
 				"Season recap of %s: standings, numbers and awards" % sr_champs.keys()[0], str(sr.get("awards", [])))
 			check(not Reports.season_recap().is_empty(), "Season recap report builds")
+			# season story: every driver of the championship, a round per round run, a headline,
+			# two to five numbers, one to three beats; tracks named short
+			var sk := str(sr_champs.keys()[0])
+			var story_ok := true
+			var story_bad := ""
+			for d in SeasonStory.drivers(sr_season, sk):
+				var stx := SeasonStory.build(sr_season, sk, str(d), sr)
+				if stx.is_empty() or (stx["rounds"] as Array).size() != int(sr["done"]) or str(stx["headline"]["text"]) == "" \
+						or (stx["tiles"] as Array).size() < 2 or (stx["tiles"] as Array).size() > 5 \
+						or (stx["beats"] as Array).is_empty() or (stx["beats"] as Array).size() > 3:
+					story_ok = false
+					story_bad = str(d)
+			check(story_ok, "Season story builds for every driver of %s" % sk, story_bad)
+			check(SeasonStory.short("Michelin Raceway Road Atlanta") == "Road Atlanta" and SeasonStory.short("Some Track - ELMS") == "Some Track",
+				"Season story: short track names")
 			# timeline: one point per round, never going down (points only add up... until a round is dropped)
 			var tl: Dictionary = sr.get("timeline", {})
 			var tl_ok := (tl.get("leaders", []) as Array).size() == int(sr["done"]) and not (tl.get("lines", []) as Array).is_empty()
@@ -1096,6 +1239,18 @@ func _test_season_scenarios() -> void:
 			check(tl_ok, "Season recap timeline: every round, every leader on the chart")
 			var tags := (sr["awards"] as Array).map(func(a): return str(a["tag"]))
 			check(tags.has("IRON MAN") and tags.has("COMEBACK OF THE SEASON"), "Season recap awards include Iron man and Comeback of the season", str(tags))
+			# the reworked awards (1.0.30): cleanest per lap, Mr Consistent on lap times
+			var aw_ok := true
+			for a in sr["awards"]:
+				if str(a["tag"]) == "CLEANEST DRIVER":
+					aw_ok = aw_ok and str(a["text"]).ends_with(" laps")
+				if str(a["tag"]) == "MR CONSISTENT":
+					aw_ok = aw_ok and str(a["text"]).contains("lap spread")
+				if str(a["tag"]) == "MOST IMPROVED":
+					aw_ok = aw_ok and str(a["text"]).begins_with("Gained ") and str(a["text"]).contains("on the grid this season")
+				if str(a["tag"]) == "HARD CHARGER":
+					aw_ok = aw_ok and str(a["text"]).contains("vs usual from those spots")
+			check(aw_ok and tags.has("MR CONSISTENT"), "Awards: cleanest per lap, hard charger against the grid spot, Mr Consistent on lap times", str(sr["awards"]))
 			var place := {}
 			for i in (sr["standings"] as Array).size():
 				place[sr["standings"][i]["name"]] = i + 1
@@ -1202,7 +1357,8 @@ func _test_screens() -> void:
 	screen.show_view("graphics")
 	var gv = screen.graphics_view
 	var built := 0
-	for k in gv.KINDS.size():
+	for kk in gv.KINDS.size():
+		var k: int = gv.kind_index(str(gv.KINDS[kk][0]))
 		gv.kind_pick.select(k)
 		gv.kind_pick.item_selected.emit(k)
 		for f in gv.FORMATS.size():
@@ -1212,6 +1368,11 @@ func _test_screens() -> void:
 			if gv.card.get_child_count() > 0 and gv.viewport.size == gv.FORMATS[f][1]:
 				built += 1
 	check(built == gv.KINDS.size() * gv.FORMATS.size(), "Every graphic builds in every size (%d)" % built)
+	screen.show_view("predict")
+	for b in pv.find_children("*", "Button", true, false):
+		if (b as Button).text.begins_with("Make the graphic"):
+			(b as Button).pressed.emit()
+	check(gv.visible and gv._kind() == "forecast", "Predict's Make the graphic opens the forecast image")
 	# a title font chosen after images were already made must be used on the next image
 	var custom_font := SystemFont.new()
 	custom_font.font_names = PackedStringArray(["serif"])

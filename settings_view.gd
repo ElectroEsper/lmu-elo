@@ -1,12 +1,21 @@
 class_name SettingsView
-extends ScrollContainer
-## The Settings screen: league settings kept in league_settings.json (league_settings.gd).
-## Nothing is saved until "Save settings" is pressed.
+extends VBoxContainer
+## The Settings screen: league settings kept in league_settings.json (league_settings.gd), in four
+## tabs (Championship, Ranks & grades, Look, Import). Nothing is saved until "Save settings" is
+## pressed; that button stays below the tabs, whichever tab is open.
 
 signal notice(text: String)
 signal saved   # the main screen refreshes everything that depends on the settings
 
-var box := VBoxContainer.new()
+var box := VBoxContainer.new()   # the tab the next card goes in (see _card)
+var tabs := TabContainer.new()
+var tab_boxes := {}              # tab name -> its VBoxContainer
+# which tab each card is on
+const TAB_OF := {"STANDINGS": "Championship", "SEASON CALENDAR": "Championship", "RACE RULES": "Championship",
+	"SERIES": "Championship", "TEAMS": "Championship", "SUCCESS BALLAST": "Championship",
+	"DRIVER RANKS": "Ranks & grades", "DRIVER GRADES": "Ranks & grades",
+	"GRAPHICS": "Look", "CLASS NAMES": "Look", "TELEMETRY FILE NAMES": "Import"}
+const TAB_ORDER := ["Championship", "Ranks & grades", "Look", "Import"]
 var rank_rows := VBoxContainer.new()
 var unranked_edit := LineEdit.new()
 var basis_pick := OptionButton.new()
@@ -35,15 +44,26 @@ var series_color_box := VBoxContainer.new()   # one colour per series
 var title_font := LineEdit.new()
 var font_dialog := FileDialog.new()
 var preview := Label.new()
+var tag_rows := GridContainer.new()      # telemetry: class -> bits of a file name that mean it
+var code_rows := VBoxContainer.new()     # telemetry: track codes, one row each
+var learned_note := Label.new()
 
 const BASES := [["average", "Average of race and quali rating"], ["race", "Race rating only"], ["quali", "Quali rating only"]]
 
 
 func _ready() -> void:
-	horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	box.add_theme_constant_override("separation", 14)
-	add_child(box)
+	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(tabs)
+	for t in TAB_ORDER:
+		var sc := ScrollContainer.new()
+		sc.name = t
+		sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		tabs.add_child(sc)
+		var b := VBoxContainer.new()
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.add_theme_constant_override("separation", 14)
+		sc.add_child(b)
+		tab_boxes[t] = b
 
 	# ranks
 	var ranks := _card("DRIVER RANKS")
@@ -246,6 +266,31 @@ func _ready() -> void:
 	cn.add_child(class_rows)
 
 	# grades
+	var tn := _card("TELEMETRY FILE NAMES")
+	tn.add_child(_note("When telemetry files are dropped, the app reads their track and class from the file name, so many files can be imported at once (the telemetry window still shows every guess). Class tags: bits of a name that mean the class, separated by commas (the class's own name always counts). Track codes: bits that mean a track. The app also learns codes by itself from every telemetry file you import."))
+	tag_rows.columns = 2
+	tn.add_child(tag_rows)
+	var ch := HBoxContainer.new()
+	for h in [["Code in the file name", 200], ["Track", 320]]:
+		var hl := _label(h[0])
+		hl.theme_type_variation = "TableHeader"
+		hl.custom_minimum_size = Vector2(h[1], 0)
+		ch.add_child(hl)
+	tn.add_child(ch)
+	tn.add_child(code_rows)
+	var add_code := _btn("Add track code", func(): _add_code_row("", ""))
+	add_code.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	tn.add_child(add_code)
+	learned_note.theme_type_variation = "Muted"
+	learned_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	tn.add_child(learned_note)
+	var lrow := HBoxContainer.new()
+	lrow.add_child(_btn("Add learned codes to the list", _add_learned))
+	lrow.add_child(_btn("Forget learned codes", func():
+		TelemetryNames.forget_learned()
+		_show_learned()))
+	tn.add_child(lrow)
+
 	var gr := _card("DRIVER GRADES")
 	var gr_form := GridContainer.new()
 	gr_form.columns = 2
@@ -255,7 +300,7 @@ func _ready() -> void:
 	_form_row(gr_form, "Sessions before a driver is graded", grade_spin, "")
 
 	var buttons := HBoxContainer.new()
-	box.add_child(buttons)
+	add_child(buttons)   # below the tabs: in view whichever tab is open
 	var save := _btn("Save settings", _save)
 	save.theme_type_variation = "AccentButton"
 	buttons.add_child(save)
@@ -373,7 +418,83 @@ func refresh() -> void:
 	for r in LeagueSettings.get_value("calendar"):
 		if r is Dictionary:
 			_add_cal_row(r)
+	for c in tag_rows.get_children():
+		tag_rows.remove_child(c)
+		c.queue_free()
+	var tags: Dictionary = LeagueSettings.get_value("telemetry_class_tags")
+	var tclasses := {}
+	for b in Elo.boards():
+		tclasses[b[0]] = true
+	for c in tags:
+		tclasses[c] = true
+	var tnames := tclasses.keys()
+	tnames.sort()
+	for c in tnames:
+		var tl := _label(LeagueSettings.label(str(c)))
+		tl.theme_type_variation = "Muted"
+		tl.custom_minimum_size = Vector2(280, 0)
+		tag_rows.add_child(tl)
+		var te := LineEdit.new()
+		te.placeholder_text = "e.g. %s" % str(c)
+		te.text = ", ".join(PackedStringArray((tags.get(c, []) as Array).map(func(x): return str(x))))
+		te.custom_minimum_size = Vector2(320, 0)
+		te.set_meta("class", c)
+		tag_rows.add_child(te)
+	for c in code_rows.get_children():
+		code_rows.remove_child(c)
+		c.queue_free()
+	var tcodes: Dictionary = LeagueSettings.get_value("telemetry_track_codes")
+	for k in tcodes:
+		_add_code_row(str(k), str(tcodes[k]))
+	_show_learned()
 	_show_preview()
+
+
+# The learned codes become rows of the list (saved with Save settings, editable there).
+func _add_learned() -> void:
+	var have := {}
+	for row in code_rows.get_children():
+		if not row.is_queued_for_deletion():
+			have[(row.get_child(0) as LineEdit).text.strip_edges().to_upper()] = true
+	var lc := TelemetryNames.learned()
+	for k in lc:
+		if not have.has(k):
+			_add_code_row(str(k), str(lc[k]))
+
+
+func _show_learned() -> void:
+	var lc := TelemetryNames.learned()
+	var parts := PackedStringArray()
+	var keys := lc.keys()
+	keys.sort()
+	for k in keys:
+		parts.append("%s → %s" % [k, SeasonStory.short(str(lc[k]))])
+	learned_note.text = "Learned from your imports: " + (", ".join(parts) if not parts.is_empty() else "nothing yet.")
+
+
+func _add_code_row(code: String, course: String) -> void:
+	var row := HBoxContainer.new()
+	var ce := LineEdit.new()
+	ce.text = code
+	ce.placeholder_text = "e.g. BRN"
+	ce.custom_minimum_size = Vector2(200, 0)
+	row.add_child(ce)
+	var cp := OptionButton.new()
+	cp.custom_minimum_size = Vector2(320, 0)
+	cp.clip_text = true
+	var courses := Profiles.courses_sorted().filter(func(x): return str(x) != "")
+	if course != "" and not courses.has(course):
+		courses.append(course)
+	for c in courses:
+		cp.add_item(str(c))
+		cp.set_item_metadata(cp.item_count - 1, str(c))
+		if str(c) == course:
+			cp.select(cp.item_count - 1)
+	row.add_child(cp)
+	var remove := _btn("Remove", func(): row.queue_free())
+	remove.theme_type_variation = "SmallButton"
+	row.add_child(remove)
+	code_rows.add_child(row)
 
 
 func _add_ballast_row(cls_name: String, kgs: Array, most: int) -> void:
@@ -704,6 +825,24 @@ func _collect() -> Dictionary:
 		if c is LineEdit and (c as LineEdit).text.strip_edges() != "":
 			labels[str(c.get_meta("class"))] = (c as LineEdit).text.strip_edges()
 	values["class_labels"] = labels
+	var ttags := {}
+	for c in tag_rows.get_children():
+		if c is LineEdit:
+			var list := []
+			for part in (c as LineEdit).text.split(",", false):
+				if part.strip_edges() != "":
+					list.append(part.strip_edges().to_upper())
+			ttags[str(c.get_meta("class"))] = list
+	values["telemetry_class_tags"] = ttags
+	var tcodes := {}
+	for row in code_rows.get_children():
+		if row.is_queued_for_deletion():
+			continue
+		var code := (row.get_child(0) as LineEdit).text.strip_edges().to_upper()
+		var cp := row.get_child(1) as OptionButton
+		if code != "" and cp.selected >= 0:
+			tcodes[code] = str(cp.get_item_metadata(cp.selected))
+	values["telemetry_track_codes"] = tcodes
 	var rules := []
 	for row in rule_rows.get_children():
 		if row.is_queued_for_deletion():
@@ -831,6 +970,7 @@ func _show_preview() -> void:
 
 
 func _card(title: String) -> VBoxContainer:
+	box = tab_boxes[TAB_OF.get(title, "Championship")]
 	var card := PanelContainer.new()
 	card.theme_type_variation = "Card"
 	box.add_child(card)

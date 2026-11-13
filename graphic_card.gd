@@ -123,6 +123,8 @@ func _build() -> void:
 			_build_track(body)
 		"season_recap":
 			_build_season_recap(body)
+		"story":
+			_build_story(body)
 
 
 func _header() -> Control:
@@ -622,6 +624,92 @@ func _recap_tiles(body: VBoxContainer, heading: String, tiles: Array, columns: i
 		tb.add_child(_fit(_label(str(t[1]), big, TEXT, "title")))
 		tb.add_child(_wrap(_label(str(t[2]), 24, MUTED, "regular")))
 		grid.add_child(tp)
+
+
+# ---------- season story ----------
+# One driver's season (SeasonStory): the headline, five numbers, round by round, race pace against
+# the grid, three beats. Stream size: the charts on the left, the beats on the right.
+const STORY_UP := Color("5fd38d")
+const STORY_DOWN := Color("ef6a6a")
+
+
+func _build_story(body: VBoxContainer) -> void:
+	if bool(spec.get("empty", false)):
+		return
+	body.add_child(_wrap(_label(str(spec.get("headline", "")), 32, TEXT, "bold")))
+	var tiles := HBoxContainer.new()
+	tiles.add_theme_constant_override("separation", int(12 * s))
+	body.add_child(tiles)
+	for t in spec.get("tiles", []):
+		var tp := _panel(PANEL, Color(0, 0, 0, 0))
+		tp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var tb := VBoxContainer.new()
+		tb.add_theme_constant_override("separation", 0)
+		tp.add_child(tb)
+		tb.add_child(_label(str(t["value"]), 44, STORY_UP if bool(t.get("good", false)) else TEXT, "title"))
+		tb.add_child(_fit(_label(str(t["label"]), 19, MUTED, "regular")))
+		tb.add_child(_fit(_label(str(t["line"]), 19, MUTED, "regular")))
+		tiles.add_child(tp)
+	var main: BoxContainer = HBoxContainer.new() if landscape else VBoxContainer.new()
+	main.add_theme_constant_override("separation", int(16 * s))
+	main.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(main)
+	var charts := VBoxContainer.new()
+	charts.add_theme_constant_override("separation", int(14 * s))
+	charts.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	charts.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	charts.size_flags_stretch_ratio = 1.9
+	main.add_child(charts)
+	var tall := size.y > size.x * 1.5
+	charts.add_child(_story_chart("rounds", "ROUND BY ROUND", "hollow: grid  ·  solid: finish", 1.8 if tall else 1.25))
+	charts.add_child(_story_chart("pace", "RACE PACE VS THE GRID", "faster than the class's middle driver", 1.0))
+	var beats: BoxContainer = VBoxContainer.new() if landscape else HBoxContainer.new()
+	beats.add_theme_constant_override("separation", int(12 * s))
+	beats.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main.add_child(beats)
+	var heads := {"high": ["▲ HIGH POINT", STORY_UP], "low": ["▼ TOUGHEST DAY", STORY_DOWN], "award": ["★ AWARD", accent], "note": ["● ALSO", HEAD.lightened(0.3)]}
+	for b in spec.get("beats", []):
+		var bp := _panel(PANEL, Color(0, 0, 0, 0))
+		bp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bp.size_flags_vertical = Control.SIZE_EXPAND_FILL if landscape else Control.SIZE_FILL
+		var bb := VBoxContainer.new()
+		bb.add_theme_constant_override("separation", int(4 * s))
+		bp.add_child(bb)
+		var h: Array = heads.get(str(b["kind"]), heads["note"])
+		bb.add_child(_label(str(h[0]), 18, h[1], "bold", 2))
+		bb.add_child(_wrap(_label(str(b["title"]), 24, TEXT, "bold")))
+		bb.add_child(_wrap(_label(str(b["text"]), 20, MUTED, "regular")))
+		beats.add_child(bp)
+
+
+func _story_chart(mode: String, title: String, key: String, weight: float) -> Control:
+	var p := _panel(PANEL, Color(0, 0, 0, 0))
+	p.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	p.size_flags_stretch_ratio = weight
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", int(6 * s))
+	p.add_child(v)
+	var head := HBoxContainer.new()
+	head.add_child(_fit(_label(title, 20, accent, "bold", 2)))
+	head.add_child(_label(key, 17, MUTED, "regular", 0, 0.0, HORIZONTAL_ALIGNMENT_RIGHT))
+	v.add_child(head)
+	var c := StoryChart.new()
+	c.mode = mode
+	c.rows = spec.get("rounds", [])
+	c.font = _font("regular")
+	c.bold = _font("bold")
+	c.px = s
+	c.text_color = TEXT
+	c.muted = MUTED
+	c.accent = accent
+	c.up = STORY_UP
+	c.down = STORY_DOWN
+	c.rain = RAIN_BLUE
+	c.panel = PANEL
+	c.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	c.custom_minimum_size = Vector2(0, (190 if mode == "rounds" else 150) * s)
+	v.add_child(c)
+	return p
 
 
 # ---------- season scenarios ----------

@@ -1,23 +1,14 @@
 class_name RatingsView
 extends VBoxContainer
-## "Ratings" screen: one leaderboard per class and session, with the driver merge tool above.
+## "Ratings" screen: one leaderboard per class and session. (Merge drivers is on Data & backups.)
 
-var shell: Node   # the main screen (for the merge dialog's messages)
+var shell: Node   # the main screen
 var tabs := TabContainer.new()
-var merge_dialog := DriverMergeDialog.new()
 
 
 func _ready() -> void:
-	var bar := HFlowContainer.new()
-	var merge_btn := Button.new()
-	merge_btn.text = "Merge drivers..."
-	merge_btn.pressed.connect(func(): merge_dialog.open())
-	bar.add_child(merge_btn)
-	add_child(bar)
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(tabs)
-	merge_dialog.shell = shell
-	add_child(merge_dialog)
 
 
 func refresh() -> void:

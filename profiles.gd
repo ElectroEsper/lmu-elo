@@ -19,6 +19,9 @@ const PRIOR_TLW := 0.12    # of which warnings (season 6: 16% of events)
 const PRIOR_TLP := 0.003   # of which penalties (season 6: 0.4% of events)
 const PRIOR_CON := 0.113
 const PRIOR_CONS := 0.77
+const PRIOR_COSTLY := 0.038   # costly laps (mistakes) per lap, league-wide (one every ~26 laps)
+const COSTLY_COST := 14.5     # seconds a costly lap loses, league-wide
+const K_COSTLY := 150.0       # shrinkage, in laps: costly laps are rare, a driver needs a few races of them
 const MIN_TRACKS_FOR_Z := 4
 const RACE_QUALI_RATIO := 1.03   # typical race lap / best quali lap, used for tracks without a race yet
 const DEFAULT_MINUTES := 35
@@ -113,6 +116,7 @@ func rebuild() -> void:
 						var rn := Elo.resolve(str(po[i]))
 						if day["race"].get("drivers", {}).has(rn) and str(day["race"]["drivers"][rn].get("cls", "")) == str(pc):
 							day["race"]["drivers"][rn]["pos"] = i + 1
+			day["race_file"] = str(draft["file"])
 			day["series"] = Elo.series_code(str(draft["file"]))   # "sc", "mc"... ("" if the name has none)
 			day["season"] = Elo.season_number(str(draft["file"]))
 			day["season_name"] = Elo.season_of(draft)   # "Season 6" (as the reports' season filter)
@@ -180,7 +184,7 @@ func has_data() -> bool:
 func raw_stats(who: String, cls: String, before := "") -> Dictionary:
 	var s := {"n_r": 0, "n_q": 0, "pace": 0.0, "qpace": 0.0, "wear": 0.0, "n_wear": 0,
 		"top": 0.0, "n_top": 0, "fuel": 0.0, "n_fuel": 0, "tl": 0.0, "tlw": 0.0, "tlp": 0.0, "con": 0.0, "cons": 0.0, "car": "",
-		"start": 0.0, "n_start": 0, "fade": 0.0, "n_fade": 0}
+		"start": 0.0, "n_start": 0, "fade": 0.0, "n_fade": 0, "costly": 0, "costly_n": 0, "costly_s": 0.0}
 	for rec in hist.get("%s|%s" % [cls, who], []):
 		if before != "" and rec["date"] >= before:
 			continue
@@ -198,6 +202,10 @@ func raw_stats(who: String, cls: String, before := "") -> Dictionary:
 				s["n_fade"] += 1
 			s["tlw"] += r.get("tlw", 0.0)
 			s["tlp"] += r.get("tlp", 0.0)
+			if r.has("costly_n"):
+				s["costly"] += int(r.get("costly", 0))
+				s["costly_n"] += int(r["costly_n"])
+				s["costly_s"] += float(r.get("costly_s", 0.0))
 			s["con"] += r.get("con", 0.0)
 			s["cons"] += r.get("cons", 0.0)
 			s["car"] = r.get("car", s["car"])
@@ -275,6 +283,9 @@ func class_means(cls: String, before := "") -> Dictionary:
 	var tlp := 0.0
 	var con := 0.0
 	var cons := 0.0
+	var ck := 0
+	var cn := 0
+	var cs := 0.0
 	var n := 0
 	for day in days:
 		if day.get("training", false) or (before != "" and day["date"] >= before):
@@ -287,10 +298,18 @@ func class_means(cls: String, before := "") -> Dictionary:
 				tlp += r.get("tlp", 0.0)
 				con += r.get("con", 0.0)
 				cons += r.get("cons", 0.0)
+				ck += int(r.get("costly", 0))
+				cn += int(r.get("costly_n", 0))
+				cs += float(r.get("costly_s", 0.0))
 				n += 1
+	# costly laps: per lap, and the seconds one costs on average (league priors without enough laps)
+	var costly := float(ck) / cn if cn >= 500 else PRIOR_COSTLY
+	var costly_cost := cs / ck if ck >= 20 else COSTLY_COST
 	if n < 10:
-		return {"tl": PRIOR_TL, "tlw": PRIOR_TLW, "tlp": PRIOR_TLP, "con": PRIOR_CON, "cons": PRIOR_CONS}
-	return {"tl": tl / n, "tlw": tlw / n, "tlp": tlp / n, "con": con / n, "cons": cons / n}
+		return {"tl": PRIOR_TL, "tlw": PRIOR_TLW, "tlp": PRIOR_TLP, "con": PRIOR_CON, "cons": PRIOR_CONS,
+			"costly": costly, "costly_cost": costly_cost}
+	return {"tl": tl / n, "tlw": tlw / n, "tlp": tlp / n, "con": con / n, "cons": cons / n,
+		"costly": costly, "costly_cost": costly_cost}
 
 
 # Spread of driver averages (wear / top speed / fuel), used to turn a driver's trait into a z-score.
@@ -344,6 +363,10 @@ func profile(who: String, cls: String, before := "", cm: Dictionary = {}) -> Dic
 		# places gained on lap 1 and pace fade per 10 laps of a stint, pulled towards 0 (the class)
 		"start": shrunk(s["start"], s["n_start"], K_RATE, 0.0), "n_start": s["n_start"],
 		"fade": shrunk(s["fade"], s["n_fade"], K_RATE, 0.0), "n_fade": s["n_fade"],
+		# costly laps (mistakes) per lap, pulled towards the class over K_COSTLY laps. Not shown in
+		# the profiles: tracked for the forecast (Predict "costly") and the season stories.
+		"costly": shrunk(float(s["costly"]) / maxf(s["costly_n"], 1), s["costly_n"], K_COSTLY, float(cm.get("costly", PRIOR_COSTLY))),
+		"costly_n": s["costly_n"],
 	}
 
 

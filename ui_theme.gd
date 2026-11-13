@@ -115,6 +115,8 @@ static func build() -> Theme:
 	_variation(t, "AccentButton", "Button")  # the main action of a screen
 	_buttons(t, "AccentButton", ACCENT, ACCENT_HOVER, ACCENT, ACCENT_INK)
 	t.set_font("font", "AccentButton", bold)
+	_variation(t, "DangerButton", "Button")  # actions that rebuild or replace data (Recompute all)
+	_buttons(t, "DangerButton", SURFACE_2, SURFACE_3, BAD.darkened(0.25), BAD.lightened(0.35))
 	_variation(t, "SmallButton", "Button")   # Up / Down / Drop on the review lists
 	var sm := _box(Color(0, 0, 0, 0), 4)
 	sm.content_margin_left = 8

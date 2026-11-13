@@ -21,6 +21,7 @@ const PARAM_ROWS := [
 	["p_track", "Upgrade: own history at the track (0 = off, 1 = on)", 0.0, 2.0, 0.1],
 	["p_tend", "Upgrade: track tendencies (0 = off, 1 = on)", 0.0, 2.0, 0.1],
 	["traffic", "Upgrade: multiclass traffic (0 = off, 1 = as measured)", 0.0, 2.0, 0.1],
+	["costly", "Upgrade: costly laps, mistakes (0 = off, 1 = as measured)", 0.0, 2.0, 0.1],
 ]
 
 var class_pick := OptionButton.new()
@@ -49,17 +50,29 @@ var out_label := Label.new()
 var assumptions := VBoxContainer.new()
 var spins := {}
 var _busy := false
+var shell: Node                          # the main screen (Make the graphic opens Graphics)
+var tabs := TabContainer.new()          # Forecast | Tuning
+var tune_label := Label.new()           # results of Backtest, Fit noise, Test upgrades
+var more_box := VBoxContainer.new()     # race options rarely changed: other classes, pit stops, lap time
 
 
 func _ready() -> void:
 	# two columns: settings and actions on the left, the forecast on the right, with a divider
 	# that can be dragged (its position is remembered in ui.cfg)
+	# the actions first, always in view: fill the list, forecast, keep it, make the graphic
+	var actions := HFlowContainer.new()
+	actions.add_theme_constant_override("h_separation", 8)
+	actions.add_theme_constant_override("v_separation", 6)
+	add_child(actions)
+	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(tabs)
 	var cols := HSplitContainer.new()
+	cols.name = "Forecast"
 	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	cols.add_theme_constant_override("separation", 16)
 	cols.split_offset = _saved_split()
 	cols.dragged.connect(func(offset: int): _save_split(offset))
-	add_child(cols)
+	tabs.add_child(cols)
 	var left_scroll := ScrollContainer.new()
 	left_scroll.custom_minimum_size = Vector2(LEFT_MIN, 0)
 	left_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -93,7 +106,7 @@ func _ready() -> void:
 	lap_spin.step = 0.1
 	lap_spin.tooltip_text = "Typical lap time. 0 = take it from the data."
 	for pair in [["Class", class_pick], ["Series", series_pick], ["Forecast", mode_pick], ["Track", track_pick],
-			["Minutes", minutes_spin], ["Lap time (s)", lap_spin]]:
+			["Minutes", minutes_spin]]:
 		var l := _label(pair[0])
 		l.theme_type_variation = "Muted"
 		form.add_child(l)
@@ -104,22 +117,52 @@ func _ready() -> void:
 			c.custom_minimum_size = Vector2(120, 0)
 		form.add_child(c)
 
+	# weather: not known in advance, so Mixed lets every simulated race roll its own
+	var wx_form := GridContainer.new()
+	wx_form.columns = 2
+	wx_form.add_theme_constant_override("h_separation", 12)
+	setup.add_child(wx_form)
+
+	# the options rarely changed, folded away: lap time, other classes, pit stops
+	var more_btn := Button.new()
+	more_btn.text = "▸ More: lap time, other classes, pit stops"
+	more_btn.theme_type_variation = "SmallButton"
+	more_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	more_btn.toggle_mode = true
+	more_btn.tooltip_text = "Filled in from the chosen series' recent races and Settings > Race rules. Open to check or change them for this race."
+	more_btn.toggled.connect(func(on: bool):
+		more_box.visible = on
+		more_btn.text = ("▾" if on else "▸") + " More: lap time, other classes, pit stops")
+	setup.add_child(more_btn)
+	more_box.visible = false
+	more_box.add_theme_constant_override("separation", 10)
+	setup.add_child(more_box)
+	var lap_form := GridContainer.new()
+	lap_form.columns = 2
+	lap_form.add_theme_constant_override("h_separation", 12)
+	more_box.add_child(lap_form)
+	var lap_l := _label("Lap time (s)")
+	lap_l.theme_type_variation = "Muted"
+	lap_form.add_child(lap_l)
+	lap_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lap_form.add_child(lap_spin)
+
 	# the other classes on track (traffic), filled from the series' recent races
 	var field_title := _label("Other classes in the race")
 	field_title.theme_type_variation = "Muted"
 	field_title.tooltip_text = "Tick the classes sharing the track with the forecast class and set their number of cars. Filled in from the chosen series' recent races; change it if this race is different. Used by the traffic upgrade."
 	field_title.mouse_filter = Control.MOUSE_FILTER_PASS
-	setup.add_child(field_title)
-	setup.add_child(field_box)
+	more_box.add_child(field_title)
+	more_box.add_child(field_box)
 
 	# pit stops, filled from Settings > Race rules for the series
 	pits_check.text = "Pit stops expected"
 	pits_check.tooltip_text = "Routine stops for fuel / energy and tyres. Off for races run on one tank (Sprint: stops there are repairs, which the contact model already covers). Filled in from Settings > Race rules for the chosen series."
-	setup.add_child(pits_check)
+	more_box.add_child(pits_check)
 	var pit_form := GridContainer.new()
 	pit_form.columns = 2
 	pit_form.add_theme_constant_override("h_separation", 12)
-	setup.add_child(pit_form)
+	more_box.add_child(pit_form)
 	for row in [["Fuel / energy use x", fuel_spin, 0.1, 10.0, 0.1, "Fuel (and virtual energy) multiplier set on the server for this race."],
 			["Tyre wear x", tyre_spin, 0.1, 10.0, 0.1, "Tyre wear multiplier set on the server for this race."],
 			["Minimum stops", min_stops_spin, 0.0, 5.0, 1.0, "Stops the rules make compulsory, even if fuel and tyres would last."]]:
@@ -137,11 +180,6 @@ func _ready() -> void:
 		for sb in [fuel_spin, tyre_spin, min_stops_spin]:
 			sb.editable = on)
 
-	# weather: not known in advance, so Mixed lets every simulated race roll its own
-	var wx_form := GridContainer.new()
-	wx_form.columns = 2
-	wx_form.add_theme_constant_override("h_separation", 12)
-	setup.add_child(wx_form)
 	weather_pick.add_item("Dry")
 	weather_pick.set_item_metadata(0, "dry")
 	weather_pick.add_item("Mixed (rain may come and go)")
@@ -192,26 +230,35 @@ func _ready() -> void:
 		_fill_grid_pick()
 		_fill_field()
 		_fill_plan())
-	var fill_row := HBoxContainer.new()
-	entry.add_child(fill_row)
 	var from_quali := _btn("Grid from latest quali", _load_latest_quali)
-	from_quali.tooltip_text = "Fill the list with the latest qualifying result, pole first."
+	from_quali.tooltip_text = "Fill the entry list with the latest qualifying result, pole first."
 	var recent := _btn("Recent drivers", _fill_recent)
-	recent.tooltip_text = "Fill the list with drivers who raced in this class recently."
-	for b in [from_quali, recent]:
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		fill_row.add_child(b)
+	recent.tooltip_text = "Fill the entry list with drivers who raced in this class recently."
 	var go := _btn("Predict", _run)
 	go.theme_type_variation = "AccentButton"
-	entry.add_child(go)
+	go.tooltip_text = "Forecast the race (and qualifying, before quali) for the classes in the entry list."
 	save_btn.text = "Save for the record"
 	save_btn.tooltip_text = "Keep this forecast. Once the race's results are imported it is scored in Reports > Forecast record (did the favourite win, podium hits, position error)."
 	save_btn.disabled = true
 	save_btn.pressed.connect(_save_forecast)
-	entry.add_child(save_btn)
+	var graphic := _btn("Make the graphic →", func():
+		if shell != null:
+			shell.show_view("graphics")
+			shell.graphics_view.open_kind("forecast"))
+	graphic.tooltip_text = "Open Graphics with the Event predictions image of the forecast on screen."
+	for b in [from_quali, recent, go, save_btn, graphic]:
+		actions.add_child(b)
 
-	# model checks and settings
-	var model := _card(left, "MODEL")
+	# model checks and settings: their own tab, out of the way of race-day use
+	var tune_scroll := ScrollContainer.new()
+	tune_scroll.name = "Tuning"
+	tune_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	tabs.add_child(tune_scroll)
+	var tune := VBoxContainer.new()
+	tune.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tune.add_theme_constant_override("separation", 12)
+	tune_scroll.add_child(tune)
+	var model := _card(tune, "CHECK THE MODEL AGAINST PAST RACES")
 	var checks := HFlowContainer.new()
 	model.add_child(checks)
 	var bt := _btn("Backtest", _backtest)
@@ -223,12 +270,12 @@ func _ready() -> void:
 	var tu := _btn("Test upgrades", _test_upgrades)
 	tu.tooltip_text = "Test each upgrade and its strength against past races; the ones that help are switched on. Slow."
 	checks.add_child(tu)
-	var toggle := CheckButton.new()
-	toggle.text = "Show assumptions"
-	toggle.toggled.connect(func(on: bool): assumptions.visible = on)
-	model.add_child(toggle)
-	assumptions.visible = false
-	model.add_child(assumptions)
+	tune_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	tune_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tune_label.text = "Backtest replays past races, each forecast only from earlier events, and scores the odds. Fit noise and Test upgrades are slow (several minutes)."
+	model.add_child(tune_label)
+	var amodel := _card(tune, "ASSUMPTIONS")
+	amodel.add_child(assumptions)
 	var grid := GridContainer.new()
 	grid.columns = 2
 	assumptions.add_child(grid)
@@ -246,7 +293,9 @@ func _ready() -> void:
 		sb.value_changed.connect(_on_param.bind(row[0]))
 		grid.add_child(sb)
 		spins[row[0]] = sb
-	assumptions.add_child(_btn("Reset assumptions", _reset_params))
+	var reset := _btn("Reset assumptions", _reset_params)
+	reset.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	assumptions.add_child(reset)
 
 	# forecast
 	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -917,27 +966,27 @@ func _backtest() -> void:
 	if _busy:
 		return
 	_busy = true
-	out_label.text = "Replaying past races (each forecast only from earlier events)..."
+	tune_label.text = "Replaying past races (each forecast only from earlier events)..."
 	var s: Dictionary = await Predict.run_backtest()
 	_busy = false
 	if s.has("note"):
-		out_label.text = s["note"]
+		tune_label.text = s["note"]
 		return
 	var lines := ["Backtest on %d past races. Podium + top-10 error (lower is better) and winner log-loss:" % s["races"]]
 	for k in s["modes"]:
 		lines.append("%s: %.3f   (log-loss %.2f)" % [k, s["modes"][k]["brier"], s["modes"][k]["ll"]])
-	out_label.text = "\n".join(lines)
+	tune_label.text = "\n".join(lines)
 
 
 func _test_upgrades() -> void:
 	if _busy:
 		return
 	_busy = true
-	out_label.text = "Replaying past races with each upgrade off and on, in two forecast modes. This takes a while..."
+	tune_label.text = "Replaying past races with each upgrade off and on, in two forecast modes. This takes a while..."
 	var s: Dictionary = await Predict.test_upgrades()
 	_busy = false
 	if s.has("note"):
-		out_label.text = s["note"]
+		tune_label.text = s["note"]
 		return
 	var lines := ["Upgrades tested on %d past races (podium + top-10 error, lower is better; winner log-loss):" % s["races"]]
 	for row in s["rows"]:
@@ -949,7 +998,7 @@ func _test_upgrades() -> void:
 		for name in s["on"]:
 			on.append("%s (strength %.1f)" % [name, float(s["strength"].get(name, 1.0))])
 		lines.append("Switched on: " + ", ".join(on) + ". The others stay off.")
-	out_label.text = "\n".join(lines)
+	tune_label.text = "\n".join(lines)
 	for key in spins:
 		spins[key].set_value_no_signal(float(Predict.params[key]))
 
@@ -958,15 +1007,15 @@ func _fit_noise() -> void:
 	if _busy:
 		return
 	_busy = true
-	out_label.text = "Trying a few noise levels. This takes a while..."
+	tune_label.text = "Trying a few noise levels. This takes a while..."
 	var s: Dictionary = await Predict.fit_noise()
 	_busy = false
 	if s.has("note"):
-		out_label.text = s["note"]
+		tune_label.text = s["note"]
 		return
 	var lines := ["Race-day noise fitted on %d past races:" % s["races"]]
 	for row in s["table"]:
 		lines.append("%.1f%%: error %.3f" % [row["sig_form"], row["brier"]])
 	lines.append("Using %.1f%% from now on." % s["best"])
-	out_label.text = "\n".join(lines)
+	tune_label.text = "\n".join(lines)
 	refresh()

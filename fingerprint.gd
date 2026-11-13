@@ -25,7 +25,7 @@ const TL_NONE := 0
 const TL_WARN := 1
 const TL_INVALID := 2   # lap time deleted
 const TL_PEN := 3
-const VERSION := 12   # 12: places gained on lap 1 ("start"), pace fade over a stint ("fade"), invalidated laps count with the warnings. 11: drive-throughs served mid-race and what each cost ("dt"). 10: no track limits on lap 0 (formation lap and start). 9: track limits by the game's decision ("tlw" warnings, "tlp" penalties per lap). 7: success ballast carried ("mass", kg). 6: virtual energy per km ("ve_km") for the pit-stop forecast. 5: 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
+const VERSION := 14   # 14: costly laps ("costly" count, "costly_n" laps looked at, "costly_s" seconds lost), invalidated laps included. 13: the 5 quickest race laps ("best5"), the best lap ("best_lap") and clean laps ("clean_n"), for Clean race pace %. 12: places gained on lap 1 ("start"), pace fade over a stint ("fade"), invalidated laps count with the warnings. 11: drive-throughs served mid-race and what each cost ("dt"). 10: no track limits on lap 0 (formation lap and start). 9: track limits by the game's decision ("tlw" warnings, "tlp" penalties per lap). 7: success ballast carried ("mass", kg). 6: virtual energy per km ("ve_km") for the pit-stop forecast. 5: 5: no contacts / track limits after the chequered flag. 4: fuel per lap is an average of the normal laps (was the median)
 const CLEAN_LIMIT := 1.04     # laps slower than 104% of the driver's own best-5 median are not "clean"
 const INCIDENT_GAP := 5.0     # contact reports closer than this (s) count as one
 const MIN_RUN := 6            # laps in a row of falling tyre wear needed to estimate a wear rate
@@ -257,6 +257,9 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 	var raw := {}        # raw name -> unrounded extras for the class stats
 	var lap_med := _lap_medians(cur["drivers"])   # class -> {lap number: median lap time}
 	for d in cur["drivers"]:
+		_full_times(d["laps"])
+	var full_med := _lap_medians(cur["drivers"], "tt")   # the same with invalidated laps timed too
+	for d in cur["drivers"]:
 		var nm: String = d.get("Name", "")
 		var cls: String = d.get("CarClass", "")
 		if nm == "" or cls == "" or d.get("FinishStatus", "") == "DQ":
@@ -313,6 +316,9 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			"cls": cls, "car": d.get("CarType", ""), "laps": n,
 			"grid": int(d.get("ClassGridPos", "0")), "pos": int(d.get("ClassPosition", "0")),
 			"pace": pace, "cons": cons,
+			# the community's "clean race pace": the average of the 5 quickest race laps (no pit or
+			# first lap); with the best lap and the number of clean laps behind it
+			"best5": _r(_mean(sorted_t.slice(0, 5)), 0.001), "best_lap": _r(sorted_t[0], 0.001), "clean_n": clean.size(),
 			"tl": cur["tl"].get(nm, {}).size() / float(n),   # every event, whatever the game decided
 			"tlw": _tl_count(cur["tl"].get(nm, {}), "warn") / float(n),   # warnings (cleanliness)
 			"tlp": _tl_count(cur["tl"].get(nm, {}), "pen") / float(n),    # turned into a penalty
@@ -332,6 +338,11 @@ static func _race(cur: Dictionary, length: float) -> Dictionary:
 			x["fuel"] = _fuel_per_lap(fuels) / km
 		if ves.size() > MIN_LAPS:
 			x["ve"] = _fuel_per_lap(ves) / km
+		var cl := _costly(d["laps"], full_med.get(cls, {}))
+		if int(cl["n"]) >= MIN_LAPS:
+			m["costly"] = cl["k"]
+			m["costly_n"] = cl["n"]
+			m["costly_s"] = _r(cl["lost"], 0.1)
 		var fd := _stint_fade(d["laps"], lap_med.get(cls, {}))
 		if not fd.is_empty():
 			m["fade"] = _r(fd["fade"], 0.0001)
@@ -544,18 +555,50 @@ static func _stint_fade(laps: Array, med: Dictionary) -> Dictionary:
 	return {"fade": clampf(sum / total, -FADE_CAP, FADE_CAP), "laps": total} if total > 0 else {}
 
 
+# Every lap timed, invalidated ones too (the file gives them no time): from the lap's own time, or
+# else from the elapsed time at the start of the next lap. Stored as "tt" (-1 when unknown).
+static func _full_times(laps: Array) -> void:
+	for i in laps.size():
+		var t := float(laps[i]["t"])
+		if t <= 0.0 and i + 1 < laps.size() and float(laps[i + 1]["et"]) > float(laps[i]["et"]) and float(laps[i]["et"]) > 0.0:
+			t = float(laps[i + 1]["et"]) - float(laps[i]["et"])
+		laps[i]["tt"] = t
+
+
+# Costly laps: laps lost to a mistake (a spin, an off, a big lock-up), at least COSTLY_LIMIT slower
+# than the driver's own usual lap, both measured against the class's median of the same lap (so a
+# safety car, rain or a drying track, which slow everyone, are not mistakes). Not the start, pit laps
+# or out-laps. {"n": laps looked at, "k": costly laps, "lost": seconds lost on them}
+const COSTLY_LIMIT := 0.04
+static func _costly(laps: Array, med: Dictionary) -> Dictionary:
+	var ratios := []   # [ratio, class median time]
+	for i in laps.size():
+		if _comparable(laps, i, "tt") and med.has(laps[i]["n"]):
+			ratios.append([float(laps[i]["tt"]) / float(med[laps[i]["n"]]), float(med[laps[i]["n"]])])
+	if ratios.size() < MIN_LAPS:
+		return {"n": ratios.size(), "k": 0, "lost": 0.0}
+	var own := _median(ratios.map(func(x): return x[0]))
+	var k := 0
+	var lost := 0.0
+	for x in ratios:
+		if x[0] > own * (1.0 + COSTLY_LIMIT):
+			k += 1
+			lost += (x[0] - own) * x[1]
+	return {"n": ratios.size(), "k": k, "lost": lost}
+
+
 # A lap that can be compared with other cars on the same lap: not the start, not a pit lap
 # and not the out-lap after one, with a valid time.
-static func _comparable(laps: Array, i: int) -> bool:
+static func _comparable(laps: Array, i: int, key := "t") -> bool:
 	var l: Dictionary = laps[i]
-	if l["n"] <= 1 or l["t"] <= 0.0 or l["pit"]:
+	if l["n"] <= 1 or float(l.get(key, -1.0)) <= 0.0 or l["pit"]:
 		return false
 	return i == 0 or not laps[i - 1]["pit"]
 
 
 # class -> {lap number: median time of the comparable laps}; a lap needs at least a third of
 # the class (and 3 cars) to give a median worth comparing with
-static func _lap_medians(drivers: Array) -> Dictionary:
+static func _lap_medians(drivers: Array, key := "t") -> Dictionary:
 	var acc := {}     # class -> {lap: [times]}
 	var count := {}   # class -> cars
 	for d in drivers:
@@ -567,11 +610,11 @@ static func _lap_medians(drivers: Array) -> Dictionary:
 			acc[cls] = {}
 		var laps: Array = d["laps"]
 		for i in laps.size():
-			if _comparable(laps, i):
+			if _comparable(laps, i, key):
 				var k: int = laps[i]["n"]
 				if not acc[cls].has(k):
 					acc[cls][k] = []
-				acc[cls][k].append(laps[i]["t"])
+				acc[cls][k].append(laps[i][key])
 	var out := {}
 	for cls in acc:
 		out[cls] = {}
@@ -786,6 +829,15 @@ static func _fuel_per_lap(fuels: Array) -> float:
 			sum += f
 			n += 1
 	return sum / n if n > 0 else mid
+
+
+static func _mean(xs: Array) -> float:
+	if xs.is_empty():
+		return 0.0
+	var t := 0.0
+	for x in xs:
+		t += float(x)
+	return t / xs.size()
 
 
 static func _median(values: Array) -> float:

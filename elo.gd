@@ -44,6 +44,7 @@ func _ready() -> void:
 	load_ratings()
 	if _needs_backfill:
 		_backfill_sessions()
+	_sync_penalty_ledger()
 	if _model_loaded < RATING_MODEL and not history.is_empty() and DirAccess.dir_exists_absolute(AppPaths.file("events")):
 		rebuild_all()   # ratings from an older model: replay every event once with the new one
 		load_error = ("" if load_error == "" else load_error + " ") + "Ratings were recalculated with the updated rating model (bigger steps, so they spread wider than before)."
@@ -490,6 +491,7 @@ func confirm_draft(draft: Dictionary) -> void:
 	var training := _training_match(draft)
 	if training != "":
 		_drop_training(training)   # the league copy takes over; its lap data is not counted twice
+	_ledger_penalties_onto(draft)   # a race re-imported after a reset gets its steward penalties back
 	_apply(draft)
 	archive_xml(draft)
 	var saved := draft.duplicate(true)
@@ -823,8 +825,148 @@ func set_race_penalties(file: String, pens: Array) -> String:
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_string(JSON.stringify(d))
 	f.close()
+	var ledger := penalty_ledger()
+	if pens.is_empty():
+		ledger.erase(file)
+	else:
+		ledger[file] = {"ids": d.get("ids", []), "penalties": pens}
+	_save_penalty_ledger(ledger)
 	rebuild_all()
 	return "; ".join(problems)
+
+
+# ---------- Penalty ledger ----------
+# Every race's steward penalties are also kept in penalties.json in the data folder, with a copy in
+# Backups/penalties.json (outside the data folder, so it survives starting over). A race imported
+# again later (after a reset, or the same session under another file name: matched by its session
+# ids) gets its penalties back. The Penalties screen exports and imports the file.
+# {race file: {"ids": [session ids], "penalties": [...]}}
+const PENALTY_FILE := "penalties.json"
+
+
+func penalty_ledger() -> Dictionary:
+	for path in [AppPaths.file(PENALTY_FILE), AppPaths.backups().path_join(PENALTY_FILE)]:
+		if FileAccess.file_exists(path):
+			var d = JSON.parse_string(FileAccess.get_file_as_string(path))
+			if d is Dictionary:
+				return d.get("races", {})
+	return {}
+
+
+func _save_penalty_ledger(ledger: Dictionary) -> void:
+	var text := JSON.stringify({"app": "Grid Ledger", "kind": "penalties", "saved": Time.get_datetime_string_from_system(), "races": ledger}, "\t")
+	for path in [AppPaths.file(PENALTY_FILE), AppPaths.backups().path_join(PENALTY_FILE)]:
+		DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+		var f := FileAccess.open(path, FileAccess.WRITE)
+		if f != null:
+			f.store_string(text)
+			f.close()
+
+
+# Penalties already in event files (applied before the ledger existed) are added to it once.
+func _sync_penalty_ledger() -> void:
+	if not DirAccess.dir_exists_absolute(AppPaths.file("events")):
+		return
+	var ledger := penalty_ledger()
+	var changed := not FileAccess.file_exists(AppPaths.file(PENALTY_FILE)) and not ledger.is_empty()
+	for f in DirAccess.get_files_at(AppPaths.file("events")):
+		if not f.ends_with(".json"):
+			continue
+		var text := FileAccess.get_file_as_string(AppPaths.file("events/" + f))
+		if not text.contains("\"penalties\""):
+			continue
+		var d = JSON.parse_string(text)
+		if d is Dictionary and not (d.get("penalties", []) as Array).is_empty() and not ledger.has(str(d["file"])):
+			ledger[str(d["file"])] = {"ids": d.get("ids", []), "penalties": d["penalties"]}
+			changed = true
+	if changed:
+		_save_penalty_ledger(ledger)
+
+
+# The ledger's entry for a race: by file name, else by a shared session id. {} if none.
+func _ledger_entry(ledger: Dictionary, file: String, ids: Array) -> Dictionary:
+	if ledger.has(file):
+		return ledger[file]
+	for k in ledger:
+		for id in ledger[k].get("ids", []):
+			if id in ids:
+				return ledger[k]
+	return {}
+
+
+# Puts the ledger's penalties on a race about to be rated (keeping the result as imported).
+func _ledger_penalties_onto(draft: Dictionary) -> void:
+	if not draft.get("orders", {}).has("race") or draft.has("orders_original"):
+		return
+	var e := _ledger_entry(penalty_ledger(), str(draft["file"]), draft.get("ids", []))
+	if e.is_empty() or (e.get("penalties", []) as Array).is_empty():
+		return
+	draft["orders_original"] = draft["orders"].duplicate(true)
+	draft["stats_original"] = draft.get("stats", {}).duplicate(true)
+	draft["penalties"] = e["penalties"]
+	_penalise_saved(draft)
+	var ledger := penalty_ledger()
+	if not ledger.has(str(draft["file"])):   # the same race under a new file name: noted under it too
+		ledger[str(draft["file"])] = {"ids": draft.get("ids", []), "penalties": e["penalties"]}
+		_save_penalty_ledger(ledger)
+
+
+# Writes the ledger to `path` (Penalties screen: Export penalties).
+func export_penalties(path: String) -> Error:
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return FileAccess.get_open_error()
+	f.store_string(JSON.stringify({"app": "Grid Ledger", "kind": "penalties", "saved": Time.get_datetime_string_from_system(), "races": penalty_ledger()}, "\t"))
+	f.close()
+	return OK
+
+
+# Reads a penalties file and applies it: races in the file replace their penalties here, races
+# not imported yet wait in the ledger for their result file. {"applied": n, "waiting": n} or {"error"}.
+func import_penalties(path: String) -> Dictionary:
+	var d = JSON.parse_string(FileAccess.get_file_as_string(path)) if FileAccess.file_exists(path) else null
+	if not (d is Dictionary) or not (d.get("races", null) is Dictionary):
+		return {"error": "That file is not a Grid Ledger penalties file."}
+	var ledger := penalty_ledger()
+	var applied := 0
+	var waiting := 0
+	for file in d["races"]:
+		var e: Dictionary = d["races"][file]
+		ledger[str(file)] = e
+		var here := _event_with(str(file), e.get("ids", []))
+		if here == "":
+			waiting += 1
+			continue
+		var epath := AppPaths.file("events/%s.json" % here)
+		var ev = JSON.parse_string(FileAccess.get_file_as_string(epath))
+		if not (ev is Dictionary) or not ev.get("orders", {}).has("race"):
+			waiting += 1
+			continue
+		if not ev.has("orders_original"):
+			ev["orders_original"] = ev["orders"].duplicate(true)
+			ev["stats_original"] = ev.get("stats", {}).duplicate(true)
+		ev["penalties"] = e.get("penalties", [])
+		_penalise_saved(ev)
+		var f := FileAccess.open(epath, FileAccess.WRITE)
+		f.store_string(JSON.stringify(ev))
+		f.close()
+		applied += 1
+	_save_penalty_ledger(ledger)
+	if applied > 0:
+		rebuild_all()
+	return {"applied": applied, "waiting": waiting}
+
+
+# The saved event for a race file name, or one sharing a session id ("" if none).
+func _event_with(file: String, ids: Array) -> String:
+	if FileAccess.file_exists(AppPaths.file("events/%s.json" % file)):
+		return file
+	if ids.is_empty():
+		return ""
+	for id in ids:
+		if sessions_seen.has(id):
+			return str(sessions_seen[id])
+	return ""
 
 
 # Rewrites a saved event's "orders" / "stats" from its originals and its "penalties" (DQ'd drivers

@@ -86,13 +86,23 @@ const DEFAULTS := {
 	# 0.2147 -> 0.2198 actual grid): off by default; Test upgrades switches it on if it helps.
 	"ballast": 0.0,
 	"ballast_hist": 1.0,   # past pace taken without the ballast carried that day (neutral in the backtest)
+	# Costly laps (mistakes: spins, offs, big lock-ups; Fingerprint v14): each driver makes them at
+	# their own rate (pulled towards the class over Profiles.K_COSTLY laps), each losing a random
+	# amount around the class's average (about 14.5 s). Race pace and consistency come from the clean
+	# laps, so without this the forecast never has anyone make a big mistake. 0 = off, 1 = as measured.
+	# An upgrade, on since 1.0.36. Backtest on 91 races (Brier, real grid / predicted quali): off
+	# 0.2108 / 0.2254, on 0.2067 / 0.2250, 1.5x 0.2064 / 0.2248; the same on two more seeds (off
+	# 0.2093 / 0.2265, on 0.2062 / 0.2248). Clearest in GT3 (61 races: 0.2265 -> 0.2220 real grid);
+	# Hypercar (12) and LMP3 (7) too few races to tell. Kept at 1 (1.5 not clearly better).
+	"costly": 1.0,
 }
 const K_TRACK := 2.0   # sessions at a track before the driver's own history there gets half weight
 const PIT_SD := 3.0    # seconds of scatter per pit stop
 # Pit stops are not an upgrade any more: they follow the race rules (Settings > Race rules, or the
 # Predict screen), and the backtest replays every past race under its own rules.
 const UPGRADES := [["p_track", "Own history at the track"], ["p_tend", "Track tendencies"],
-	["traffic", "Traffic (multiclass)"], ["ballast", "Success ballast"], ["p_form", "Current form"]]
+	["traffic", "Traffic (multiclass)"], ["ballast", "Success ballast"], ["p_form", "Current form"],
+	["costly", "Costly laps (mistakes)"]]
 # Share of a driver's current form (Profiles.form: last 5 races vs their average) carried into the
 # next race. Backtest, 91 races: 20% / 50% / 100% of it scored 0.2343 / 0.2329 / 0.2331 Brier
 # (predicted quali; 0.2357 without), the same order with the real grid: half of it is kept.
@@ -216,6 +226,9 @@ func driver_inputs(names: Array, cls: String, before := "", course := "") -> Arr
 			"tlp": Profiles.shrunk(s["tlp"], s["n_r"], Profiles.K_RATE, cm["tlp"]),   # track-limit penalties per lap
 			"con": Profiles.shrunk(s["con"], s["n_r"], Profiles.K_RATE, cm["con"]),
 			"cons": Profiles.shrunk(s["cons"], s["n_r"], Profiles.K_CONS, cm["cons"]),
+			# costly laps per lap and what one costs in this class (seconds)
+			"costly": Profiles.shrunk(float(s["costly"]) / maxf(s["costly_n"], 1), s["costly_n"], Profiles.K_COSTLY, float(cm["costly"])),
+			"costly_cost": float(cm["costly_cost"]),
 			"fuel_rel": Profiles.shrunk(s["fuel"], s["n_fuel"], Profiles.K_PACE, 0.0),
 			"track_gap_r": fit["gap_r"],
 			"track_gap_q": fit["gap_q"],
@@ -707,6 +720,9 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 	var tl_pen := []      # penalty rate over the race
 	var con_rate := []    # contacts over the race
 	var dnf := []         # chance of retiring
+	var costly_n := []    # expected costly laps over the race
+	var costly_s := []    # seconds one costs on average
+	var costly_on := float(P.get("costly", 0.0))
 	var stops := []       # planned pit stops per driver
 	# pit stops: track["plan"] = {"pits": expected?, "fuel": x, "tyre": x, "min_stops": n}
 	var pit_loss := float(track.get("pit_loss", 0.0))
@@ -747,6 +763,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 		tl_pen.append((float(d.get("tlp", 0.0)) if float(P.get("tl_learned", 0.0)) > 0.0 else d["tl"] * P["tl_pen"]) * laps)
 		con_rate.append(d["con"] * laps)
 		dnf.append(float(d.get("dnf", 0.0)) if float(P.get("dnf", 0.0)) > 0.0 else 0.0)
+		costly_n.append(costly_on * float(d.get("costly", 0.0)) * laps)
+		costly_s.append(float(d.get("costly_cost", Profiles.COSTLY_COST)))
 	var pole := []
 	var front := []
 	var egrid := []
@@ -851,6 +869,8 @@ func simulate(inputs: Array, track: Dictionary, mode: int, sims: int, prm: Dicti
 				t += pit_loss + pit_rng.randfn(0.0, PIT_SD)
 			if tr_on > 0.0:
 				t += _traffic_loss(n_pass, s_pass) + _traffic_loss(n_passed, s_passed)
+			if costly_on > 0.0:
+				t += _traffic_loss(costly_n[i], costly_s[i])   # mistakes: a random count, each a random loss
 			if dnf[i] > 0.0 and rng.randf() < dnf[i] * (1.0 + WX_DNF_PER_CHANGE * changes):
 				t += 1.0e7 + rng.randf()   # retired: classified behind every finisher
 			tot[i] = t

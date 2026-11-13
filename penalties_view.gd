@@ -20,6 +20,8 @@ var preview := Label.new()
 var apply_btn := Button.new()
 var applied_box := VBoxContainer.new()   # every penalty applied so far, each with Undo
 
+var pen_dialog := FileDialog.new()
+
 const TYPES := [["time", "Time penalty"], ["places", "Drop positions"], ["dsq", "Disqualify"]]
 
 
@@ -108,7 +110,25 @@ func _ready() -> void:
 	export_btn.tooltip_text = "Every penalty (with positions before and after) and the corrected result of each race that has one."
 	export_btn.pressed.connect(_export)
 	ah_row.add_child(export_btn)
+	var save_btn := Button.new()
+	save_btn.text = "Save penalties file"
+	save_btn.tooltip_text = "Every race's penalties in one file (penalties.json) you can import again later.\nThey are also kept automatically in the data folder and in Backups, and a race imported again after starting over gets its penalties back."
+	save_btn.pressed.connect(_save_ledger)
+	ah_row.add_child(save_btn)
+	var load_btn := Button.new()
+	load_btn.text = "Import penalties file..."
+	load_btn.tooltip_text = "Apply a saved penalties file. Races already here get its penalties; races not imported yet get them when their result file is imported."
+	load_btn.pressed.connect(func():
+		pen_dialog.current_dir = AppPaths.exports()
+		pen_dialog.popup_centered_ratio(0.6))
+	ah_row.add_child(load_btn)
 	add_child(ah_row)
+	pen_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	pen_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	pen_dialog.filters = PackedStringArray(["*.json ; Penalties files"])
+	pen_dialog.use_native_dialog = true
+	pen_dialog.file_selected.connect(_load_ledger)
+	add_child(pen_dialog)
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size = Vector2(0, 150)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -408,6 +428,34 @@ func _export() -> void:
 		OS.shell_open(dir)
 	else:
 		notice.emit("Export failed (error %d)" % err)
+
+
+# Every race's penalties in one file, in Exports.
+func _save_ledger() -> void:
+	if Elo.penalty_ledger().is_empty():
+		notice.emit("No penalties to save yet.")
+		return
+	var dir := AppPaths.exports()
+	DirAccess.make_dir_recursive_absolute(dir)
+	var path := "%s/penalties_%s.json" % [dir, Time.get_datetime_string_from_system().replace(":", "-")]
+	var err := Elo.export_penalties(path)
+	if err == OK:
+		notice.emit("Penalties saved: " + path)
+		OS.shell_open(dir)
+	else:
+		notice.emit("Could not save the penalties (error %d)" % err)
+
+
+func _load_ledger(path: String) -> void:
+	var r := Elo.import_penalties(path)
+	if r.has("error"):
+		notice.emit(str(r["error"]))
+		return
+	notice.emit("Penalties imported: %d race%s updated%s." % [r["applied"], "" if int(r["applied"]) == 1 else "s",
+		", %d waiting for their result file" % r["waiting"] if int(r["waiting"]) > 0 else ""])
+	if shell != null and int(r["applied"]) > 0:
+		shell.data_changed()
+	refresh()
 
 
 func _muted(text: String) -> Label:

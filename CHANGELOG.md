@@ -4,6 +4,121 @@ The version lives in `project.godot` (Project Settings > Application > Config > 
 shows it next to its name in the sidebar and in the window title; an exported .exe takes it as its
 file and product version when those export fields are left empty.
 
+## 1.1.0
+A tidier app: the same tools, easier to find. Nothing was removed.
+- Sidebar in groups: Race weekend (Import, Predict, Penalties, Graphics), League (Ratings,
+  Drivers, Profiles, Reports), then Settings and the new Data & backups at the bottom. "Review"
+  is now called Import.
+- New screen, Data & backups: back up (with the time of the last backup), restore, the penalties
+  file, Export all to Excel, Merge drivers (moved from Ratings), Re-read archived XML, Recompute
+  all, and buttons to open the data, Backups, Exports and Graphics folders. These used to sit at
+  the bottom of the sidebar.
+- Predict: the actions are now in one row at the top, always in view: Grid from latest quali,
+  Recent drivers, Predict, Save for the record, and Make the graphic (opens Graphics on the
+  forecast's image). Backtest, Fit noise, Test upgrades and the assumptions moved to a Tuning tab
+  (costly laps added to the assumptions). Lap time, the other classes and pit stops fold away
+  under "More".
+- Settings in four tabs: Championship, Ranks & grades, Look, Import. Save settings stays in view
+  below the tabs.
+- Reports: a list on the left grouped by Race, Season, Drivers and Cars, instead of a menu.
+- Graphics: the Image menu is grouped (Race weekend, Season, Drivers, Tracks); the folder path
+  became an "Open Graphics folder" button.
+- Drivers: 12 tabs became 7 (Overview, Grades, Current form, Seasons & results, Ratings,
+  Records, Tracks); tables that belong together are shown one above the other.
+
+## 1.0.38
+- Penalties now have their own file: penalties.json in the data folder, with a copy in Backups
+  (outside the data folder, so it survives starting over). Penalties already applied are copied
+  into it on the first start.
+- A race imported again (after a reset, or the same session under another file name) gets its
+  penalties back automatically.
+- Penalties screen: "Save penalties file" (to Exports) and "Import penalties file...". Races
+  already imported get the file's penalties at once; races not imported yet get them when their
+  result file comes in.
+- Settings > Telemetry file names: class tags (bits of a file name that mean a class: "HY",
+  "P3"...) and track codes ("BRN" = Brno). The telemetry window uses them to preselect the track
+  and class of every file, and says how many it recognised.
+- The app also learns track codes by itself from every telemetry file imported. A bit of a name
+  seen with two different tracks (a driver or setup name) is ignored. Learned codes are listed in
+  Settings, can be added to the list to edit them, or forgotten.
+
+## 1.0.37
+- Graphics: new image "Season story", one driver's season in one championship. Pick the season,
+  the championship and the driver (listed in standings order). "Save every driver's story" saves
+  the whole grid in one go.
+- On the image: a headline made from the driver's strongest facts ("Rookie season: quicker round
+  after round", "Fastest race pace three times, up to P2 in the championship", "From P24 to P8
+  at Road Atlanta"); up to five numbers, the most telling ones for that driver (championship,
+  best finish, then wins, podiums, fastest pace, poles, laps led, rating gained, places gained,
+  clean races); round by round (grid and finish, retirements, pole, laps led, wet races,
+  championship place after each round); race pace against the class's middle driver each round,
+  the rounds where it was the fastest, time lost to mistakes when it was 15 s or more; and three
+  beats: the high point, the toughest day, and an award from the season recap.
+- Post, story and stream sizes. Track names are shortened on it ("Road Atlanta", "Laguna Seca").
+
+## 1.0.36
+- Costly laps: the app now spots laps lost to a mistake (a spin, an off, a big lock-up): at least
+  4% slower than the driver's own usual lap, measured against the class on that same lap, so a
+  safety car or rain does not count. Invalidated laps are included. Not the start, pit laps or
+  out-laps. About one lap in 26 across the league, costing 11-12 s on average.
+- Each driver's rate of costly laps is tracked (pulled towards the class until they have a few
+  races). Not shown as a grade in the profiles.
+- Forecast: new upgrade "Costly laps (mistakes)", on. Each simulated race, a driver makes a random
+  number of mistakes at their own rate, each costing a random amount around the class average.
+  Before, the forecast only knew the clean-lap pace and small lap-to-lap scatter, so nobody ever
+  made a big mistake. Replaying 91 races: Brier 0.2108 -> 0.2067 with the real grid, 0.2254 ->
+  0.2250 with predicted quali; the same on two more sets of random draws. Clearest in GT3.
+- Lap data is read again once on the first start (new lap-data version), to measure costly laps
+  in every archived race.
+
+## 1.0.35
+- Season recap: the Most improved card no longer shows how sure the app is ("Gained 1.1% on the
+  grid this season. Next: Brown +0.8%, Bordiyan +0.7%"); the 85% bar still applies.
+
+## 1.0.34
+- Season recap: Most improved goes to the clearest improver even if they already hold another
+  award (like Cleanest driver), and the card names the next two: "Gained 0.5% on the grid this
+  season (96% sure). Next: Bordiyan +0.4%, Gonzales +0.3%".
+
+## 1.0.33
+- Season recap: Most improved is now worked out by a model of the whole season: every dry
+  qualifying and race, each session's conditions (track, heat, rubber) worked out from everyone
+  in it, a line through each driver's season, and uncertain gains (few sessions) pulled back.
+  It measures the pace a driver gained on the grid, and is only awarded when the app is at least
+  85% sure it is real (some seasons a championship has none). Card: "Gained 1.1% on the grid this
+  season (99% sure)". How it works: the "How Most Improved is decided" doc.
+- The clean race pace % from 1.0.32 is no longer used for the award (the reference laps stay).
+
+## 1.0.32
+- Reference laps from Ohne Speed's LMU laptimes sheet (the community's 100%, game patch 1.4+) for
+  every class and track, built in; a newer copy saved as Data/reference_laps.json is used instead.
+- "Clean race pace %": the average of a driver's 5 quickest race laps against the 100%: the
+  sheet's reference lap in the dry, the class's best lap of the race when wet (the sheet does not
+  cover wet conditions).
+- Season recap: Most improved uses clean race pace %, judged against the middle of the field at
+  each round (tracks sit very differently against the sheet: the whole Hypercar field was nearly 2%
+  further off at Qatar than at Fuji), as a trend through every round with 10+ clean laps. The card
+  shows both: "103.4% → 103.4% of the reference; from 0.2 under to 1.3 under the field".
+- The archived results are re-read once on start to pick this up.
+
+## 1.0.31
+- Season recap: Most improved is now about pace, not Elo: the biggest gain in race pace on the
+  class over the season (a line through the driver's pace against the class median, round by
+  round, without success ballast), at least 0.2%. Newcomers count again: learning pace is
+  improving too, and a slower driver closing the gap can win it.
+
+## 1.0.30
+- Season recap awards reworked:
+  - Cleanest driver: fewest contacts per lap raced (was per race), so Enduro distances and
+    missed laps weigh fairly.
+  - Hard charger: most places gained beyond what drivers from the same grid spots usually gain
+    that season (a driver starting at the back has more places to make up).
+  - Rookie of the year: first season in the league (any class or series), not just in the class.
+  - Most improved: only drivers with 3+ races in the class before the season (a newcomer's
+    rating climbs as it settles anyway).
+  - Mr Consistent: the steadiest lap times (lap spread on clean laps against the class in each
+    race, the driver's typical race over the season), instead of finishing places.
+
 ## 1.0.29
 - Fixed: deleting the data folder in Documents to start fresh brought back the old data from
   before the move to Documents (Godot's AppData folder), on the next start. Importing results

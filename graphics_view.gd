@@ -8,10 +8,12 @@ extends HBoxContainer
 
 signal notice(text: String)
 
-# the graphics, in A-Z order of their names (as listed in the Image menu)
-const KINDS := [["standings", "Championship standings"], ["driver", "Driver card"], ["ranks", "Driver ranks"],
-	["forecast", "Event predictions"], ["recap", "Race recap"], ["season_recap", "Season recap"], ["season", "Season scenarios"],
-	["team_season", "Team scenarios"], ["teams", "Team standings"], ["track", "Track card"]]
+# the graphics as listed in the Image menu: grouped by when they are used, A-Z within a group
+const KINDS := [["forecast", "Event predictions", "Race weekend"], ["recap", "Race recap", "Race weekend"],
+	["standings", "Championship standings", "Season"], ["season_recap", "Season recap", "Season"],
+	["season", "Season scenarios", "Season"], ["team_season", "Team scenarios", "Season"], ["teams", "Team standings", "Season"],
+	["driver", "Driver card", "Drivers"], ["ranks", "Driver ranks", "Drivers"], ["story", "Season story", "Drivers"],
+	["track", "Track card", "Tracks"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
 var UI_CFG: String:
@@ -50,6 +52,8 @@ var page_pick := OptionButton.new()     # standings on the stream size: which pa
 var batch_pages := CheckBox.new()
 var page_ticks := HFlowContainer.new()   # season recap: a tick per page, the ones Save writes       # on: Save writes every page, each marked "page x of y"
 const STREAM_PER_PAGE := 10
+var story_btn := Button.new()           # season story: every driver of the championship at once
+var _story_cache := {}                   # season story: the season recap it takes its awards from
 var batch_box := VBoxContainer.new()    # driver cards for a whole class
 var batch_series := OptionButton.new()
 var batch_class := OptionButton.new()
@@ -71,8 +75,14 @@ func _ready() -> void:
 	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	left.add_theme_constant_override("separation", 10)
 	left_scroll.add_child(left)
+	var last_group := ""
 	for k in KINDS:
+		if k[2] != last_group:
+			kind_pick.add_separator(k[2])
+			last_group = k[2]
 		kind_pick.add_item(k[1])
+		kind_pick.set_item_metadata(kind_pick.item_count - 1, k[0])
+	kind_pick.select(kind_index("standings"))   # the first item would be a group title
 	for f in FORMATS:
 		format_pick.add_item(f[0])
 	for pair in [["Image", kind_pick], ["Size", format_pick], [source_label, source_pick], [champ_label, champ_pick], [fc_label, fc_pick]]:
@@ -183,6 +193,10 @@ func _ready() -> void:
 	save_btn.theme_type_variation = "AccentButton"
 	save_btn.pressed.connect(_save)
 	left.add_child(save_btn)
+	story_btn.text = "Save every driver's story"
+	story_btn.tooltip_text = "One image per driver of this championship, in the size chosen above, in one folder."
+	story_btn.pressed.connect(_save_stories)
+	left.add_child(story_btn)
 	# all driver cards of a class at once
 	batch_box.add_theme_constant_override("separation", 6)
 	var bh := Label.new()
@@ -206,8 +220,16 @@ func _ready() -> void:
 
 	info.theme_type_variation = "Muted"
 	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	info.text = "League name, colour and logo: Settings > Graphics. Images are saved in %s." % _out_dir()
+	info.text = "League name, colour and logo: Settings > Look."
 	left.add_child(info)
+	var open_dir := Button.new()
+	open_dir.text = "Open Graphics folder"
+	open_dir.tooltip_text = "Images are saved in " + _out_dir()
+	open_dir.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	open_dir.pressed.connect(func():
+		DirAccess.make_dir_recursive_absolute(_out_dir())
+		OS.shell_open(_out_dir()))
+	left.add_child(open_dir)
 
 	kind_pick.item_selected.connect(func(_i):
 		_fill_sources()
@@ -219,6 +241,8 @@ func _ready() -> void:
 	champ_pick.item_selected.connect(func(_i):
 		if _kind() == "track":
 			_default_minutes()
+		if _kind() == "story":
+			_fill_story_drivers()
 		_render())
 	fc_label.text = "Forecast to judge it on"
 	fc_pick.tooltip_text = "The forecast the biggest surprise and the forecast line come from.\nAutomatic: the forecast saved for this race (surprise from the ratings).\nNone: the ratings only, no forecast line.\nA saved forecast: its expected places and favourite."
@@ -246,7 +270,25 @@ func refresh() -> void:
 
 # ---------- pickers ----------
 func _kind() -> String:
-	return KINDS[maxi(kind_pick.selected, 0)][0]
+	if kind_pick.selected < 0 or kind_pick.get_item_metadata(kind_pick.selected) == null:
+		return KINDS[0][0]
+	return str(kind_pick.get_item_metadata(kind_pick.selected))
+
+
+# The Image menu's entry for a kind of graphic (the menu has group titles between them).
+func kind_index(kind: String) -> int:
+	for i in kind_pick.item_count:
+		if not kind_pick.is_item_separator(i) and str(kind_pick.get_item_metadata(i)) == kind:
+			return i
+	return -1
+
+
+# Shows a kind of graphic (Predict's "Make the graphic").
+func open_kind(kind: String) -> void:
+	var i := kind_index(kind)
+	if i >= 0:
+		kind_pick.select(i)
+		kind_pick.item_selected.emit(i)
 
 
 func _fill_sources() -> void:
@@ -254,8 +296,10 @@ func _fill_sources() -> void:
 	source_pick.clear()
 	champ_label.visible = false
 	champ_pick.visible = false
-	fc_label.visible = _kind() == "recap"
-	fc_pick.visible = _kind() == "recap"
+	fc_label.visible = _kind() in ["recap", "story"]
+	fc_pick.visible = _kind() in ["recap", "story"]
+	story_btn.visible = _kind() == "story"
+	fc_label.text = "Driver" if _kind() == "story" else "Forecast to judge it on"
 	if _kind() == "recap":
 		_fill_recap_forecasts()
 	match _kind():
@@ -270,7 +314,7 @@ func _fill_sources() -> void:
 				source_pick.add_item("Saved %s: %s, %s" % [Time.get_datetime_string_from_unix_time(int(g[0]["made_at"])).replace("T", " ").left(16),
 					", ".join(classes), str(g[0].get("course", ""))])
 				source_pick.set_item_metadata(source_pick.item_count - 1, i)
-		"standings", "season", "teams", "team_season", "season_recap":
+		"standings", "season", "teams", "team_season", "season_recap", "story":
 			source_label.text = "Season"
 			var seasons := Elo.seasons()
 			for i in range(seasons.size() - 1, -1, -1):
@@ -347,7 +391,7 @@ func _fill_champs() -> void:
 	if _kind() == "recap":
 		_fill_recap_classes()
 		return
-	if not _kind() in ["standings", "season", "teams", "team_season", "season_recap"]:
+	if not _kind() in ["standings", "season", "teams", "team_season", "season_recap", "story"]:
 		return
 	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
 	champ_pick.clear()
@@ -362,6 +406,8 @@ func _fill_champs() -> void:
 		champ_pick.set_item_metadata(champ_pick.item_count - 1, k)
 		if LeagueSettings.label(str(k)) == keep:
 			champ_pick.select(champ_pick.item_count - 1)
+	if _kind() == "story":
+		_fill_story_drivers()
 
 
 # ---------- track card ----------
@@ -855,7 +901,7 @@ func _brand() -> Dictionary:
 			var ok := FileAccess.file_exists(font_path) and f.load_dynamic_font(font_path) == OK
 			_font_cache[font_path] = f if ok else null
 			if not ok:
-				notice.emit("Could not read the title font %s (Settings > Graphics): using the default font." % font_path.get_file())
+				notice.emit("Could not read the title font %s (Settings > Look > Graphics): using the default font." % font_path.get_file())
 		out["title_font"] = _font_cache[font_path]
 	var path := str(LeagueSettings.get_value("brand_logo"))
 	if path != "" and FileAccess.file_exists(path):
@@ -877,6 +923,8 @@ func _spec() -> Dictionary:
 			return _season_spec(true)
 		"season_recap":
 			return _season_recap_spec()
+		"story":
+			return _story_spec()
 		"teams":
 			return _teams_spec()
 		"recap":
@@ -893,6 +941,90 @@ func _spec() -> Dictionary:
 			var cls := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
 			return _driver_spec(source_pick.get_item_text(source_pick.selected), cls)
 	return {"kind": "standings", "title": "", "rows": [], "empty": true}
+
+
+# ---------- season story ----------
+# The drivers of the championship picked, in standings order (the one shown is kept when it raced).
+func _fill_story_drivers() -> void:
+	var keep := _story_driver()
+	fc_pick.clear()
+	if source_pick.selected < 0 or champ_pick.selected < 0:
+		return
+	var season := source_pick.get_item_text(source_pick.selected)
+	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
+	var names := SeasonStory.drivers(season, key)
+	for i in names.size():
+		fc_pick.add_item("P%d  %s" % [i + 1, Elo.pretty(str(names[i]))])
+		fc_pick.set_item_metadata(fc_pick.item_count - 1, str(names[i]))
+		if str(names[i]) == keep:
+			fc_pick.select(fc_pick.item_count - 1)
+
+
+func _story_driver() -> String:
+	return str(fc_pick.get_item_metadata(fc_pick.selected)) if fc_pick.selected >= 0 and _kind() == "story" else ""
+
+
+func _story_spec(driver := "") -> Dictionary:
+	if driver == "":
+		driver = _story_driver()
+	if source_pick.selected < 0 or champ_pick.selected < 0 or driver == "":
+		return {"kind": "story", "title": "Season story", "subtitle": "No championship results yet.", "empty": true}
+	var season := source_pick.get_item_text(source_pick.selected)
+	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
+	var ck := "%s|%s|%d|%d" % [season, key, Elo.revision, LeagueSettings.revision]
+	if not _story_cache.has(ck):
+		_story_cache.clear()
+		_story_cache[ck] = SeasonRecap.build(season, key)
+	var st := SeasonStory.build(season, key, driver, _story_cache[ck])
+	if st.is_empty():
+		return {"kind": "story", "title": Elo.pretty(driver), "subtitle": "No races in this championship.", "empty": true}
+	var code := LeagueSettings.series_code(str(st["series"]))
+	var state := "" if bool(st["final"]) else " · so far, R%d of %d" % [st["done"], st["total"]]
+	return {"kind": "story", "empty": false, "title": Elo.pretty(driver),
+		"subtitle": "%s %s story · %s%s" % [season, LeagueSettings.label(str(st["cls"])), _series_name(code), state],
+		"headline": str(st["headline"]["text"]), "tiles": st["tiles"], "rounds": st["rounds"], "beats": st["beats"]}
+
+
+# Every driver of the championship, one image each, in the size chosen.
+func _save_stories() -> void:
+	if _batch_running or source_pick.selected < 0 or champ_pick.selected < 0:
+		return
+	var season := source_pick.get_item_text(source_pick.selected)
+	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
+	var names := SeasonStory.drivers(season, key)
+	if names.is_empty():
+		return
+	_batch_running = true
+	story_btn.disabled = true
+	var dir: String = _save_target()[0]
+	var cls := _slug(LeagueSettings.label(str(Reports.season_points(season).get(key, {}).get("cls", key))))
+	DirAccess.make_dir_recursive_absolute(dir)
+	var size_px: Vector2i = FORMATS[maxi(format_pick.selected, 0)][1]
+	viewport.size = size_px
+	var saved := 0
+	for i in names.size():
+		if shell != null:
+			shell.progress(i, names.size(), "Season stories: %d of %d (%s)" % [i + 1, names.size(), Elo.pretty(str(names[i]))])
+		var sp := _story_spec(str(names[i]))
+		if bool(sp.get("empty", false)):
+			continue
+		sp["size"] = size_px
+		sp["brand"] = _brand()
+		sp["background"] = _background()
+		sp["tint"] = tint_slider.value
+		card.set_spec(sp)
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		var img := viewport.get_texture().get_image()
+		if img != null and img.save_png(dir.path_join("%s_%s_season_story%s.png" % [_slug(Elo.pretty(str(names[i]))), cls, _size_suffix()])) == OK:
+			saved += 1
+	if shell != null:
+		shell.progress_done()
+	_batch_running = false
+	story_btn.disabled = false
+	_render()
+	notice.emit("Saved %d season stories in %s" % [saved, dir])
+	OS.shell_open(dir)
 
 
 # ---------- race recap ----------
@@ -1478,7 +1610,7 @@ func _save_batch() -> void:
 # round 4 recap.
 # Saving again replaces the file of the same name.
 const CATEGORY := {"forecast": "Forecast", "standings": "Standings", "teams": "Standings",
-	"season": "Championship Scenario", "team_season": "Championship Scenario", "season_recap": "Season Recap", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks", "recap": "Recap"}
+	"season": "Championship Scenario", "team_season": "Championship Scenario", "season_recap": "Season Recap", "story": "Season Story", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks", "recap": "Recap"}
 
 
 static func _slug(s: String) -> String:
@@ -1537,7 +1669,7 @@ func _save_target() -> Array:
 	var base := kind
 	var next_dir := ""   # set for graphics about the next race (forecast, track, title fight)
 	match kind:
-		"standings", "teams", "season", "team_season", "season_recap":
+		"standings", "teams", "season", "team_season", "season_recap", "story":
 			season = source_pick.get_item_text(source_pick.selected) if source_pick.selected >= 0 else ""
 			var key := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
 			var ch: Dictionary = Reports.season_points(season).get(key, {})
@@ -1546,7 +1678,8 @@ func _save_target() -> Array:
 			var sname := _slug(_series_name(code))
 			base = {"standings": "%s_%s_standings" % [sname, cls], "teams": "%s_%s_team_standings" % [sname, cls],
 				"season": "%s_title_fight" % cls, "team_season": "%s_team_title_fight" % cls,
-				"season_recap": "%s_%s_season_recap" % [sname, cls]}[kind]
+				"season_recap": "%s_%s_season_recap" % [sname, cls],
+				"story": "%s_%s_season_story" % [_slug(Elo.pretty(_story_driver())), cls]}[kind]
 			if kind == "season" or kind == "team_season":   # about what comes next: the next round's folder
 				var total := LeagueSettings.season_rounds(code)
 				var done := int(ch.get("rounds", 0))

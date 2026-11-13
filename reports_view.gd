@@ -23,7 +23,14 @@ const REPORTS := [
 	{"name": "Head to head", "kind": "pair", "fn": "head_to_head"},
 ]
 
-var report_picker := OptionButton.new()
+# the list on the left, grouped: [group, [report names]]
+const GROUPS := [["RACE", ["Biggest movers", "Upsets", "Event detail"]],
+	["SEASON", ["Standings", "Season recap", "Rookies", "Forecast record"]],
+	["DRIVERS", ["Rating history", "Race vs quali", "Consistency", "Grid vs finish", "Ranks", "Wet weather", "Head to head"]],
+	["CARS", ["Car balance"]]]
+
+var report_picker := OptionButton.new()   # the report shown (kept in step with the list; not shown)
+var report_list := ItemList.new()
 var event_picker := OptionButton.new()
 var pair_box := HFlowContainer.new()
 var board_picker := OptionButton.new()
@@ -37,12 +44,38 @@ var _boards: Array = []   # class/session pairs for the head-to-head picker
 
 
 func _ready() -> void:
+	var cols := HBoxContainer.new()
+	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cols.add_theme_constant_override("separation", 14)
+	add_child(cols)
+	report_list.custom_minimum_size = Vector2(190, 0)
+	report_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	cols.add_child(report_list)
+	var right := VBoxContainer.new()
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.add_child(right)
 	var bar := HFlowContainer.new()
-	add_child(bar)
+	right.add_child(bar)
 	for r in REPORTS:
 		report_picker.add_item(r["name"])
 	report_picker.item_selected.connect(_on_param_changed)
+	report_picker.visible = false
 	bar.add_child(report_picker)
+	for g in GROUPS:
+		var h := report_list.add_item(g[0])
+		report_list.set_item_selectable(h, false)
+		report_list.set_item_disabled(h, true)
+		for nm in g[1]:
+			var i := report_list.add_item("   " + nm)
+			for k in REPORTS.size():
+				if REPORTS[k]["name"] == nm:
+					report_list.set_item_metadata(i, k)
+	report_list.item_selected.connect(func(i: int):
+		var k = report_list.get_item_metadata(i)
+		if k != null:
+			report_picker.select(int(k))
+			_run())
+	_sync_list()
 	event_picker.item_selected.connect(_on_param_changed)
 	bar.add_child(event_picker)
 	season_pick.item_selected.connect(_on_param_changed)
@@ -58,10 +91,17 @@ func _ready() -> void:
 	pair_box.add_child(driver_a)
 	driver_b.item_selected.connect(_on_param_changed)
 	pair_box.add_child(driver_b)
-	add_child(pair_box)
+	right.add_child(pair_box)
 
 	out_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	add_child(out_tabs)
+	right.add_child(out_tabs)
+
+
+# The list shows the report picked (also when it was picked another way).
+func _sync_list() -> void:
+	for i in report_list.item_count:
+		if report_list.get_item_metadata(i) != null and int(report_list.get_item_metadata(i)) == report_picker.selected:
+			report_list.select(i)
 
 
 # Called whenever the Reports screen is opened or the data changed

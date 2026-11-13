@@ -8,6 +8,10 @@ signal notice(text: String)
 var search := LineEdit.new()
 var picker := OptionButton.new()
 var out_tabs := TabContainer.new()
+# the profile's tables, gathered into seven tabs
+const TAB_OF := {"Seasons": "Seasons & results", "Results": "Seasons & results", "Rating history": "Ratings",
+	"Race record": "Records", "Quali record": "Records", "Track fit": "Tracks", "Track tendencies": "Tracks"}
+const TAB_ORDER := ["Overview", "Grades", "Current form", "Seasons & results", "Ratings", "Records", "Tracks"]
 var shown: Array = []   # tables currently displayed
 var _typing := Timer.new()   # the profile is redrawn once typing pauses, not on every key
 
@@ -110,9 +114,36 @@ func _show() -> void:
 	var tables := Reports.driver_profile(_picked())
 	shown = tables
 	_clear(out_tabs)
+	# tables that belong together share a tab, one above the other (TAB_OF); the rest get their own
+	var by_tab := {}
+	var order := []
 	for t in tables:
-		out_tabs.add_child(TableView.build(t))
-		out_tabs.set_tab_title(out_tabs.get_tab_count() - 1, LeagueSettings.label(t["title"]))
+		var tab: String = TAB_OF.get(str(t["title"]), str(t["title"]))
+		if not by_tab.has(tab):
+			by_tab[tab] = []
+			order.append(tab)
+		by_tab[tab].append(t)
+	order.sort_custom(func(a, b):
+		var ia := TAB_ORDER.find(a)
+		var ib := TAB_ORDER.find(b)
+		return (ia if ia >= 0 else 99) < (ib if ib >= 0 else 99))
+	for tab in order:
+		var group: Array = by_tab[tab]
+		if group.size() == 1:
+			out_tabs.add_child(TableView.build(group[0]))
+		else:
+			var v := VBoxContainer.new()
+			v.add_theme_constant_override("separation", 10)
+			for t in group:
+				var h := Label.new()
+				h.text = LeagueSettings.label(str(t["title"])).to_upper()
+				h.theme_type_variation = "SectionLabel"
+				v.add_child(h)
+				var tv := TableView.build(t)
+				tv.size_flags_stretch_ratio = clampf(float((t["rows"] as Array).size()) + 3.0, 4.0, 14.0) if not t.has("chart") else 10.0
+				v.add_child(tv)
+			out_tabs.add_child(v)
+		out_tabs.set_tab_title(out_tabs.get_tab_count() - 1, tab)
 	out_tabs.current_tab = clampi(keep, 0, maxi(out_tabs.get_tab_count() - 1, 0))
 
 

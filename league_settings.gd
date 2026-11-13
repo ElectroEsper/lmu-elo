@@ -58,6 +58,11 @@ const DEFAULTS := {
 	"calendar": [],
 	# team championships: {"season", "series" (code), "cls", "name", "drivers": [two stored names]}
 	"teams": [],
+	# Telemetry file names (Settings > Telemetry file names): bits of a name that mean a class, and
+	# bits that mean a track ({code: track name}); see telemetry_names.gd
+	"telemetry_class_tags": {"GT3": ["LMGT3"], "Hyper": ["HY", "HYP", "HYPER", "HYPERCAR", "LMH", "LMDH"],
+		"LMP3": ["P3"], "LMP2": ["P2"], "LMP2_ELMS": ["P2E", "ELMS"]},
+	"telemetry_track_codes": {},
 	"race_rules": [
 		{"series": "sc", "from": 1, "fuel": 1.0, "tyre": 1.0, "pits": false, "min_stops": 0},
 		{"series": "mc", "from": 1, "fuel": 2.0, "tyre": 2.0, "pits": true, "min_stops": 0},

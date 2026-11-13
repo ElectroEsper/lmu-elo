@@ -6,7 +6,8 @@ extends RefCounted
 ##   - season in numbers: races, different winners, most wins / poles / podiums / laps led, clean
 ##     races, the closest finish, league lap records set;
 ##   - awards picked from the results: cleanest driver, hard charger, comeback of the season,
-##     rookie of the year, most improved, underdog, iron man, Mr Consistent;
+##     rookie of the year, most improved (pace gained on the grid), underdog, iron man,
+##     Mr Consistent (lap times);
 ##   - the championship timeline (points round by round, top 5) and the turning point.
 ## Use as: var sr = SeasonRecap.build("Season 6", "Sprint GT3")
 
@@ -70,8 +71,10 @@ static func build(season: String, key: String) -> Dictionary:
 				"members": (t["drivers"] as Array).map(func(x): return str(x["name"]))}
 	out["team"] = best_team
 	var per := _per_driver(rounds, quali, cls)
+	var sessions: Array = per["_sessions"]
+	per.erase("_sessions")
 	out["numbers"] = _numbers(per, rounds, season, series, cls, drivers)
-	out["awards"] = _awards(per, drivers, standings, season, cls, done, rounds)
+	out["awards"] = _awards(per, drivers, standings, season, cls, done, rounds, sessions)
 	_timeline(out, ch, standings)
 	return out
 
@@ -161,13 +164,42 @@ static func _per_driver(rounds: Array, quali: Dictionary, cls: String) -> Dictio
 	var get_d := func(d: String) -> Dictionary:
 		if not per.has(d):
 			per[d] = {"races": 0, "inc": 0, "gained": 0, "led": 0, "poles": 0, "clean": 0, "places": [], "elo0": NAN, "elo1": NAN,
-				"laps": 0, "dnf": 0, "climb": {}, "beat": 0.0}
+				"laps": 0, "dnf": 0, "climb": {}, "beat": 0.0, "spread": [], "starts": []}
 		return per[d]
+	# every dry qualifying and race of the season, one pace per driver, for Most improved:
+	# [driver, round index, "race"/"quali", 100 x ln(lap time) without success ballast]
+	var sessions := []
+	# lap data of each race (Profiles), for the lap-time spread
+	var lap_days := {}
+	for day in Profiles.days:
+		if day.has("race_file"):
+			lap_days[str(day["race_file"])] = day
 	for ri in rounds.size():
 		var ev: Dictionary = rounds[ri]
 		var st: Dictionary = ev.get("stats", {}).get("race", {}).get(cls, {})
 		var field := (ev["changes"] as Array).filter(func(c): return c["cls"] == cls and c["sess"] == "race")
 		var lead: Dictionary = RaceRecap._lead_info(str(ev["file"])).get(cls, {})
+		# lap-time spread of each driver against the class's middle one in this race (so a twitchy
+		# track or a damp race does not count against whoever raced it)
+		var lap_rows: Dictionary = lap_days.get(str(ev["file"]), {}).get("race", {}).get("drivers", {})
+		var day_q: Dictionary = lap_days.get(str(ev["file"]), {}).get("quali", {})
+		if float(day_q.get("wet", 0.0)) <= 0.2:
+			for nm in day_q.get("drivers", {}):
+				var q: Dictionary = day_q["drivers"][nm]
+				if str(q.get("cls", "")) == cls and float(q.get("best", 0.0)) > 0.0:
+					sessions.append([nm, ri, "quali", 100.0 * log(float(q["best"])) - Predict.ballast_k_history() * float(q.get("mass", 0.0))])
+		var wet := float(lap_days.get(str(ev["file"]), {}).get("race", {}).get("wet", 0.0)) > 0.2   # wet tyres on more than a fifth of the laps
+		if not wet:
+			for nm in lap_rows:
+				var rr: Dictionary = lap_rows[nm]
+				if str(rr.get("cls", "")) == cls and float(rr.get("pace", 0.0)) > 0.0 and int(rr.get("clean_n", 99)) >= 5:
+					sessions.append([nm, ri, "race", 100.0 * log(float(rr["pace"])) - Predict.ballast_k_history() * float(rr.get("mass", 0.0))])
+		var spreads := []
+		for nm in lap_rows:
+			if str(lap_rows[nm].get("cls", "")) == cls and float(lap_rows[nm].get("cons", 0.0)) > 0.0:
+				spreads.append(float(lap_rows[nm]["cons"]))
+		spreads.sort()
+		var mid_spread: float = spreads[spreads.size() / 2] if spreads.size() >= 3 else 0.0
 		for c in ev["changes"]:
 			if c["cls"] != cls or c["sess"] != "race":
 				continue
@@ -181,7 +213,10 @@ static func _per_driver(rounds: Array, quali: Dictionary, cls: String) -> Dictio
 			var out_of_it := Reports._retired(s.get("status", ""))
 			p["laps"] += int(s.get("laps", 0))
 			p["dnf"] += 1 if out_of_it else 0
+			if mid_spread > 0.0 and lap_rows.has(d) and float(lap_rows[d].get("cons", 0.0)) > 0.0 and not out_of_it:
+				p["spread"].append([float(lap_rows[d]["cons"]), float(lap_rows[d]["cons"]) / mid_spread])
 			if g > 0 and not out_of_it:
+				p["starts"].append([g, g - int(c["pos"])])
 				p["gained"] += g - int(c["pos"])
 				if g - int(c["pos"]) > int(p["climb"].get("gain", 0)):
 					p["climb"] = {"gain": g - int(c["pos"]), "from": g, "to": int(c["pos"]), "round": ri + 1, "course": str(ev.get("course", ""))}
@@ -201,6 +236,7 @@ static func _per_driver(rounds: Array, quali: Dictionary, cls: String) -> Dictio
 		for c in q.get("changes", []):
 			if c["cls"] == cls and c["sess"] == "quali" and int(c["pos"]) == 1:
 				get_d.call(str(c["driver"]))["poles"] += 1
+	per["_sessions"] = sessions
 	return per
 
 
@@ -286,7 +322,7 @@ static func _numbers(per: Dictionary, rounds: Array, season: String, series: Str
 	return out
 
 
-static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, season: String, cls: String, done: int, rounds: Array) -> Array:
+static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, season: String, cls: String, done: int, rounds: Array, sessions := []) -> Array:
 	var out := []
 	var min_races := maxi(1, ceili(done * MIN_SHARE))
 	var eligible := per.keys().filter(func(d): return int(per[d]["races"]) >= min_races)
@@ -294,27 +330,29 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 	for i in standings.size():
 		place[standings[i]["name"]] = i + 1
 	var better := func(a, b) -> bool: return int(place.get(a, 999)) < int(place.get(b, 999))
-	# cleanest driver: fewest contacts a race (ties: more races, then higher in the standings)
+	# cleanest driver: fewest contacts per lap raced, so Enduro distances and missed laps weigh fairly
+	# (ties: more laps, then higher in the standings)
 	var clean := ""
 	for d in eligible:
+		if int(per[d]["laps"]) <= 0:
+			continue
 		if clean == "":
 			clean = d
 			continue
-		var r_d: float = float(per[d]["inc"]) / float(per[d]["races"])
-		var r_c: float = float(per[clean]["inc"]) / float(per[clean]["races"])
-		if r_d < r_c or (r_d == r_c and (per[d]["races"] > per[clean]["races"] or (per[d]["races"] == per[clean]["races"] and better.call(d, clean)))):
+		var r_d: float = float(per[d]["inc"]) / float(per[d]["laps"])
+		var r_c: float = float(per[clean]["inc"]) / float(per[clean]["laps"])
+		if r_d < r_c or (r_d == r_c and (per[d]["laps"] > per[clean]["laps"] or (per[d]["laps"] == per[clean]["laps"] and better.call(d, clean)))):
 			clean = d
 	var awarded := {}   # one award each where possible (the cleanest driver always gets theirs)
 	var rookie := ""
-	var veterans := {}
+	var veterans := {}       # raced in the league before this season (any class or series)
 	var seasons := Elo.seasons()
 	var this_i := seasons.find(season)
 	for ev in Elo.history:
 		if seasons.find(Elo.season_of(ev)) >= this_i:
 			continue   # this season or a later one
 		for c in ev["changes"]:
-			if c["cls"] == cls:
-				veterans[c["driver"]] = true
+			veterans[c["driver"]] = true
 	for r in standings:
 		if not veterans.has(r["name"]):
 			rookie = r["name"]
@@ -326,15 +364,30 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 	var open := func(d: String) -> bool: return not awarded.has(d)
 	if clean != "":
 		var n := int(per[clean]["inc"])
-		out.append({"tag": "CLEANEST DRIVER", "name": clean, "text": "%s in %d races" % ["no contact" if n == 0 else "%d contact%s" % [n, "" if n == 1 else "s"], per[clean]["races"]]})
-	# hard charger: most places gained from the grid over the season
+		out.append({"tag": "CLEANEST DRIVER", "name": clean, "text": "%s in %d laps" % ["no contact" if n == 0 else "%d contact%s" % [n, "" if n == 1 else "s"], per[clean]["laps"]]})
+	# hard charger: most places gained beyond what drivers from the same grid spots usually gain this
+	# season (a driver starting at the back has more places to make up; a pole-sitter can only lose)
+	var gx := []
+	var gy := []
+	for d in per:
+		for st in per[d]["starts"]:
+			gx.append(float(st[0]))
+			gy.append(float(st[1]))
+	var gfit := _line(gx, gy)
+	var extra := {}
+	for d in per:
+		var e := 0.0
+		for st in per[d]["starts"]:
+			e += float(st[1]) - (gfit[0] + gfit[1] * float(st[0]))
+		extra[d] = e
 	var charger := ""
 	for d in eligible.filter(open):
-		if int(per[d]["gained"]) > 0 and (charger == "" or int(per[d]["gained"]) > int(per[charger]["gained"])):
+		if float(extra[d]) >= 1.0 and (charger == "" or float(extra[d]) > float(extra[charger])):
 			charger = d
 	if charger != "":
 		awarded[charger] = true
-		out.append({"tag": "HARD CHARGER", "name": charger, "text": "+%d places from the grid in %d races" % [per[charger]["gained"], per[charger]["races"]]})
+		out.append({"tag": "HARD CHARGER", "name": charger, "text": "%+d places from the grid (%+d vs usual from those spots)" % [
+			per[charger]["gained"], roundi(float(extra[charger]))]})
 	# comeback of the season: the biggest climb in a single race (any driver, any number of races)
 	var comeback := ""
 	for d in per.keys().filter(open):
@@ -344,19 +397,26 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 		awarded[comeback] = true
 		var cb: Dictionary = per[comeback]["climb"]
 		out.append({"tag": "COMEBACK OF THE SEASON", "name": comeback, "text": "P%d → P%d at R%d %s" % [cb["from"], cb["to"], cb["round"], cb["course"]]})
-	# rookie of the year: best placed driver whose first race in the class is this season
+	# rookie of the year: best placed driver whose first league race (any class or series) is this season
 	if rookie != "":
 		var rr: Dictionary = standings[int(place[rookie]) - 1]
 		out.append({"tag": "ROOKIE OF THE YEAR", "name": rookie, "text": "P%d, %d points" % [place[rookie], rr["points"]]})
-	# most improved: biggest race rating gain over the season
-	var improved := ""
-	for d in eligible.filter(open):
-		var gain := float(per[d]["elo1"]) - float(per[d]["elo0"])
-		if gain > 0.0 and (improved == "" or gain > float(per[improved]["elo1"]) - float(per[improved]["elo0"])):
-			improved = d
-	if improved != "":
+	# most improved: who gained the most pace on the grid over the season (Improvement.fit: every dry
+	# qualifying and race, the conditions of each session taken out, a line through each driver's
+	# season, uncertain gains pulled back). Only when the app is IMPROVED_SURE sure it is real. Like
+	# the cleanest driver, it goes to the clearest improver even if they already hold an award; the
+	# next two improvers are named on the card.
+	var imp := improvement(sessions)
+	var ranked := eligible.filter(func(d): return imp.has(d) and float(imp[d]["gain"]) > 0.0)
+	ranked.sort_custom(func(a, b): return float(imp[a]["gain"]) > float(imp[b]["gain"]))
+	if not ranked.is_empty() and float(imp[ranked[0]]["sure"]) >= IMPROVED_SURE:
+		var improved: String = ranked[0]
 		awarded[improved] = true
-		out.append({"tag": "MOST IMPROVED", "name": improved, "text": "+%d Elo over the season" % roundi(float(per[improved]["elo1"]) - float(per[improved]["elo0"]))})
+		var next := PackedStringArray()
+		for d in ranked.slice(1, 3):
+			next.append("%s %+.1f%%" % [_surname(d), imp[d]["gain"]])
+		out.append({"tag": "MOST IMPROVED", "name": improved, "text": "Gained %.1f%% on the grid this season%s" % [
+			imp[improved]["gain"], ". Next: " + ", ".join(next) if not next.is_empty() else ""]})
 	# underdog: the most places better than the ratings said, over the season
 	var underdog := ""
 	for d in eligible.filter(open):
@@ -377,26 +437,301 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 		var all_rounds := int(per[iron]["races"]) == done and int(per[iron]["dnf"]) == 0
 		out.append({"tag": "IRON MAN", "name": iron, "text": "%d laps%s" % [per[iron]["laps"],
 			", every round to the flag" if all_rounds else " in %d races" % per[iron]["races"]]})
-	# Mr Consistent: the steadiest finishing places (at least 3 races, two thirds of the rounds)
+	# Mr Consistent: the steadiest lap times. Each race, the driver's lap-to-lap spread on clean laps
+	# against the middle driver of the class in that race (so twitchy tracks and damp races count the
+	# same for everyone); the season figure is the driver's typical (median) race, so one race with
+	# a spin does not decide it. At least half the rounds with lap data.
 	var steady := ""
-	var steady_sd := INF
-	for d in per.keys().filter(open):
-		var pl: Array = per[d]["places"]
-		if pl.size() < maxi(3, ceili(done * 0.67)):
+	var steady_r := INF
+	for d in eligible.filter(open):
+		var sp: Array = per[d]["spread"]
+		if sp.size() < min_races:
 			continue
-		var mean := 0.0
-		for p in pl:
-			mean += p
-		mean /= pl.size()
-		var v := 0.0
-		for p in pl:
-			v += (p - mean) * (p - mean)
-		var sd := sqrt(v / pl.size()) + mean * 0.15   # a nudge so a steady P2 beats a steady P12
-		if sd < steady_sd:
-			steady_sd = sd
+		var rel := sp.map(func(x): return x[1])
+		rel.sort()
+		var med: float = rel[rel.size() / 2] if rel.size() % 2 == 1 else (rel[rel.size() / 2 - 1] + rel[rel.size() / 2]) / 2.0
+		if med < steady_r or (med == steady_r and better.call(d, steady)):
+			steady_r = med
 			steady = d
-	if steady != "":
-		var pl: Array = per[steady]["places"]
-		var races_txt := "in all %d races" % pl.size() if pl.size() == done else "in %d of %d races" % [pl.size(), done]
-		out.append({"tag": "MR CONSISTENT", "name": steady, "text": "P%d to P%d %s" % [pl.min(), pl.max(), races_txt] if pl.min() != pl.max() else "P%d %s" % [pl.min(), races_txt]})
+	if steady != "" and steady_r < 1.0:
+		var raw := (per[steady]["spread"] as Array).map(func(x): return x[0])
+		raw.sort()
+		out.append({"tag": "MR CONSISTENT", "name": steady, "text": "%.2f%% lap spread, %d%% steadier than the class" % [
+			raw[raw.size() / 2], roundi((1.0 - steady_r) * 100.0)]})
 	return out
+
+
+# Least-squares line y = a + b x: [a, b] (b = 0 with fewer than 2 distinct x).
+static func _line(xs: Array, ys: Array) -> Array:
+	var n := xs.size()
+	if n < 2:
+		return [0.0, 0.0]
+	var mx := 0.0
+	var my := 0.0
+	for i in n:
+		mx += xs[i]
+		my += ys[i]
+	mx /= n
+	my /= n
+	var sxx := 0.0
+	var sxy := 0.0
+	for i in n:
+		sxx += (xs[i] - mx) * (xs[i] - mx)
+		sxy += (xs[i] - mx) * (ys[i] - my)
+	if sxx <= 0.0:
+		return [my, 0.0]
+	return [my - sxy / sxx * mx, sxy / sxx]
+
+
+# ---------- Most improved: pace gained on the grid over the season ----------
+# Every dry qualifying and race session gives one pace per driver (log of the lap time, so 1 = 1%
+# of lap time, without success ballast), split into: the driver's own level + their improvement x
+# how far into the season it is + the session's conditions (track, heat, rubber: the same for
+# everyone, worked out from everyone who drove in it) + luck. Driver levels and improvements
+# average 0 over the field: what everyone gains together cannot be told apart from the calendar,
+# so improvement is against the rest of the grid. A session far off the driver's own line (a
+# problem, not pace) is set aside. Uncertain gains are then pulled towards 0, by how unsure they
+# are against how much drivers really differ in improvement that season.
+# Tested on season 6 (1.0.33): improvements from races alone and from qualifying alone agree
+# (correlation +0.42 over 49 drivers); in simulated seasons it finds the real most improved
+# driver 31% of the time (comparing first races with last: 22-24%).
+const IMPROVED_SURE := 0.85       # how sure the app must be that the winner really improved
+const IMPROVED_MIN_ROUNDS := 3
+const IMPROVED_MIN_SESSIONS := 4
+
+
+## {driver: {"gain" (% on the grid, after the pull-in), "raw", "se", "sure" (0-1 that it is > 0),
+## "best" (0-1 chance of being the most improved), "sessions"}} for every driver with
+## IMPROVED_MIN_ROUNDS rounds and IMPROVED_MIN_SESSIONS dry sessions.
+static func improvement(sessions: Array) -> Dictionary:
+	var rounds := {}
+	var count := {}
+	for o in sessions:
+		rounds[o[1]] = true
+		if not count.has(o[0]):
+			count[o[0]] = {}
+		count[o[0]][str(o[1]) + o[2]] = o[1]
+	var last := 0
+	for r in rounds:
+		last = maxi(last, int(r))
+	if last < 2:
+		return {}
+	var keep := sessions.filter(func(o): return _imp_ok(sessions, o[0]))
+	return _imp_fit(keep, float(last))
+
+
+static func _imp_ok(obs: Array, d: String) -> bool:
+	var rs := {}
+	var n := 0
+	for o in obs:
+		if o[0] == d:
+			rs[o[1]] = true
+			n += 1
+	return rs.size() >= IMPROVED_MIN_ROUNDS and n >= IMPROVED_MIN_SESSIONS
+
+
+static func _imp_fit(obs: Array, last: float) -> Dictionary:
+	var drivers := {}
+	var sess := {}
+	for o in obs:
+		if not drivers.has(o[0]):
+			drivers[o[0]] = drivers.size()
+		var sk := "%d|%s" % [o[1], o[2]]
+		if not sess.has(sk):
+			sess[sk] = sess.size()
+	var nD := drivers.size()
+	var nS := sess.size()
+	if nD < 4:
+		return {}
+	var p := 2 * nD + nS
+	var sd := {"race": 0.5, "quali": 0.5}
+	var used := obs.duplicate()
+	var x := []   # solution
+	for it in 6:
+		x = _imp_solve(used, drivers, sess, nD, nS, sd, last)
+		if x.is_empty():
+			return {}
+		# luck per session type: root-mean-square of what the model leaves, corrected for the fit;
+		# a session more than 4 robust spreads off the driver's line is set aside
+		var res := {"race": [], "quali": []}
+		var all_res := []
+		for o in obs:
+			var e: float = float(o[3]) - _imp_pred(x, o, drivers, sess, nD, nS, last)
+			all_res.append(e)
+		var mad := {}
+		for k in ["race", "quali"]:
+			var a := []
+			for i in obs.size():
+				if obs[i][2] == k:
+					a.append(absf(all_res[i]))
+			a.sort()
+			mad[k] = 1.4826 * float(a[a.size() / 2]) if a.size() > 10 else sd[k]
+		var next := []
+		for i in obs.size():
+			if absf(all_res[i]) < 4.0 * maxf(float(mad[obs[i][2]]), 1e-4):
+				next.append(obs[i])
+				res[obs[i][2]].append(all_res[i])
+		var share := 1.0 - float(p - 2) / maxf(next.size(), 1.0)
+		for k in ["race", "quali"]:
+			if res[k].size() > 10:
+				var ss := 0.0
+				for e in res[k]:
+					ss += e * e
+				sd[k] = maxf(sqrt(ss / (res[k].size() * maxf(share, 0.1))), 0.05)
+		used = next
+		# drivers must still meet the minimum once the odd sessions are out: refit without the others
+		var short := drivers.keys().filter(func(d): return not _imp_ok(used, d))
+		if not short.is_empty():
+			return _imp_fit(used.filter(func(o): return not (o[0] in short)), last)
+	var cov := _imp_cov(used, drivers, sess, nD, nS, sd, last)
+	if cov.is_empty():
+		return {}
+	var raw := {}
+	var se := {}
+	var mean_se2 := 0.0
+	var mean_g := 0.0
+	for d in drivers:
+		var k: int = nD + nS + drivers[d]
+		raw[d] = -float(x[k])
+		se[d] = sqrt(maxf(float(cov[drivers[d]]), 0.0))
+		mean_se2 += se[d] * se[d] / nD
+		mean_g += raw[d] / nD
+	var var_g := 0.0
+	for d in drivers:
+		var_g += pow(raw[d] - mean_g, 2) / maxf(nD - 1, 1)
+	var tau2 := maxf(var_g - mean_se2, 0.01)   # how much drivers really differ in improvement
+	var out := {}
+	var shr := {}
+	var psd := {}
+	for d in drivers:
+		shr[d] = raw[d] * tau2 / (tau2 + se[d] * se[d])
+		psd[d] = sqrt(tau2 * se[d] * se[d] / (tau2 + se[d] * se[d]))
+	# chance of being the most improved: draws from each driver's likely range (fixed seed: the
+	# same answer every time the recap is built)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 6
+	var wins := {}
+	var names: Array = drivers.keys()
+	for i in 4000:
+		var best_d := ""
+		var best_v := -INF
+		for d in names:
+			var v: float = rng.randfn(shr[d], psd[d])
+			if v > best_v:
+				best_v = v
+				best_d = d
+		wins[best_d] = int(wins.get(best_d, 0)) + 1
+	for d in names:
+		var n := used.filter(func(o): return o[0] == d).size()
+		out[d] = {"gain": shr[d], "raw": raw[d], "se": se[d], "sure": _phi(shr[d] / maxf(psd[d], 1e-9)),
+			"best": float(wins.get(d, 0)) / 4000.0, "sessions": n}
+	return out
+
+
+static func _imp_t(o: Array, last: float) -> float:
+	return float(o[1]) / last   # round index 0 .. last
+
+
+static func _imp_pred(x: Array, o: Array, drivers: Dictionary, sess: Dictionary, nD: int, nS: int, last: float) -> float:
+	var di: int = drivers[o[0]]
+	return float(x[di]) + float(x[nD + sess["%d|%s" % [o[1], o[2]]]]) + float(x[nD + nS + di]) * _imp_t(o, last)
+
+
+# Weighted least squares with the two constraints (driver levels and improvements average 0),
+# solved as one linear system (Lagrange multipliers). Returns the parameters, or [] if singular.
+static func _imp_system(obs: Array, drivers: Dictionary, sess: Dictionary, nD: int, nS: int, sd: Dictionary, last: float) -> Array:
+	var p := 2 * nD + nS
+	var n := p + 2
+	var M := []
+	for i in n:
+		var row := []
+		row.resize(n + 1)
+		row.fill(0.0)
+		M.append(row)
+	for o in obs:
+		var w: float = 1.0 / pow(float(sd[o[2]]), 2)
+		var di: int = drivers[o[0]]
+		var idx := [di, nD + int(sess["%d|%s" % [o[1], o[2]]]), nD + nS + di]
+		var val := [1.0, 1.0, _imp_t(o, last)]
+		for a in 3:
+			for b in 3:
+				M[idx[a]][idx[b]] += w * val[a] * val[b]
+			M[idx[a]][n] += w * val[a] * float(o[3])
+	for d in nD:
+		M[d][p] = 1.0
+		M[p][d] = 1.0
+		M[nD + nS + d][p + 1] = 1.0
+		M[p + 1][nD + nS + d] = 1.0
+	return M
+
+
+static func _imp_solve(obs: Array, drivers: Dictionary, sess: Dictionary, nD: int, nS: int, sd: Dictionary, last: float) -> Array:
+	var M := _imp_system(obs, drivers, sess, nD, nS, sd, last)
+	var n := M.size()
+	if not _gauss(M, n, 1):
+		return []
+	var x := []
+	for i in 2 * nD + nS:
+		x.append(M[i][n])
+	return x
+
+
+# Variance of each driver's improvement: the matching diagonal of the inverse of the system.
+static func _imp_cov(obs: Array, drivers: Dictionary, sess: Dictionary, nD: int, nS: int, sd: Dictionary, last: float) -> Array:
+	var M := _imp_system(obs, drivers, sess, nD, nS, sd, last)
+	var n := M.size()
+	# replace the right-hand side by the unit columns of the improvement parameters
+	for i in n:
+		var row: Array = M[i]
+		row.resize(n + nD)
+		for d in nD:
+			row[n + d] = 1.0 if i == nD + nS + d else 0.0
+	if not _gauss(M, n, nD):
+		return []
+	var out := []
+	for d in nD:
+		out.append(M[nD + nS + d][n + d])
+	return out
+
+
+# Gauss-Jordan elimination with partial pivoting on an n x (n + k) system, in place.
+static func _gauss(M: Array, n: int, k: int) -> bool:
+	for c in n:
+		var piv := c
+		for r in range(c + 1, n):
+			if absf(M[r][c]) > absf(M[piv][c]):
+				piv = r
+		if absf(M[piv][c]) < 1e-12:
+			return false
+		if piv != c:
+			var tmp = M[c]
+			M[c] = M[piv]
+			M[piv] = tmp
+		var row: Array = M[c]
+		var f: float = row[c]
+		for j in n + k:
+			row[j] = float(row[j]) / f
+		for r in n:
+			if r == c:
+				continue
+			var rr: Array = M[r]
+			var g: float = rr[c]
+			if g == 0.0:
+				continue
+			for j in range(c, n + k):
+				rr[j] = float(rr[j]) - g * float(row[j])
+	return true
+
+
+# Standard normal cumulative probability (Abramowitz-Stegun 26.2.17, error below 1e-7).
+static func _phi(z: float) -> float:
+	var t := 1.0 / (1.0 + 0.2316419 * absf(z))
+	var y := 1.0 - 0.3989422804 * exp(-z * z / 2.0) * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+	return y if z >= 0.0 else 1.0 - y
+
+
+
+# The last word of a name, for short mentions ("Scarlett Brown" -> "Brown"; a "#1234" tag dropped).
+static func _surname(full: String) -> String:
+	var parts := full.split("#")[0].strip_edges().split(" ", false)
+	return parts[parts.size() - 1] if not parts.is_empty() else full
