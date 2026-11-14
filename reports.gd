@@ -900,92 +900,19 @@ const BALANCE_MIN_TRACK := 3   # entries of a car at a track before it is listed
 ## level, track by track (a small effect, about 0.2% in GT3, and only partly repeating).
 func car_balance() -> Array:
 	var tables := []
-	var classes: Array = Profiles.classes()
-	for cls in classes:
-		var keep := func(e): return season == "" or str(e.get("season", "")) == season
-		var fx := DriverGrades.car_adjusted(str(cls), "pace_rel", keep)
-		if fx["cars"].size() < 2:
+	for cls in Profiles.classes():
+		var b := CarBalance.compute(str(cls), season)
+		if b["cars"].size() < 2:
 			continue
-		# raw pace and driver level per car
-		var raw := {}
-		for key in Profiles.hist:
-			if not str(key).begins_with(str(cls) + "|"):
-				continue
-			for e in Profiles.hist[key]:
-				var r: Dictionary = e.get("r", {})
-				if r.is_empty() or not r.has("pace_rel") or not keep.call(e):
-					continue
-				var ck := DriverGrades.car_key(str(r.get("car", "")))
-				var a: Array = raw.get(ck, [0.0, 0])
-				a[0] += float(r["pace_rel"]) - Predict.ballast_k_history() * float(r.get("mass", 0.0))
-				a[1] += 1
-				raw[ck] = a
-		var se_car := float(fx["sigma"])
-		# centred on the average entry, so "level" means level with the rest of the field: the car
-		# and driver effects are only defined up to a shared offset
-		var c_mid := 0.0
-		var r_mid := 0.0
-		var n_all := 0
-		for ck in fx["cars"]:
-			c_mid += float(fx["cars"][ck]["effect"]) * int(fx["cars"][ck]["n"])
-			if raw.has(ck):
-				r_mid += float(raw[ck][0])
-			n_all += int(fx["cars"][ck]["n"])
-		c_mid /= maxi(n_all, 1)
-		r_mid /= maxi(n_all, 1)
 		var rows := []
-		var keys: Array = fx["cars"].keys()
-		keys.sort_custom(func(a, b): return float(fx["cars"][a]["effect"]) < float(fx["cars"][b]["effect"]))
-		for ck in keys:
-			var c: Dictionary = fx["cars"][ck]
-			var n := int(c["n"])
-			var as_raced := (float(raw[ck][0]) / int(raw[ck][1]) if raw.has(ck) else 0.0) - r_mid
-			var eff := float(c["effect"]) - c_mid
-			var unc := se_car / sqrt(n + DriverGrades.CAR_PRIOR)
-			var word := "about level"
-			if eff <= -2.0 * unc:
-				word = "quicker car"
-			elif eff >= 2.0 * unc:
-				word = "slower car"
-			rows.append([c["name"], n, (c["drivers"] as Dictionary).size(), "%+.2f%%" % as_raced, "%+.2f%%" % eff,
-				"%+.2f%%" % (as_raced - eff), word])
+		for c in b["cars"]:
+			rows.append([c["name"], c["n"], c["drivers"], "%+.2f%%" % c["raw"], "%+.2f%%" % c["eff"], "%+.2f%%" % c["drv"], c["word"]])
 		tables.append(_table("Car balance (%s)" % LeagueSettings.label(str(cls)),
 			["Car", "Entries", "Drivers", "As raced", "Car itself", "Its drivers", "Reading"], rows,
-			_season_note() + "Race pace against the average entry of the class, in percent, negative = quicker, without success ballast. As raced = the car's average with whoever drove it. Car itself = the same with each driver's own level taken out (worked out from every driver who raced more than one car, and every car with more than one driver); Its drivers = the difference, how much of the car's showing came from its drivers. Cars with few entries are pulled towards level. Reading: quicker / slower car = at least twice its uncertainty away from level."))
-		# by track
+			_season_note() + "League races only. Race pace against the average entry of the class, in percent, negative = quicker, without success ballast. As raced = the car's average with whoever drove it. Car itself = the same with each driver's own level taken out (worked out from every driver who raced more than one car, and every car with more than one driver); Its drivers = the difference, how much of the car's showing came from its drivers. Cars with few entries are pulled towards level. Reading: quicker / slower car = at least twice its uncertainty away from level."))
 		var trows := []
-		var courses := {}
-		for key in Profiles.hist:
-			if str(key).begins_with(str(cls) + "|"):
-				for e in Profiles.hist[key]:
-					if not (e.get("r", {}) as Dictionary).is_empty() and keep.call(e):
-						courses[str(e["course"])] = true
-		var clist: Array = courses.keys()
-		clist.sort()
-		for course in clist:
-			var keep_t := func(e): return keep.call(e) and str(e["course"]) == course
-			var ft := DriverGrades.car_adjusted(str(cls), "pace_rel", keep_t)
-			# both centred on the cars that raced here, weighted by their entries here
-			var m_here := 0.0
-			var m_usual := 0.0
-			var n_here := 0
-			for ck in ft["cars"]:
-				if fx["cars"].has(ck):
-					m_here += float(ft["cars"][ck]["effect"]) * int(ft["cars"][ck]["n"])
-					m_usual += float(fx["cars"][ck]["effect"]) * int(ft["cars"][ck]["n"])
-					n_here += int(ft["cars"][ck]["n"])
-			if n_here == 0:
-				continue
-			m_here /= n_here
-			m_usual /= n_here
-			for ck in ft["cars"]:
-				var c: Dictionary = ft["cars"][ck]
-				if int(c["n"]) < BALANCE_MIN_TRACK or not fx["cars"].has(ck):
-					continue
-				var d := (float(c["effect"]) - m_here) - (float(fx["cars"][ck]["effect"]) - m_usual)
-				var unc := float(ft["sigma"]) / sqrt(int(c["n"]) + DriverGrades.CAR_PRIOR)
-				if absf(d) >= 2.0 * unc and absf(d) >= 0.1:
-					trows.append([course, c["name"], int(c["n"]), "%+.2f%%" % d, "stronger here" if d < 0.0 else "weaker here"])
+		for t in CarBalance.by_track(str(cls), season, b, BALANCE_MIN_TRACK):
+			trows.append([t["course"], t["name"], t["n"], "%+.2f%%" % t["d"], "stronger here" if float(t["d"]) < 0.0 else "weaker here"])
 		if not trows.is_empty():
 			tables.append(_table("Car by track (%s)" % LeagueSettings.label(str(cls)),
 				["Track", "Car", "Entries here", "Vs its usual level", "Reading"], trows,

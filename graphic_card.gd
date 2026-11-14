@@ -1,7 +1,8 @@
 class_name GraphicCard
 extends Control
 ## One broadcast / social-media image, built at its exact pixel size (rendered by graphics_view.gd
-## in a SubViewport and saved as PNG). Kinds: "forecast", "standings", "ranks", "driver", "track".
+## in a SubViewport and saved as PNG). Kinds: "forecast", "standings", "ranks", "driver", "track",
+## "story", "cars"...
 ## set_spec() takes everything the image shows, already gathered:
 ##   {"kind", "size": Vector2i, "title", "subtitle", "brand": {"name", "accent": Color, "logo": Texture2D|null},
 ##    "background": Texture2D|null (a race photo, shown under a purple tint), "tint": 0..1,
@@ -125,6 +126,8 @@ func _build() -> void:
 			_build_season_recap(body)
 		"story":
 			_build_story(body)
+		"cars":
+			_build_cars(body)
 
 
 func _header() -> Control:
@@ -633,6 +636,9 @@ const STORY_UP := Color("5fd38d")
 const STORY_DOWN := Color("ef6a6a")
 
 
+var _only_raced := false   # set while the compact story's charts are made
+
+
 func _build_story(body: VBoxContainer) -> void:
 	if bool(spec.get("empty", false)):
 		return
@@ -648,9 +654,47 @@ func _build_story(body: VBoxContainer) -> void:
 		tp.add_child(tb)
 		tb.add_child(_label(str(t["value"]), 44, STORY_UP if bool(t.get("good", false)) else TEXT, "title"))
 		tb.add_child(_fit(_label(str(t["label"]), 19, MUTED, "regular")))
-		tb.add_child(_fit(_label(str(t["line"]), 19, MUTED, "regular")))
+		tb.add_child(_wrap(_label(str(t["line"]), 17, MUTED, "regular")))
 		tiles.add_child(tp)
-	var main: BoxContainer = HBoxContainer.new() if landscape else VBoxContainer.new()
+	if bool(spec.get("combined", false)):   # every championship of the season: a card for each
+		var cards := HBoxContainer.new()
+		cards.add_theme_constant_override("separation", int(12 * s))
+		body.add_child(cards)
+		for c in spec.get("cards", []):
+			var cp := _panel(PANEL, Color(0, 0, 0, 0))
+			cp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", int(12 * s))
+			cp.add_child(row)
+			var stripe := ColorRect.new()
+			stripe.color = c["color"]
+			stripe.custom_minimum_size = Vector2(6 * s, 0)
+			row.add_child(stripe)
+			var cb := VBoxContainer.new()
+			cb.add_theme_constant_override("separation", 0)
+			cb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			row.add_child(cb)
+			cb.add_child(_fit(_label(str(c["label"]).to_upper(), 19, c["color"], "bold", 2)))
+			cb.add_child(_label("P%d  ·  %d pts" % [c["place"], c["points"]], 34, TEXT, "title"))
+			cb.add_child(_wrap(_label(str(c["line"]), 18, MUTED, "regular")))
+			cards.add_child(cp)
+	# how much there is to draw: races raced, races with a pace
+	var combined := bool(spec.get("combined", false))
+	var raced := 0
+	var paced := 0
+	if combined:
+		for c in spec.get("columns", []):
+			for e in c["entries"]:
+				raced += 1 if e["raced"] else 0
+				paced += 1 if e.has("pace") else 0
+	else:
+		for r in spec.get("rounds", []):
+			raced += 1 if r["raced"] else 0
+			paced += 1 if r.has("pace") else 0
+	# a season of one or two races: only the rounds raced, the beats beside the chart
+	var compact := raced < 3
+	var side := landscape or compact
+	var main: BoxContainer = HBoxContainer.new() if side else VBoxContainer.new()
 	main.add_theme_constant_override("separation", int(16 * s))
 	main.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	body.add_child(main)
@@ -661,9 +705,16 @@ func _build_story(body: VBoxContainer) -> void:
 	charts.size_flags_stretch_ratio = 1.9
 	main.add_child(charts)
 	var tall := size.y > size.x * 1.5
-	charts.add_child(_story_chart("rounds", "ROUND BY ROUND", "hollow: grid  ·  solid: finish", 1.8 if tall else 1.25))
-	charts.add_child(_story_chart("pace", "RACE PACE VS THE GRID", "faster than the class's middle driver", 1.0))
-	var beats: BoxContainer = VBoxContainer.new() if landscape else HBoxContainer.new()
+	_only_raced = compact
+	if combined:
+		charts.add_child(_story_chart("multi", "WEEKEND BY WEEKEND" if bool(spec.get("aligned", false)) else "RACE BY RACE",
+			"colour: series  ·  hollow: grid", 1.8 if tall else 1.25))
+	else:
+		charts.add_child(_story_chart("rounds", "ROUND BY ROUND", "hollow: grid  ·  solid: finish", 1.8 if tall else 1.25))
+	if paced >= 3:   # fewer race paces than that make a near-empty chart
+		charts.add_child(_story_chart("multipace" if combined else "pace", "RACE PACE VS THE GRID", "faster than the class's middle driver", 1.0))
+	_only_raced = false
+	var beats: BoxContainer = VBoxContainer.new() if side else HBoxContainer.new()
 	beats.add_theme_constant_override("separation", int(12 * s))
 	beats.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	main.add_child(beats)
@@ -696,6 +747,11 @@ func _story_chart(mode: String, title: String, key: String, weight: float) -> Co
 	var c := StoryChart.new()
 	c.mode = mode
 	c.rows = spec.get("rounds", [])
+	c.columns = spec.get("columns", [])
+	if _only_raced:   # compact story: the rounds raced only
+		c.rows = c.rows.filter(func(r): return r["raced"])
+		c.columns = c.columns.filter(func(col): return (col["entries"] as Array).any(func(e): return e["raced"]))
+	c.rating = spec.get("rating", [])
 	c.font = _font("regular")
 	c.bold = _font("bold")
 	c.px = s
@@ -707,9 +763,89 @@ func _story_chart(mode: String, title: String, key: String, weight: float) -> Co
 	c.rain = RAIN_BLUE
 	c.panel = PANEL
 	c.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	c.custom_minimum_size = Vector2(0, (190 if mode == "rounds" else 150) * s)
+	c.custom_minimum_size = Vector2(0, (190 if mode in ["rounds", "multi"] else (120 if mode == "rating" else 150)) * s)
 	v.add_child(c)
 	return p
+
+
+# ---------- car balance ----------
+# spec: CarBalance.graphic() — "headline", "tiles", "cars", "scale", "thin", "beats".
+func _build_cars(body: VBoxContainer) -> void:
+	if bool(spec.get("empty", false)):
+		return
+	body.add_child(_wrap(_label(str(spec.get("headline", "")), 32, TEXT, "bold")))
+	var tiles := HBoxContainer.new()
+	tiles.add_theme_constant_override("separation", int(12 * s))
+	body.add_child(tiles)
+	for t in spec.get("tiles", []):
+		var tp := _panel(PANEL, Color(0, 0, 0, 0))
+		tp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var tb := VBoxContainer.new()
+		tb.add_theme_constant_override("separation", 0)
+		tp.add_child(tb)
+		var tone: Color = {"up": STORY_UP, "down": STORY_DOWN}.get(str(t.get("tone", "")), TEXT)
+		tb.add_child(_label(str(t["value"]), 44, tone if str(t["value"]) != "0" else TEXT, "title"))
+		tb.add_child(_fit(_label(str(t["label"]), 19, MUTED, "regular")))
+		tb.add_child(_wrap(_label(str(t["line"]), 17, MUTED, "regular")))
+		tiles.add_child(tp)
+	var main: BoxContainer = HBoxContainer.new() if landscape else VBoxContainer.new()
+	main.add_theme_constant_override("separation", int(14 * s))
+	main.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(main)
+	var n_cars: int = spec.get("cars", []).size()
+	var p := _panel(PANEL, Color(0, 0, 0, 0))
+	p.size_flags_vertical = Control.SIZE_EXPAND_FILL if n_cars >= 8 or landscape else Control.SIZE_FILL   # a few cars: no stretched rows
+	p.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	p.size_flags_stretch_ratio = 2.2
+	main.add_child(p)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", int(6 * s))
+	p.add_child(v)
+	var head := HBoxContainer.new()
+	head.add_child(_fit(_label("RACE PACE BY CAR", 20, accent, "bold", 2)))
+	head.add_child(_label("hollow: as raced  ·  solid: the car itself", 17, MUTED, "regular", 0, 0.0, HORIZONTAL_ALIGNMENT_RIGHT))
+	v.add_child(head)
+	var key := HBoxContainer.new()
+	key.add_theme_constant_override("separation", int(18 * s))
+	for k in [["● quicker car", STORY_UP], ["● about level", TEXT], ["● slower car", STORY_DOWN]]:
+		key.add_child(_label(str(k[0]), 17, k[1], "regular"))
+	v.add_child(key)
+	var c := CarBalanceChart.new()
+	c.cars = spec.get("cars", [])
+	c.span = float(spec.get("scale", 0.6))
+	c.thin = int(spec.get("thin", 5))
+	c.font = _font("regular")
+	c.bold = _font("bold")
+	c.px = s
+	c.text_color = TEXT
+	c.muted = MUTED
+	c.up = STORY_UP
+	c.down = STORY_DOWN
+	c.panel = PANEL
+	c.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	c.custom_minimum_size = Vector2(0, (30 + (38 if n_cars >= 8 else 64) * c.cars.size()) * s)
+	v.add_child(c)
+	var notes: Array = spec.get("beats", []).duplicate()
+	if n_cars < 8 and not landscape:   # room to spare: how to read the chart
+		notes.append({"kind": "how", "head": "HOW TO READ IT", "title": "Car or drivers?",
+			"text": "Solid dot: the car itself, each driver's own level taken out (from the drivers who raced more than one car). Hollow ring: the car as raced. The line between them: what its drivers added or took away."})
+	var stacked := landscape or notes.size() > 3
+	var beats: BoxContainer = VBoxContainer.new() if stacked else HBoxContainer.new()
+	beats.add_theme_constant_override("separation", int(12 * s))
+	beats.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	main.add_child(beats)
+	var heads := {"up": ["▲ ", STORY_UP], "down": ["▼ ", STORY_DOWN], "note": ["● ", accent], "how": ["", HEAD.lightened(0.3)]}
+	for b in notes:
+		var bp := _panel(PANEL, Color(0, 0, 0, 0))
+		bp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var bb := VBoxContainer.new()
+		bb.add_theme_constant_override("separation", int(4 * s))
+		bp.add_child(bb)
+		var h: Array = heads.get(str(b["kind"]), heads["note"])
+		bb.add_child(_wrap(_label(str(h[0]) + str(b["head"]), 18, h[1], "bold", 2)))
+		bb.add_child(_wrap(_label(str(b["title"]), 24, TEXT, "bold")))
+		bb.add_child(_wrap(_label(str(b["text"]), 20, MUTED, "regular")))
+		beats.add_child(bp)
 
 
 # ---------- season scenarios ----------

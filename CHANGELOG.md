@@ -4,6 +4,53 @@ The version lives in `project.godot` (Project Settings > Application > Config > 
 shows it next to its name in the sidebar and in the window title; an exported .exe takes it as its
 file and product version when those export fields are left empty.
 
+## 1.1.4
+- Predict, "Save for the record" with every class: all the classes are saved with one time, so
+  they always stay one forecast (in the Event predictions and Race recap menus). Before, a save
+  that crossed a second could split them in two. The notice now says "Saved the forecast
+  (2 classes)".
+
+## 1.1.3
+- New graphic: Car balance ("Which car is quick?"), under Graphics > Tracks & cars. Pick the
+  class and the season (all seasons first). Each car gets a row with two dots: hollow is the car
+  as raced, solid is the car itself with its drivers' level taken out, quicker to the right. At
+  the end of a row: how much its drivers lifted it or held it back. Cars with fewer than 5
+  entries are faded.
+- Above the chart: a headline (quickest and slowest car, or "a close field"), the number of cars
+  and entries, the gap from quickest to slowest (in % and seconds a lap), and the quicker and
+  slower cars.
+- Below it: the car better than its results, the car flattered by its drivers (both need 5
+  entries and 2 drivers), and a track note or the cars with too few entries. A class with few
+  cars also gets a "how to read it" note.
+- Saved to Graphics/<round>/League/Car Balance/<class>_car_balance_<season>.
+- The Car balance report and the graphic share one calculation, so they always show the same
+  numbers. The report note now says it uses league races only.
+
+## 1.1.2
+- Combined season story: race pace vs the grid replaces the rating chart, one bar per
+  championship in its series colour, as on the single story. The rating change stays in its tile.
+- Season story: the pace chart is left out when fewer than 3 races have a race pace (it was
+  nearly empty after retirements).
+- Season story: a driver who raced fewer than half of a championship's rounds gets a headline from
+  their best results instead of the championship place ("Won the Enduro at Lusail from pole,
+  2 podiums in 3 races", "A single start, P12 at Fuji from P19").
+- Season story: a season of one or two races is laid out compact: only the rounds raced, with the
+  high point and the rest beside the chart.
+
+## 1.1.1
+- Season story: new "All championships" entry at the top of the championship menu. A driver who
+  raced several championships that season (for example Endurance GT3 and Sprint GT3) gets one
+  story across all of them; a driver of one championship gets their usual story. The driver list
+  then shows the whole season, A-Z, with the number of championships each raced.
+- On the combined story: the headline across championships ("Rookie season: P3 in Endurance GT3,
+  P5 in Sprint GT3, rating +189"); totals (races, best finish, podiums, poles, laps led, rating);
+  a card per championship; weekend by weekend with each championship in its own colour side by
+  side (race by race in date order when the calendars differ); the rating through the season,
+  every race of every series counting (one line per class); the best and toughest weekend; and
+  every award ("Rookie of the Year ×2").
+- Season story headlines now combine the two strongest facts and say "Runner-up" for P2 at the
+  end of a season ("Runner-up: 1 race win, fastest race pace three times").
+
 ## 1.1.0
 A tidier app: the same tools, easier to find. Nothing was removed.
 - Sidebar in groups: Race weekend (Import, Predict, Penalties, Graphics), League (Ratings,

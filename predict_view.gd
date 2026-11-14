@@ -816,11 +816,12 @@ func _save_forecast() -> void:
 	if _last_results.is_empty():
 		return
 	var n := 0
+	var made := int(Time.get_unix_time_from_system())   # one time for every class: they stay one forecast
 	for entry in _last_results:
-		if Predict.save_forecast(entry["res"], entry["cls"], _current_series(), _last_mode) != "":
+		if Predict.save_forecast(entry["res"], entry["cls"], _current_series(), _last_mode, made) != "":
 			n += 1
 	save_btn.disabled = true   # once per forecast
-	notice.emit("Saved %d forecast%s. They are scored in Reports > Forecast record once the race's results are imported." % [n, "" if n == 1 else "s"])
+	notice.emit(("Saved the forecast (%d classes). " % n if n > 1 else "Saved the forecast. ") + "It is scored in Reports > Forecast record, class by class, once the race's results are imported.")
 
 
 # Column titles and widths; with several classes an "Overall" column is added.

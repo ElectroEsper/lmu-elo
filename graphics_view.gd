@@ -13,7 +13,7 @@ const KINDS := [["forecast", "Event predictions", "Race weekend"], ["recap", "Ra
 	["standings", "Championship standings", "Season"], ["season_recap", "Season recap", "Season"],
 	["season", "Season scenarios", "Season"], ["team_season", "Team scenarios", "Season"], ["teams", "Team standings", "Season"],
 	["driver", "Driver card", "Drivers"], ["ranks", "Driver ranks", "Drivers"], ["story", "Season story", "Drivers"],
-	["track", "Track card", "Tracks"]]
+	["cars", "Car balance", "Tracks & cars"], ["track", "Track card", "Tracks & cars"]]
 const FORMATS := [["Instagram post (1080 x 1350)", Vector2i(1080, 1350)], ["Instagram story (1080 x 1920)", Vector2i(1080, 1920)],
 	["Stream (1920 x 1080)", Vector2i(1920, 1080)]]
 var UI_CFG: String:
@@ -353,6 +353,14 @@ func _fill_sources() -> void:
 			champ_label.text = "Class"
 			champ_label.visible = true
 			champ_pick.visible = true
+		"cars":
+			source_label.text = "Class"
+			for c in Profiles.classes():
+				source_pick.add_item(LeagueSettings.label(str(c)))
+				source_pick.set_item_metadata(source_pick.item_count - 1, c)
+			champ_label.text = "Season"
+			champ_label.visible = true
+			champ_pick.visible = true
 		"track":
 			source_label.text = "Track"
 			for c in _track_courses():
@@ -391,6 +399,19 @@ func _fill_champs() -> void:
 	if _kind() == "recap":
 		_fill_recap_classes()
 		return
+	if _kind() == "cars":   # every season together first: a single season is thin
+		var keep_s := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
+		champ_pick.clear()
+		champ_pick.add_item("All seasons")
+		champ_pick.set_item_metadata(0, "")
+		var seasons := Elo.seasons()
+		for i in range(seasons.size() - 1, -1, -1):
+			champ_pick.add_item(str(seasons[i]))
+			champ_pick.set_item_metadata(champ_pick.item_count - 1, str(seasons[i]))
+		for i in champ_pick.item_count:
+			if champ_pick.get_item_text(i) == keep_s:
+				champ_pick.select(i)
+		return
 	if not _kind() in ["standings", "season", "teams", "team_season", "season_recap", "story"]:
 		return
 	var keep := champ_pick.get_item_text(champ_pick.selected) if champ_pick.selected >= 0 else ""
@@ -401,8 +422,10 @@ func _fill_champs() -> void:
 	var champs := Reports.team_points(src) if _kind() in ["teams", "team_season"] else Reports.season_points(src)
 	var keys := champs.keys()
 	keys.sort()
+	if _kind() == "story" and keys.size() > 1:   # one story across every championship a driver raced
+		keys.push_front(SeasonStory.ALL)
 	for k in keys:
-		champ_pick.add_item(LeagueSettings.label(str(k)))
+		champ_pick.add_item("All championships" if k == SeasonStory.ALL else LeagueSettings.label(str(k)))
 		champ_pick.set_item_metadata(champ_pick.item_count - 1, k)
 		if LeagueSettings.label(str(k)) == keep:
 			champ_pick.select(champ_pick.item_count - 1)
@@ -931,6 +954,8 @@ func _spec() -> Dictionary:
 			return _recap_spec()
 		"ranks":
 			return _ranks_spec()
+		"cars":
+			return _cars_spec()
 		"track":
 			var ts := _track_spec()
 			ts["corner_numbers"] = corners_check.button_pressed
@@ -952,6 +977,14 @@ func _fill_story_drivers() -> void:
 		return
 	var season := source_pick.get_item_text(source_pick.selected)
 	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
+	if key == SeasonStory.ALL:   # everyone of the season, A-Z, with how many championships they raced
+		for d in SeasonStory.season_drivers(season):
+			var n := SeasonStory.championships_of(season, str(d)).size()
+			fc_pick.add_item("%s%s" % [Elo.pretty(str(d)), "  (%d championships)" % n if n > 1 else ""])
+			fc_pick.set_item_metadata(fc_pick.item_count - 1, str(d))
+			if str(d) == keep:
+				fc_pick.select(fc_pick.item_count - 1)
+		return
 	var names := SeasonStory.drivers(season, key)
 	for i in names.size():
 		fc_pick.add_item("P%d  %s" % [i + 1, Elo.pretty(str(names[i]))])
@@ -971,11 +1004,29 @@ func _story_spec(driver := "") -> Dictionary:
 		return {"kind": "story", "title": "Season story", "subtitle": "No championship results yet.", "empty": true}
 	var season := source_pick.get_item_text(source_pick.selected)
 	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
-	var ck := "%s|%s|%d|%d" % [season, key, Elo.revision, LeagueSettings.revision]
-	if not _story_cache.has(ck):
+	var rev := "%d|%d" % [Elo.revision, LeagueSettings.revision]
+	if str(_story_cache.get("_rev", "")) != rev:
 		_story_cache.clear()
-		_story_cache[ck] = SeasonRecap.build(season, key)
-	var st := SeasonStory.build(season, key, driver, _story_cache[ck])
+		_story_cache["_rev"] = rev
+	var recap_of := func(k: String) -> Dictionary:
+		var ck := season + "|" + k
+		if not _story_cache.has(ck):
+			_story_cache[ck] = SeasonRecap.build(season, k)
+		return _story_cache[ck]
+	if key == SeasonStory.ALL:
+		var recaps := {}
+		for k in SeasonStory.championships_of(season, driver):
+			recaps[k] = recap_of.call(k)
+		var cs := SeasonStory.build_combined(season, driver, recaps)
+		if cs.is_empty():
+			return {"kind": "story", "title": Elo.pretty(driver), "subtitle": "No races this season.", "empty": true}
+		if cs.has("combined"):
+			return {"kind": "story", "empty": false, "combined": true, "title": Elo.pretty(driver),
+				"subtitle": "%s story · %s" % [season, " + ".join(PackedStringArray((cs["stories"] as Array).map(func(x): return str(x["label"]))))],
+				"headline": str(cs["headline"]["text"]), "tiles": cs["tiles"], "columns": cs["columns"], "rating": cs["rating"],
+				"cards": cs["cards"], "beats": cs["beats"], "aligned": cs["aligned"]}
+		key = str(cs["key"])   # one championship only: its own story
+	var st := SeasonStory.build(season, key, driver, recap_of.call(key))
 	if st.is_empty():
 		return {"kind": "story", "title": Elo.pretty(driver), "subtitle": "No races in this championship.", "empty": true}
 	var code := LeagueSettings.series_code(str(st["series"]))
@@ -991,13 +1042,13 @@ func _save_stories() -> void:
 		return
 	var season := source_pick.get_item_text(source_pick.selected)
 	var key := str(champ_pick.get_item_metadata(champ_pick.selected))
-	var names := SeasonStory.drivers(season, key)
+	var names := SeasonStory.season_drivers(season) if key == SeasonStory.ALL else SeasonStory.drivers(season, key)
 	if names.is_empty():
 		return
 	_batch_running = true
 	story_btn.disabled = true
 	var dir: String = _save_target()[0]
-	var cls := _slug(LeagueSettings.label(str(Reports.season_points(season).get(key, {}).get("cls", key))))
+	var cls := _slug(LeagueSettings.label(str(Reports.season_points(season).get(key, {}).get("cls", key)))) if key != SeasonStory.ALL else "season"
 	DirAccess.make_dir_recursive_absolute(dir)
 	var size_px: Vector2i = FORMATS[maxi(format_pick.selected, 0)][1]
 	viewport.size = size_px
@@ -1366,6 +1417,20 @@ func _standings_spec() -> Dictionary:
 	return sp
 
 
+func _cars_spec() -> Dictionary:
+	if source_pick.selected < 0:
+		return {"kind": "cars", "title": "Which car is quick?", "subtitle": "No league races with lap data yet.", "empty": true}
+	var cls := str(source_pick.get_item_metadata(source_pick.selected))
+	var season := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
+	var sp := CarBalance.graphic(cls, season)
+	sp["kind"] = "cars"
+	sp["title"] = "Which car is quick?"
+	sp["subtitle"] = "%s car balance · %s" % [LeagueSettings.label(cls), season if season != "" else "all seasons"]
+	if bool(sp["empty"]):
+		sp["subtitle"] += " · fewer than two cars with lap data"
+	return sp
+
+
 func _ranks_spec() -> Dictionary:
 	if source_pick.selected < 0:
 		return {"kind": "ranks", "title": "Driver ranks", "subtitle": "No ranked drivers yet.", "tiers": [], "empty": true}
@@ -1610,7 +1675,7 @@ func _save_batch() -> void:
 # round 4 recap.
 # Saving again replaces the file of the same name.
 const CATEGORY := {"forecast": "Forecast", "standings": "Standings", "teams": "Standings",
-	"season": "Championship Scenario", "team_season": "Championship Scenario", "season_recap": "Season Recap", "story": "Season Story", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks", "recap": "Recap"}
+	"season": "Championship Scenario", "team_season": "Championship Scenario", "season_recap": "Season Recap", "story": "Season Story", "track": "Track", "driver": "Driver Cards", "ranks": "Ranks", "recap": "Recap", "cars": "Car Balance"}
 
 
 static func _slug(s: String) -> String:
@@ -1674,7 +1739,7 @@ func _save_target() -> Array:
 			var key := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
 			var ch: Dictionary = Reports.season_points(season).get(key, {})
 			code = LeagueSettings.series_code(str(ch.get("series", "")))
-			var cls := _slug(LeagueSettings.label(str(ch.get("cls", key))))
+			var cls := _slug(LeagueSettings.label(str(ch.get("cls", key)))) if key != SeasonStory.ALL else "all_championships"
 			var sname := _slug(_series_name(code))
 			base = {"standings": "%s_%s_standings" % [sname, cls], "teams": "%s_%s_team_standings" % [sname, cls],
 				"season": "%s_title_fight" % cls, "team_season": "%s_team_title_fight" % cls,
@@ -1714,6 +1779,10 @@ func _save_target() -> Array:
 				var sname := str(rc["series"])
 				var rdir := AppPaths.round_folder(str(rc["season"]), int(rc["round"]))
 				return [_out_dir().path_join(rdir).path_join(sname if sname != "" else "League").path_join(CATEGORY["recap"]), base]
+		"cars":
+			var sea := str(champ_pick.get_item_metadata(champ_pick.selected)) if champ_pick.selected >= 0 else ""
+			base = "%s_car_balance_%s" % [_slug(source_pick.get_item_text(source_pick.selected)) if source_pick.selected >= 0 else "cars",
+				_slug(sea) if sea != "" else "all_seasons"]
 		"ranks":
 			base = "%s_ranks" % _slug(LeagueSettings.label(source_pick.get_item_text(source_pick.selected))) if source_pick.selected >= 0 else "ranks"
 	var rdir := next_dir if next_dir != "" else _round_folder(season, code)

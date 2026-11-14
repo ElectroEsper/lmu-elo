@@ -497,6 +497,20 @@ func _test_starts_fade_balance() -> void:
 	var cb: Array = Reports.car_balance()
 	check(cb.size() > 0 and (cb[0]["rows"] as Array).size() >= 2 and (cb[0]["headers"] as Array).has("Car itself"),
 		"Car balance report: each car with its drivers' level taken out", str(cb.size()))
+	# the graphic reads the same numbers as the report
+	var cls0 := ""
+	for c in Profiles.classes():
+		if CarBalance.compute(str(c))["cars"].size() >= 2:
+			cls0 = str(c)
+			break
+	var gsp := CarBalance.graphic(cls0)
+	var same := not bool(gsp.get("empty", true)) and (gsp["cars"] as Array).size() == (cb[0]["rows"] as Array).size()
+	if same:
+		for i in gsp["cars"].size():
+			same = same and "%+.2f%%" % gsp["cars"][i]["eff"] == str(cb[0]["rows"][i][4])
+	check(same and str(gsp["headline"]) != "" and (gsp["tiles"] as Array).size() == 4 \
+			and CarBalance.short("Porsche 911 GT3 R LMGT3") == "Porsche 911 GT3 R" and CarBalance.short("Chevrolet Corvette Z06 LMGT3.R") == "Corvette Z06",
+		"Car balance graphic: same numbers as the report, short car names", str(gsp.get("headline", "")))
 
 
 # Current form: last 5 races against the driver's own average, only from 6 races on.
@@ -1227,8 +1241,37 @@ func _test_season_scenarios() -> void:
 					story_ok = false
 					story_bad = str(d)
 			check(story_ok, "Season story builds for every driver of %s" % sk, story_bad)
+			# combined story: drivers of several championships get one page across them; others their own
+			var comb_ok := true
+			var comb_n := 0
+			var comb_bad := ""
+			for d in SeasonStory.season_drivers(sr_season):
+				var cx := SeasonStory.build_combined(sr_season, str(d))
+				var nch := SeasonStory.championships_of(sr_season, str(d)).size()
+				if nch < 2:
+					if cx.has("combined"):
+						comb_ok = false
+						comb_bad = str(d)
+					continue
+				comb_n += 1
+				if not cx.has("combined") or (cx["stories"] as Array).size() != nch or (cx["columns"] as Array).is_empty() \
+						or (cx["rating"] as Array).is_empty() or (cx["tiles"] as Array).size() < 2 or (cx["beats"] as Array).size() > 3 \
+						or str(cx["headline"]["text"]) == "":
+					comb_ok = false
+					comb_bad = str(d)
+			check(comb_ok, "Season story: one story across every championship a driver raced (%d drivers)" % comb_n, comb_bad)
 			check(SeasonStory.short("Michelin Raceway Road Atlanta") == "Road Atlanta" and SeasonStory.short("Some Track - ELMS") == "Some Track",
 				"Season story: short track names")
+			# a part-time season: the headline says the best results, not the championship place
+			var rr := func(rnd: int, course: String, grid: int, pos: int, pole := false, dnf := false) -> Dictionary:
+				return {"round": rnd, "course": course, "grid": grid, "pos": pos, "pole": pole, "dnf": dnf, "laps": 30, "raced": true}
+			var pt1 := SeasonStory._results_fact([[rr.call(3, "Laguna Seca", 5, 3), "Enduro"], [rr.call(5, "Lusail", 1, 1, true), "Enduro"], [rr.call(5, "Lusail", 2, 5), "Sprint"]])
+			var pt2 := SeasonStory._results_fact([[rr.call(1, "Fuji", 19, 12), ""]])
+			var pt3 := SeasonStory._results_fact([[rr.call(4, "Road Atlanta", 13, 20, false, true), ""], [rr.call(5, "Lusail", 10, 12), ""]])
+			var part_st := {"rounds": [rr.call(1, "Fuji", 5, 5), {"raced": false}, {"raced": false}]}
+			check(pt1 == "won the Enduro at Lusail from pole, 2 podiums in 3 races" and pt2 == "a single start, P12 at Fuji from P19" \
+					and pt3 == "best finish P12 at Lusail in 2 races" and SeasonStory._part_time(part_st),
+				"Season story: part-time headline from the best results", "%s | %s | %s" % [pt1, pt2, pt3])
 			# timeline: one point per round, never going down (points only add up... until a round is dropped)
 			var tl: Dictionary = sr.get("timeline", {})
 			var tl_ok := (tl.get("leaders", []) as Array).size() == int(sr["done"]) and not (tl.get("lines", []) as Array).is_empty()
