@@ -1106,6 +1106,21 @@ func _test_season_scenarios() -> void:
 	var rows := [mk.call("A", 50), mk.call("B", 47)]
 	var cl := SeasonScenarios.clinch_next(rows, 2, 6, pts)
 	check(int(cl["place"]) == 4, "Clinch maths: leader needs P4 or better next round (level on points, more wins)", "got P%d" % int(cl["place"]))
+	# standings countback (league rules): points, wins, 2nd places, 3rd places, poles
+	var tsa := {"points": 100, "wins": 2, "p2": 1, "p3": 3, "poles": 0}
+	var tsb := {"points": 100, "wins": 2, "p2": 1, "p3": 1, "poles": 4}
+	var tsc := {"points": 100, "wins": 2, "p2": 2, "p3": 0, "poles": 0}
+	var tsd := {"points": 100, "wins": 2, "p2": 1, "p3": 3, "poles": 1}
+	var order := [tsa, tsb, tsc, tsd, {"points": 101}]
+	order.sort_custom(func(x, y): return Reports.standing_ahead(x, y))
+	check(order[0]["points"] == 101 and order[1] == tsc and order[2] == tsd and order[3] == tsa and order[4] == tsb,
+		"Standings ties: wins, then 2nd places, then 3rd places, then poles")
+	var champs_tb := Reports.season_points(str(Elo.seasons().back())) if not Elo.seasons().is_empty() else {}
+	var keys_ok := true
+	for k in champs_tb:
+		for d in champs_tb[k]["drivers"]:
+			keys_ok = keys_ok and champs_tb[k]["drivers"][d].has("p2") and champs_tb[k]["drivers"][d].has("poles")
+	check(keys_ok, "Season points carry 2nd places, 3rd places and poles")
 	var safe := [mk.call("A", 50), {"name": "B", "points": 40, "wins": 0, "by_round": [{"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}, {"pts": 10, "pos": 30}], "alive": true}]
 	check(int(SeasonScenarios.clinch_next(safe, 2, 6, pts)["place"]) == -1, "Clinch maths: a title already out of reach is settled whatever happens")
 	# on the league data: a championship of the latest season builds, chances add up to 1
@@ -1219,7 +1234,7 @@ func _test_season_scenarios() -> void:
 			var who := {}
 			var dup := false
 			for a in sr.get("awards", []):
-				if who.has(a["name"]) and not (str(a["tag"]) in ["CLEANEST DRIVER", "MOST IMPROVED"]) and not (str(who[a["name"]]) in ["CLEANEST DRIVER", "MOST IMPROVED"]):
+				if who.has(a["name"]) and not (str(a["tag"]) in ["CLEANEST DRIVER", "MOST IMPROVED", "MISTAKE-FREE"]) and not (str(who[a["name"]]) in ["CLEANEST DRIVER", "MOST IMPROVED", "MISTAKE-FREE"]):
 					dup = true
 				who[a["name"]] = a["tag"]
 			var races_ok := false
@@ -1281,7 +1296,12 @@ func _test_season_scenarios() -> void:
 				tl_ok = tl_ok and (tl["lines"] as Array).any(func(l): return l["name"] == ld)
 			check(tl_ok, "Season recap timeline: every round, every leader on the chart")
 			var tags := (sr["awards"] as Array).map(func(a): return str(a["tag"]))
-			check(tags.has("IRON MAN") and tags.has("COMEBACK OF THE SEASON"), "Season recap awards include Iron man and Comeback of the season", str(tags))
+			# Mistake-Free (1.1.5, replaced Iron man): the fewest costly laps per 100, open to every driver
+			var mf_ok := tags.has("COMEBACK OF THE SEASON") and not tags.has("IRON MAN")
+			for a in sr["awards"]:
+				if str(a["tag"]) == "MISTAKE-FREE":
+					mf_ok = mf_ok and (str(a["text"]).begins_with("not one costly lap in ") or str(a["text"]).contains(" per 100, the class "))
+			check(mf_ok, "Season recap awards: Mistake-free instead of Iron man, Comeback of the season", str(tags))
 			# the reworked awards (1.0.30): cleanest per lap, Mr Consistent on lap times
 			var aw_ok := true
 			for a in sr["awards"]:

@@ -75,8 +75,8 @@ drivers and for teams), race recaps (with a highlight when a league lap record f
 forecast line can be judged on any saved forecast, or the ratings only), season
 recaps (per series and class, four pages: champion and top 10; championship timeline with the
 turning point; the season in numbers; awards: cleanest driver, hard charger, comeback of the
-season, rookie of the year, most improved, underdog (from outside the top 3), iron man, Mr
-Consistent; tick the pages to save; also a report),
+season, rookie of the year, most improved, underdog (from outside the top 3), mistake-free
+(fewest costly laps), Mr Consistent; tick the pages to save; also a report),
 track cards, driver cards (single or batch) and ranks, each in three sizes: Instagram post,
 Instagram story and stream (1920 × 1080). Stream standings show the whole field, 10 per page.
 

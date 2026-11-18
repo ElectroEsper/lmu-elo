@@ -4,6 +4,26 @@ The version lives in `project.godot` (Project Settings > Application > Config > 
 shows it next to its name in the sidebar and in the window title; an exported .exe takes it as its
 file and product version when those export fields are left empty.
 
+## 1.1.6
+- Standings ties follow the league's rules: level on points, more wins, then more 2nd places,
+  then more 3rd places, then more poles (before: more wins, then more podiums). The same rule is
+  used in the standings report and graphic, the team standings, the season recap, the season
+  story and the title scenarios.
+- Season 6 Sprint GT3: Michael Landry and Greg Kach are level on 235 points and 2 wins; Landry
+  has two 2nd places to Kach's one, so Landry is now champion (before: Kach, on podiums).
+- Title scenarios still look ahead with points and wins only: level on wins as well is never
+  counted as settled, because the 2nd places, 3rd places and poles still to come are unknown.
+- The standings report's note gives the tie rule.
+
+## 1.1.5
+- Season recap awards: Mistake-Free replaces Iron Man. It goes to the driver with the fewest
+  costly laps (a lap lost to an off, a spin or a big moment) per 100 laps, over at least half the
+  rounds (at least 3 races and 60 laps of lap data); ties go to less time lost. The card says
+  "not one costly lap in 154 laps", or "2 costly laps in 125 laps (1.6 per 100, the class 4.7)".
+- Mistake-Free is open to every driver, even one who already won another award, and it takes
+  no other award from them. (Iron Man skipped the driver with the most laps when they had already
+  won something, and could end up with a driver who had retired.)
+
 ## 1.1.4
 - Predict, "Save for the record" with every class: all the classes are saved with one time, so
   they always stay one forecast (in the Event predictions and Race recap menus). Before, a save

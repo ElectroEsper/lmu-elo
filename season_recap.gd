@@ -6,7 +6,7 @@ extends RefCounted
 ##   - season in numbers: races, different winners, most wins / poles / podiums / laps led, clean
 ##     races, the closest finish, league lap records set;
 ##   - awards picked from the results: cleanest driver, hard charger, comeback of the season,
-##     rookie of the year, most improved (pace gained on the grid), underdog, iron man,
+##     rookie of the year, most improved (pace gained on the grid), underdog, mistake-free (fewest costly laps),
 ##     Mr Consistent (lap times);
 ##   - the championship timeline (points round by round, top 5) and the turning point.
 ## Use as: var sr = SeasonRecap.build("Season 6", "Sprint GT3")
@@ -25,18 +25,12 @@ static func build(season: String, key: String) -> Dictionary:
 	var total := maxi(LeagueSettings.season_rounds(code) if code != "" else done, done)
 	var drivers: Dictionary = ch["drivers"]
 	var names := drivers.keys()
-	names.sort_custom(func(a, b):
-		var ea: Dictionary = drivers[a]
-		var eb: Dictionary = drivers[b]
-		if ea["points"] != eb["points"]:
-			return ea["points"] > eb["points"]
-		if ea["wins"] != eb["wins"]:
-			return ea["wins"] > eb["wins"]
-		return ea["pod"] > eb["pod"])
+	names.sort_custom(func(a, b): return Reports.standing_ahead(drivers[a], drivers[b]))
 	var standings := []
 	for d in names:
 		var e: Dictionary = drivers[d]
-		standings.append({"name": d, "points": int(e["points"]), "wins": int(e["wins"]), "pod": int(e["pod"]), "races": int(e["races"])})
+		standings.append({"name": d, "points": int(e["points"]), "wins": int(e["wins"]), "pod": int(e["pod"]), "races": int(e["races"]),
+			"p2": int(e.get("p2", 0)), "p3": int(e.get("p3", 0)), "poles": int(e.get("poles", 0))})
 	# this championship's race events, in order (round i = rounds[i - 1]), with their qualifying
 	var rounds := []
 	var quali := {}   # race file -> its qualifying event
@@ -66,7 +60,7 @@ static func build(season: String, key: String) -> Dictionary:
 		if (t["drivers"] as Array).size() < 2:
 			continue
 		if best_team.is_empty() or int(t["points"]) > int(best_team["points"]) \
-				or (int(t["points"]) == int(best_team["points"]) and int(t["wins"]) > int(best_team["wins"])):
+				or Reports.standing_ahead(t, best_team):
 			best_team = {"name": str(tn), "points": int(t["points"]), "wins": int(t["wins"]),
 				"members": (t["drivers"] as Array).map(func(x): return str(x["name"]))}
 	out["team"] = best_team
@@ -164,7 +158,7 @@ static func _per_driver(rounds: Array, quali: Dictionary, cls: String) -> Dictio
 	var get_d := func(d: String) -> Dictionary:
 		if not per.has(d):
 			per[d] = {"races": 0, "inc": 0, "gained": 0, "led": 0, "poles": 0, "clean": 0, "places": [], "elo0": NAN, "elo1": NAN,
-				"laps": 0, "dnf": 0, "climb": {}, "beat": 0.0, "spread": [], "starts": []}
+				"laps": 0, "dnf": 0, "costly": 0, "costly_n": 0, "costly_s": 0.0, "climb": {}, "beat": 0.0, "spread": [], "starts": []}
 		return per[d]
 	# every dry qualifying and race of the season, one pace per driver, for Most improved:
 	# [driver, round index, "race"/"quali", 100 x ln(lap time) without success ballast]
@@ -213,6 +207,10 @@ static func _per_driver(rounds: Array, quali: Dictionary, cls: String) -> Dictio
 			var out_of_it := Reports._retired(s.get("status", ""))
 			p["laps"] += int(s.get("laps", 0))
 			p["dnf"] += 1 if out_of_it else 0
+			if lap_rows.has(d) and (lap_rows[d] as Dictionary).has("costly_n"):
+				p["costly"] += int(lap_rows[d].get("costly", 0))
+				p["costly_n"] += int(lap_rows[d]["costly_n"])
+				p["costly_s"] += float(lap_rows[d].get("costly_s", 0.0))
 			if mid_spread > 0.0 and lap_rows.has(d) and float(lap_rows[d].get("cons", 0.0)) > 0.0 and not out_of_it:
 				p["spread"].append([float(lap_rows[d]["cons"]), float(lap_rows[d]["cons"]) / mid_spread])
 			if g > 0 and not out_of_it:
@@ -427,16 +425,28 @@ static func _awards(per: Dictionary, drivers: Dictionary, standings: Array, seas
 	if underdog != "":
 		awarded[underdog] = true
 		out.append({"tag": "UNDERDOG", "name": underdog, "text": "%d places better than the ratings said, over %d races" % [roundi(float(per[underdog]["beat"])), per[underdog]["races"]]})
-	# iron man: the most laps raced (ties: fewer retirements)
-	var iron := ""
-	for d in per.keys().filter(open):
-		if iron == "" or int(per[d]["laps"]) > int(per[iron]["laps"]) or (int(per[d]["laps"]) == int(per[iron]["laps"]) and int(per[d]["dnf"]) < int(per[iron]["dnf"])):
-			iron = d
-	if iron != "" and int(per[iron]["laps"]) > 0:
-		awarded[iron] = true
-		var all_rounds := int(per[iron]["races"]) == done and int(per[iron]["dnf"]) == 0
-		out.append({"tag": "IRON MAN", "name": iron, "text": "%d laps%s" % [per[iron]["laps"],
-			", every round to the flag" if all_rounds else " in %d races" % per[iron]["races"]]})
+	# mistake-free: the fewest costly laps (a lap lost to an off, a spin, a big moment) per 100 laps
+	# looked at, over at least half the rounds (and 3 races, 60 laps); ties: less time lost
+	var all_k := 0
+	var all_n := 0
+	for d in per:
+		if d != "_sessions":
+			all_k += int(per[d]["costly"])
+			all_n += int(per[d]["costly_n"])
+	var mf_races := maxi(3, ceili(done / 2.0))
+	var mf := ""
+	var rate := func(d: String) -> float: return 100.0 * int(per[d]["costly"]) / maxf(1.0, float(per[d]["costly_n"]))
+	for d in per.keys():   # open to every driver: a fact of the season, like the champion
+		if d == "_sessions" or int(per[d]["races"]) < mf_races or int(per[d]["costly_n"]) < 60:
+			continue
+		if mf == "" or rate.call(d) < rate.call(mf) - 0.001 or (absf(rate.call(d) - rate.call(mf)) <= 0.001 and float(per[d]["costly_s"]) < float(per[mf]["costly_s"])):
+			mf = d
+	if mf != "" and all_n > 0:   # not marked as awarded either: it takes no other award from them
+		var k := int(per[mf]["costly"])
+		var class_rate := 100.0 * all_k / all_n
+		var txt := "not one costly lap in %d laps" % int(per[mf]["costly_n"]) if k == 0 else \
+			"%s in %d laps (%.1f per 100, the class %.1f)" % ["1 costly lap" if k == 1 else "%d costly laps" % k, int(per[mf]["costly_n"]), rate.call(mf), class_rate]
+		out.append({"tag": "MISTAKE-FREE", "name": mf, "text": txt})
 	# Mr Consistent: the steadiest lap times. Each race, the driver's lap-to-lap spread on clean laps
 	# against the middle driver of the class in that race (so twitchy tracks and damp races count the
 	# same for everyone); the season figure is the driver's typical (median) race, so one race with

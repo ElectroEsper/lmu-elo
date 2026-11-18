@@ -42,13 +42,11 @@ static func build(season: String, key: String) -> Dictionary:
 		var e: Dictionary = drivers[d]
 		var pts := (e["by_round"] as Array).map(func(x): return int(x["pts"]))
 		rows.append({"name": d, "points": int(e["points"]), "wins": int(e["wins"]), "pod": int(e["pod"]),
+			"p2": int(e.get("p2", 0)), "p3": int(e.get("p3", 0)), "poles": int(e.get("poles", 0)),
 			"races": int(e["races"]), "by_round": e["by_round"],
 			"max": final_score(pts + _filled(left, p1), total),
 			"min": final_score(pts + _filled(left, 0), total)})
-	rows.sort_custom(func(a, b):
-		if a["points"] != b["points"]:
-			return a["points"] > b["points"]
-		return a["wins"] > b["wins"])
+	rows.sort_custom(func(a, b): return Reports.standing_ahead(a, b))
 	# still in the fight: can reach the best of everyone else's worst case
 	for r in rows:
 		var bar := 0
@@ -128,7 +126,9 @@ static func _safe_with(rows: Array, lead_final_pts: Array, total: int, p1: int, 
 	return true
 
 
-# Ahead at the end: more points, or level on points with more wins.
+# Ahead at the end: more points, or level on points with more wins. The rest of the countback
+# (2nd places, 3rd places, poles) is not projected: level on wins counts as not ahead, so a title is
+# never called settled on a tie it could still lose.
 static func _beats(score: int, wins: int, o_score: int, o_wins: int) -> bool:
 	return score > o_score or (score == o_score and wins > o_wins)
 
@@ -269,12 +269,10 @@ static func build_teams(season: String, key: String) -> Dictionary:
 			pts.append((dsc["rows"][i]["by_round"] as Array).map(func(x): return int(x["pts"])) if i >= 0 else [])
 		rows.append({"name": str(tn), "members": members, "member_idx": mi, "pts": pts,
 			"points": int(e["points"]), "wins": int(e["wins"]), "pod": int(e["pod"]),
+			"p2": int(e.get("p2", 0)), "p3": int(e.get("p3", 0)), "poles": int(e.get("poles", 0)),
 			"max": _pair_score(pts, [pt.call(1), pt.call(2)], left, total),
 			"min": _pair_score(pts, [0, 0], left, total)})
-	rows.sort_custom(func(a, b):
-		if a["points"] != b["points"]:
-			return a["points"] > b["points"]
-		return a["wins"] > b["wins"])
+	rows.sort_custom(func(a, b): return Reports.standing_ahead(a, b))
 	for r in rows:
 		var bar := 0
 		for o in rows:
@@ -340,7 +338,8 @@ static func _pair_score_next(pts: Array, next: Array, after: Array, left: int, t
 #     (at the last round: everything; before: only when it can already be settled there);
 #   - what keeps him in the fight at the next round, rival by rival (2+ rounds left).
 # [{"name", "place", "points", "max", "alive", "status", "lines": [...]}]. Exact maths under the
-# same rules as the standings (dropped rounds; level on points: more wins).
+# same rules as the standings (dropped rounds; level on points: more wins; a tie on wins too is
+# never counted as settled, the rest of the countback being unknown ahead of time).
 const NEEDS_MAX_LINES := 5
 const NEEDS_MAX_SHOWN := 3   # conditional place lines shown (the places checked go down the whole field)
 

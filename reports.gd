@@ -646,12 +646,7 @@ func standings() -> Array:
 			var e: Dictionary = ch["drivers"][d]
 			rows.append([0, d, e["points"], e["dropped"], e["total"], e["wins"], e["pod"], e["races"],
 				e["ballast"] if int(e["ballast"]) >= 0 else ""])
-		rows.sort_custom(func(r1, r2):
-			if r1[2] != r2[2]:
-				return r1[2] > r2[2]
-			if r1[5] != r2[5]:
-				return r1[5] > r2[5]
-			return r1[6] > r2[6])
+		rows.sort_custom(func(r1, r2): return standing_ahead(ch["drivers"][r1[1]], ch["drivers"][r2[1]]))
 		for i in rows.size():
 			rows[i][0] = i + 1
 		var drop_txt := "No dropped rounds." if drops == 0 else (
@@ -660,8 +655,8 @@ func standings() -> Array:
 		if drops > 0 and ch["rounds"] <= drops:
 			drop_txt = "Only %d round%s so far: nothing is dropped until there are more rounds than drops." % [ch["rounds"], "" if ch["rounds"] == 1 else "s"]
 		tables.append(_table(str(k), ["Pos", "Driver", "Points", "Dropped", "Total", "Wins", "Podiums", "Races", "Ballast kg"], rows,
-			"%s %s championship. %s Points for P1 onwards: %s (Settings). Ties: more wins, then more podiums. Ballast kg: success ballast carried into the next race (Settings > Success ballast)." % [
-				season, ch["series"] if ch["series"] != "" else ch["cls"], drop_txt, "-".join(PackedStringArray(POINTS.map(func(p): return str(p))))]))
+			"%s %s championship. %s Points for P1 onwards: %s (Settings). %s Ballast kg: success ballast carried into the next race (Settings > Success ballast)." % [
+				season, ch["series"] if ch["series"] != "" else ch["cls"], drop_txt, "-".join(PackedStringArray(POINTS.map(func(p): return str(p)))), TIE_NOTE]))
 	return tables
 
 
@@ -680,11 +675,16 @@ func season_points(for_season: String) -> Dictionary:
 		var series := Elo.series_of(ev)
 		var round_seen := {}
 		for c in ev["changes"]:
+			if c["sess"] == "quali" and int(c["pos"]) == 1:   # poles: the last tie-break
+				var kq := ("%s %s" % [series, c["cls"]]).strip_edges()
+				if not champs.has(kq):
+					champs[kq] = {"series": series, "cls": c["cls"], "rounds": 0, "results": {}, "poles": {}}
+				champs[kq]["poles"][str(c["driver"])] = int(champs[kq]["poles"].get(str(c["driver"]), 0)) + 1
 			if c["sess"] != "race":
 				continue
 			var k := ("%s %s" % [series, c["cls"]]).strip_edges()
 			if not champs.has(k):
-				champs[k] = {"series": series, "cls": c["cls"], "rounds": 0, "results": {}}
+				champs[k] = {"series": series, "cls": c["cls"], "rounds": 0, "results": {}, "poles": {}}
 			var ch: Dictionary = champs[k]
 			if not round_seen.has(k):
 				round_seen[k] = true
@@ -709,10 +709,14 @@ func season_points(for_season: String) -> Dictionary:
 			var pts := []
 			var wins := 0
 			var pod := 0
+			var p2 := 0
+			var p3 := 0
 			for r in res:
 				pts.append(r["pts"])
 				wins += 1 if r["pos"] == 1 else 0
 				pod += 1 if r["pos"] <= 3 else 0
+				p2 += 1 if r["pos"] == 2 else 0
+				p3 += 1 if r["pos"] == 3 else 0
 			while pts.size() < ch["rounds"]:
 				pts.append(0)   # missed rounds
 			pts.sort()
@@ -731,11 +735,29 @@ func season_points(for_season: String) -> Dictionary:
 			for r in res:
 				by_round[int(r["round"])] = {"pts": r["pts"], "pos": r["pos"]}
 			drivers[d] = {"points": total - dropped, "dropped": dropped, "total": total,
-				"wins": wins, "pod": pod, "races": res.size(), "by_round": by_round,
+				"wins": wins, "pod": pod, "p2": p2, "p3": p3, "poles": int(ch["poles"].get(d, 0)), "races": res.size(), "by_round": by_round,
 				"ballast": int(sb.get(d, {}).get("kg", 0)) if has_ballast else -1}   # kg into the next race; -1 = class has none
 		ch["drivers"] = drivers
 		ch.erase("results")
+		ch.erase("poles")
+	# a championship of qualifying only (no race yet) is not one
+	for k in champs.keys():
+		if int(champs[k]["rounds"]) == 0:
+			champs.erase(k)
 	return champs
+
+
+# Standings order: more points; level on points, the countback of the league's rules: more wins,
+# then more 2nd places, then more 3rd places, then more poles. a, b: a driver's or a team's entry
+# from season_points / team_points (or a row carrying the same keys).
+static func standing_ahead(a: Dictionary, b: Dictionary) -> bool:
+	for f in ["points", "wins", "p2", "p3", "poles"]:
+		if int(a.get(f, 0)) != int(b.get(f, 0)):
+			return int(a.get(f, 0)) > int(b.get(f, 0))
+	return false
+
+
+const TIE_NOTE := "Ties: more wins, then more 2nd places, then 3rd places, then poles."
 
 
 # Team championships of a season, from Settings > Teams: {"<series> <class>": {"series", "cls",
@@ -752,7 +774,7 @@ func team_points(for_season: String) -> Dictionary:
 		var ch: Dictionary = champs.get(key, {})
 		if not out.has(key):
 			out[key] = {"series": ch.get("series", ""), "cls": t.get("cls", ""), "rounds": int(ch.get("rounds", 0)), "teams": {}}
-		var e := {"points": 0, "dropped": 0, "wins": 0, "pod": 0, "drivers": []}
+		var e := {"points": 0, "dropped": 0, "wins": 0, "pod": 0, "p2": 0, "p3": 0, "poles": 0, "drivers": []}
 		for d in t.get("drivers", []):
 			if str(d) == "":
 				continue
@@ -761,6 +783,8 @@ func team_points(for_season: String) -> Dictionary:
 			e["dropped"] += int(de.get("dropped", 0))
 			e["wins"] += int(de.get("wins", 0))
 			e["pod"] += int(de.get("pod", 0))
+			for f in ["p2", "p3", "poles"]:
+				e[f] += int(de.get(f, 0))
 			e["drivers"].append({"name": str(d), "points": int(de.get("points", 0))})
 		out[key]["teams"][str(t.get("name", "Team"))] = e
 	return out

@@ -765,13 +765,9 @@ func _teams_spec() -> Dictionary:
 		var short := PackedStringArray((e["drivers"] as Array).map(func(d):   # surnames, for the narrow sizes
 			var parts := Elo.pretty(str(d["name"])).split(" ", false)
 			return parts[parts.size() - 1] if parts.size() > 0 else str(d["name"])))
-		rows.append({"name": str(tn), "members": " · ".join(members), "members_short": " · ".join(short), "points": e["points"], "wins": e["wins"], "pod": e["pod"], "dropped": e["dropped"]})
-	rows.sort_custom(func(a, b):
-		if a["points"] != b["points"]:
-			return a["points"] > b["points"]
-		if a["wins"] != b["wins"]:
-			return a["wins"] > b["wins"]
-		return a["pod"] > b["pod"])
+		rows.append({"name": str(tn), "members": " · ".join(members), "members_short": " · ".join(short), "points": e["points"], "wins": e["wins"], "pod": e["pod"], "dropped": e["dropped"],
+			"p2": e.get("p2", 0), "p3": e.get("p3", 0), "poles": e.get("poles", 0)})
+	rows.sort_custom(func(a, b): return Reports.standing_ahead(a, b))
 	var rounds := int(ch.get("rounds", 0))
 	var drops := LeagueSettings.drops_for(rounds)
 	var note := "After %d round%s · both drivers' points, each after their dropped round%s" % [rounds, "" if rounds == 1 else "s", "" if drops <= 1 else "s"] if drops > 0 else "After %d round%s · both drivers' points" % [rounds, "" if rounds == 1 else "s"]
@@ -1394,13 +1390,8 @@ func _standings_spec() -> Dictionary:
 	for d in ch.get("drivers", {}):
 		var e: Dictionary = ch["drivers"][d]
 		rows.append({"name": d, "points": e["points"], "wins": e["wins"], "pod": e["pod"], "dropped": e.get("dropped", 0),
-			"ballast": int(e.get("ballast", -1))})
-	rows.sort_custom(func(a, b):
-		if a["points"] != b["points"]:
-			return a["points"] > b["points"]
-		if a["wins"] != b["wins"]:
-			return a["wins"] > b["wins"]
-		return a["pod"] > b["pod"])
+			"p2": e.get("p2", 0), "p3": e.get("p3", 0), "poles": e.get("poles", 0), "ballast": int(e.get("ballast", -1))})
+	rows.sort_custom(func(a, b): return Reports.standing_ahead(a, b))
 	var drops := LeagueSettings.drops_for(int(ch.get("rounds", 0)))
 	var note := "After %d round%s" % [int(ch.get("rounds", 0)), "" if int(ch.get("rounds", 0)) == 1 else "s"]
 	if drops > 0:
